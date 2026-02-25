@@ -761,6 +761,15 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 			((int *)&header)[i] = LittleLong ( ((int *)&header)[i]);
 		}
 
+		if ( header.ident != BSP_IDENT )
+		{
+			Z_Free( gpvCachedMapDiskImage );
+			gpvCachedMapDiskImage = NULL;
+
+			Com_Error (ERR_DROP, "CM_LoadMap: %s is not a Raven BSP (bad ident 0x%x, expected 0x%x)",
+				name, header.ident, BSP_IDENT );
+		}
+
 		if ( header.version != BSP_VERSION )
 		{
 			Z_Free(	gpvCachedMapDiskImage);

@@ -25,7 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "../qcommon/q_shared.h"
 #include "../qcommon/qcommon.h"
-#include "../game/g_public.h"
+#include "../../codeJK2/game/g_public.h"
 #include "../game/bg_public.h"
 
 #ifndef SERVER_H
@@ -114,6 +114,8 @@ typedef struct client_s {
 	int				reliableSequence;
 	int				reliableAcknowledge;
 
+	int				challenge;				// SOF2: random value used for netchan XOR key
+
 	int				gamestateMessageNum;	// netchan->outgoingSequence of gamestate
 
 	usercmd_t		lastUsercmd;
@@ -133,6 +135,10 @@ typedef struct client_s {
 	clientSnapshot_t	frames[PACKET_BACKUP];	// updates can be delta'd from here
 	netchan_t		netchan;
 } client_t;
+
+// SOF2 netchan XOR wrappers (sv_net_chan.cpp)
+void		SV_Netchan_Transmit( client_t *client, msg_t *msg );
+qboolean	SV_Netchan_Process( client_t *client, msg_t *msg );
 
 //=============================================================================
 

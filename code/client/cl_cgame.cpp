@@ -32,8 +32,185 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "vmachine.h"
 #include "qcommon/stringed_ingame.h"
 #include "sys/sys_loadlib.h"
+#if !defined(G2_H_INC)
+#include "../ghoul2/G2.h"
+#endif
+#include "../codeJK2/cgame/cg_public.h"
 
 vm_t	cgvm;
+
+// SOF2: cgame is a separate struct-based DLL loaded via GetCGameAPI(), not vmMain dispatch.
+static cgame_export_t *cge          = NULL;
+static void           *cgameLibrary = NULL;
+
+// Forward declarations needed by wrapper helpers / import table below
+extern qboolean CL_GetDefaultState( int index, entityState_t *state );
+extern void CL_SetUserCmdValue( int userCmdValue, float sensitivityScale, float mPitchOverride, float mYawOverride );
+extern void CL_GetCurrentSnapshotNumber( int *snapshotNumber, int *serverTime );
+extern void AS_ParseSets( void );
+extern void Com_WriteCam( const char *text );
+// Audio / ambient set functions — must be forward-declared before any wrapper that calls them
+extern void S_UpdateAmbientSet( const char *name, vec3_t origin );
+extern int  S_AddLocalSet( const char *name, vec3_t listener_origin, vec3_t origin, int entID, int time );
+extern sfxHandle_t AS_GetBModelSound( const char *name, int stage );
+extern void AS_AddPrecacheEntry( const char *name );
+// Functions defined later in this file but needed by CL_InitSOF2CGame:
+void CL_GetGameState( gameState_t *gs );
+void CL_GetGlconfig( glconfig_t *glconfig );
+qboolean CL_GetUserCmd( int cmdNumber, usercmd_t *ucmd );
+int CL_GetCurrentCmdNumber( void );
+qboolean CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot );
+void CL_AddCgameCommand( const char *cmdName );
+qboolean CL_GetServerCommand( int serverCommandNumber );
+
+// -----------------------------------------------------------------------
+// Wrapper helpers for cgame_import_t signature mismatches
+// -----------------------------------------------------------------------
+
+// slot 32: Z_Malloc(int size) — SOF2 cgame wants single-arg version
+static void *Z_Malloc_stub( int size ) {
+	return Z_Malloc( size, TAG_ALL, qfalse );
+}
+
+// slot 67: CL_CM_LoadMap(name, clientLoad, checksum*) — SOF2 cgame signature
+// Engine's CL_CM_LoadMap(name, subBSP) has different params; adapt here.
+static void CL_CM_LoadMapWrapper( const char *mapname, int /*clientLoad*/, int *checksum ) {
+	CM_LoadMap( mapname, qtrue, checksum, qfalse );
+}
+
+// slot 96: CL_GetEntityBaseline(entityNum, state*) — wraps CL_GetDefaultState
+static void CL_GetEntityBaseline_SOF2( int entityNum, entityState_t *state ) {
+	CL_GetDefaultState( entityNum, state );
+}
+
+// slot 102: CL_SetUserCmdValue(userCmdValue, sensitivityScale) — 2 args (no pitch/yaw override)
+static void CL_SetUserCmdValue_SOF2( int userCmdValue, float sensitivityScale ) {
+	CL_SetUserCmdValue( userCmdValue, sensitivityScale, 0.0f, 0.0f );
+}
+
+// slot 22: Cmd_ArgsBuffer(start, buf, bufsize) — SOF2 adds a 'start' param; OpenJK ignores it
+static void Cmd_ArgsBuffer_SOF2( int /*start*/, char *buf, int bufsize ) {
+	Cmd_ArgsBuffer( buf, bufsize );
+}
+
+// slot 77: S_AddLoopingSound — SOF2 passes 4 args; OpenJK has 5th soundChannel_t
+static void S_AddLoopingSound_SOF2( int entityNum, const vec3_t origin, const vec3_t velocity,
+		sfxHandle_t sfx ) {
+	S_AddLoopingSound( entityNum, origin, velocity, sfx );
+}
+
+// slot 80: S_RegisterSound — SOF2 passes (name, compressed, streamed); OpenJK takes (name) only
+static sfxHandle_t S_RegisterSound_SOF2( const char *name, int /*compressed*/, int /*streamed*/ ) {
+	return S_RegisterSound( name );
+}
+
+// slot 83: S_StartBackgroundTrack — SOF2 passes fadeupTime (int); OpenJK takes qboolean
+static void S_StartBackgroundTrack_SOF2( const char *intro, const char *loop, int /*fadeupTime*/ ) {
+	S_StartBackgroundTrack( intro, loop, qfalse );
+}
+
+// slot 17: COM_Parse — OpenJK takes (const char **); SOF2 slot wants (char **)
+static char *COM_Parse_wrapper( char **p ) {
+	return COM_Parse( (const char **)p );
+}
+
+// slot 76: S_ClearLoopingSounds — OpenJK takes void; SOF2 slot passes int killall
+static void S_ClearLoopingSounds_stub( int /*killall*/ ) {
+	S_ClearLoopingSounds();
+}
+
+// slot 126: R_GetLighting — OpenJK returns qboolean; SOF2 import wants void.
+// vec3_t parameters decay to float* in function args so ambient/directed are compatible.
+static void R_GetLighting_SOF2( const vec3_t pos, float *ambient, float *directed, vec3_t dir ) {
+	re.GetLighting( pos, ambient, directed, dir );
+}
+
+// slot 0: Printf — SOF2 slot takes pre-formatted string only (no variadic)
+static void Printf_stub( const char *s ) { Com_Printf( "%s", s ); }
+
+// slot 3: Sprintf — Com_sprintf returns int; SOF2 slot is void
+static void Sprintf_void( char *buf, int size, const char *fmt, ... ) {
+	va_list args;
+	va_start( args, fmt );
+	Q_vsnprintf( buf, size, fmt, args );
+	va_end( args );
+}
+
+// slot 34: Z_Free — Z_Free returns int; SOF2 slot expects void
+static void Z_Free_void_stub( void *p ) { Z_Free( p ); }
+
+// slot 74: S_StartSound — SOF2 slot uses int for channel; engine uses soundChannel_t
+static void S_StartSound_wrapper( const vec3_t origin, int entityNum,
+		int entChannel, sfxHandle_t sfx ) {
+	S_StartSound( origin, entityNum, (soundChannel_t)entChannel, sfx );
+}
+
+// slot 85: S_UpdateAmbientSet — SOF2 slot takes const vec3_t; engine takes vec3_t
+static void S_UpdateAmbientSet_wrapper( const char *name, const vec3_t origin ) {
+	S_UpdateAmbientSet( name, (float *)origin );
+}
+
+// slot 86: S_AddLocalSet — SOF2 has 5 params; pass them all through
+// Use float* casts to strip const from the array types
+static int S_AddLocalSet_wrapper( const char *name, const vec3_t listener,
+		const vec3_t origin, int entID, int time ) {
+	return S_AddLocalSet( name, (float *)listener, (float *)origin, entID, time );
+}
+
+// slot 89: AS_GetBModelSound — SOF2 returns const char*; engine returns sfxHandle_t (int)
+// The return value is ABI-compatible (both 32-bit); the DLL uses it as a handle
+static const char *AS_GetBModelSound_wrapper( const char *name, int stage ) {
+	sfxHandle_t h = AS_GetBModelSound( name, stage );
+	return (const char *)(intptr_t)h;
+}
+
+// slot 112/113: SE_GetString / SE_DisplayString — SOF2 takes (const char *, int);
+// OpenJK SE_GetString is overloaded; use the single-arg version and ignore index
+static char *SE_GetString_wrapper( const char *ref, int /*index*/ ) {
+	return (char *)SE_GetString( ref );
+}
+
+// slot 143: R_LerpTag — OpenJK returns void; SOF2 import wants int
+static int R_LerpTag_SOF2( orientation_t *tag, qhandle_t handle, int startFrame, int endFrame,
+		float frac, const char *tagName ) {
+	re.LerpTag( tag, handle, startFrame, endFrame, frac, tagName );
+	return 0;
+}
+
+// slot 135: R_AddPolyToScene — SOF2 has extra 'num' param; OpenJK takes 3 args
+static void R_AddPolyToScene_SOF2( qhandle_t hShader, int numVerts, const polyVert_t *verts, int /*num*/ ) {
+	re.AddPolyToScene( hShader, numVerts, verts );
+}
+
+// slot 87: AS_ParseSets wrapper (SOF2 passes filename; current sig takes void)
+// NOTE: OpenJK AS_ParseSets() takes no args; SOF2 passes a filename which we ignore for now
+static void AS_ParseSets_wrapper( const char * /*filename*/ ) {
+	AS_ParseSets();
+}
+
+// slot 109: CL_Key_IsDown — Key_IsDown returns qboolean; slot expects int
+static int Key_IsDown_int( int key ) { return (int)Key_IsDown( key ); }
+
+// slot 97: CL_GetServerCommand — CL_GetServerCommand returns qboolean; slot expects int
+static int CL_GetServerCommand_int( int serverCommandNumber ) {
+	return (int)CL_GetServerCommand( serverCommandNumber );
+}
+
+// slot 94: CL_GetCurrentSnapshotNumber wrapper (SOF2 returns int, engine func returns void)
+static int CL_GetCurrentSnapshotNumber_wrapper( int *snapshotNumber, int *serverTime ) {
+	CL_GetCurrentSnapshotNumber( snapshotNumber, serverTime );
+	return *snapshotNumber;
+}
+
+// slot 57: Com_WriteCam — slot is variadic; engine function takes pre-formatted string only
+static void Com_WriteCam_wrapper( const char *fmt, ... ) {
+	va_list args;
+	char buf[1024];
+	va_start( args, fmt );
+	Q_vsnprintf( buf, sizeof(buf), fmt, args );
+	va_end( args );
+	Com_WriteCam( buf );
+}
 /*
 Ghoul2 Insert Start
 */
@@ -46,43 +223,284 @@ Ghoul2 Insert Start
 Ghoul2 Insert End
 */
 
-//FIXME: Temp
-extern void S_UpdateAmbientSet ( const char *name, vec3_t origin );
-extern int S_AddLocalSet( const char *name, vec3_t listener_origin, vec3_t origin, int entID, int time );
-extern void AS_ParseSets( void );
-extern sfxHandle_t AS_GetBModelSound( const char *name, int stage );
-extern void	AS_AddPrecacheEntry( const char *name );
+// Forward-declared above; duplicate extern block removed.
 extern menuDef_t *Menus_FindByName(const char *p);
 
 extern qboolean R_inPVS( vec3_t p1, vec3_t p2 );
 
 void UI_SetActiveMenu( const char* menuname,const char *menuID );
 
-qboolean CL_InitCGameVM( void *gameLibrary )
+// CL_InitCGameVM — kept as a no-op stub; SOF2 uses CL_InitSOF2CGame() instead.
+qboolean CL_InitCGameVM( void * /*gameLibrary*/ )
 {
-	typedef intptr_t SyscallProc( intptr_t, ... );
-	typedef void DllEntryProc( SyscallProc * );
+	return qtrue;
+}
 
-	DllEntryProc *dllEntry = (DllEntryProc *)Sys_LoadFunction( gameLibrary, "dllEntry" );
+/*
+===================
+CL_InitSOF2CGame
 
-	// NOTE: arm64 mac has a different calling convention for fixed parameters vs. variadic parameters.
-	//       As the cgame entryPoints (vmMain) in jk2 and jka use fixed arg0 to arg7 we can't use "..." around here or we end up with undefined behavior.
-	//       See: https://developer.apple.com/documentation/apple-silicon/addressing-architectural-differences-in-your-macos-code
-	cgvm.entryPoint = (intptr_t (*)(int,intptr_t,intptr_t,intptr_t,intptr_t,intptr_t,intptr_t,intptr_t,intptr_t))Sys_LoadFunction( gameLibrary, "vmMain" );
+Load cgamex86.dll and populate the 163-slot cgame_import_t for SOF2 CGAME_API_VERSION 3.
+Called from CL_InitCGame() when the map starts.
+===================
+*/
+qboolean CL_InitSOF2CGame( void ) {
+	typedef cgame_export_t *GetCGameAPIProc( int version, cgame_import_t *import );
 
-	if ( !cgvm.entryPoint || !dllEntry ) {
-#ifdef JK2_MODE
-		const char *gamename = "jospgame";
-#else
-		const char *gamename = "jagame";
-#endif
-
-		Com_Printf( "CL_InitCGameVM: client game entry point not found in %s" ARCH_STRING DLL_EXT ": %s\n",
-					gamename, Sys_LibraryError() );
+	cgameLibrary = Sys_LoadSPGameDll( "cgame", NULL );   // "cgame" + ARCH_STRING("x86") + DLL_EXT = "cgamex86.dll"
+	if ( !cgameLibrary ) {
+		Com_Printf( "CL_InitSOF2CGame: failed to load cgamex86" ARCH_STRING DLL_EXT ": %s\n",
+					Sys_LibraryError() );
 		return qfalse;
 	}
 
-	dllEntry( VM_DllSyscall );
+	GetCGameAPIProc *GetCGameAPI = (GetCGameAPIProc *)Sys_LoadFunction( cgameLibrary, "GetCGameAPI" );
+	if ( !GetCGameAPI ) {
+		Sys_UnloadDll( cgameLibrary );
+		cgameLibrary = NULL;
+		Com_Printf( "CL_InitSOF2CGame: GetCGameAPI not found\n" );
+		return qfalse;
+	}
+
+	// -----------------------------------------------------------------------
+	// Populate cgame_import_t (163 entries, zero-initialized).
+	// Unset slots remain NULL — non-critical features will simply be stubs.
+	// Full slot reference: E:\SOF2\structs\cgame_import_t.h
+	// -----------------------------------------------------------------------
+	cgame_import_t import = {};
+
+	// [  0] Printf — SOF2 slot takes pre-formatted string; wrap to add format
+	import.Printf                     = Printf_stub;
+	// [  1] DPrintf
+	import.DPrintf                    = Com_DPrintf;
+	// [  2] DPrintf2 (same function, alternate verbosity)
+	import.DPrintf2                   = Com_DPrintf;
+	// [  3] Sprintf — wrap to discard return value
+	import.Sprintf                    = Sprintf_void;
+	// [  4] Error
+	import.Error                      = Com_Error;
+
+	// [  5] FS_FOpenFile
+	import.FS_FOpenFile               = FS_FOpenFileByMode;
+	// [  6] FS_Read
+	import.FS_Read                    = FS_Read;
+	// [  7] FS_Write
+	import.FS_Write                   = FS_Write;
+	// [  8] FS_FCloseFile
+	import.FS_FCloseFile              = FS_FCloseFile;
+	// [  9] FS_ReadFile
+	import.FS_ReadFile                = FS_ReadFile;
+	// [ 10] FS_FreeFile
+	import.FS_FreeFile                = FS_FreeFile;
+	// [ 11] FS_FileExists — cast qboolean to int (compatible at binary level)
+	import.FS_FileExists              = (int (*)(const char *))FS_FileExists;
+	// [ 12] FS_GetFileList
+	import.FS_GetFileList             = FS_GetFileList;
+	// [ 13] FS_FreeFileList — stub (OpenJK may not expose this at engine level)
+	// [ 14] FS_CleanPath — stub
+
+	// [ 15] Com_EventLoop (returns void in OpenJK; cast to match SOF2's int return)
+	import.Com_EventLoop              = (int (*)(void))Com_EventLoop;
+	// [ 16] Cmd_TokenizeString
+	import.Cmd_TokenizeString         = Cmd_TokenizeString;
+	// [ 17] COM_Parse — wrapper to handle const char** vs char** mismatch
+	import.COM_Parse                  = COM_Parse_wrapper;
+	// [ 18] Cbuf_AddText
+	import.Cbuf_AddText               = Cbuf_AddText;
+	// [ 19] Cbuf_ExecuteText
+	import.Cbuf_ExecuteText           = Cbuf_ExecuteText;
+
+	// [ 20] Cmd_Argc
+	import.Cmd_Argc                   = Cmd_Argc;
+	// [ 21] Cmd_ArgvBuffer
+	import.Cmd_ArgvBuffer             = Cmd_ArgvBuffer;
+	// [ 22] Cmd_ArgsBuffer (SOF2 adds 'start' param)
+	import.Cmd_ArgsBuffer             = Cmd_ArgsBuffer_SOF2;
+	// [ 23] Cvar_GetModified — Cvar_Get returns cvar_t*, stub with Cvar_Get
+	import.Cvar_GetModified           = Cvar_Get;
+	// [ 24] Cvar_Register
+	import.Cvar_Register              = Cvar_Register;
+	// [ 25] Cvar_Update
+	import.Cvar_Update                = Cvar_Update;
+	// [ 26] Cvar_Set
+	import.Cvar_Set                   = Cvar_Set;
+	// [ 27] Cvar_SetModified — stub (mark cvar modified; OpenJK may not expose directly)
+	// [ 28] Cvar_SetValue
+	import.Cvar_SetValue              = Cvar_SetValue;
+	// [ 29] Cvar_VariableIntegerValue
+	import.Cvar_VariableIntegerValue  = Cvar_VariableIntegerValue;
+	// [ 30] Cvar_VariableValue
+	import.Cvar_VariableValue         = Cvar_VariableValue;
+	// [ 31] Cvar_VariableStringBuffer
+	import.Cvar_VariableStringBuffer  = Cvar_VariableStringBuffer;
+
+	// [ 32] Z_Malloc
+	import.Z_Malloc                   = Z_Malloc_stub;
+	// [ 33] Z_Free — wrap to discard int return
+	import.Z_Free                     = Z_Free_void_stub;
+	// [ 34] Z_CheckHeap — stub
+
+	// [35-49] Terrain system — all stubs for now (Phase 2+)
+
+	// [50-52] Renderer image loading — stubs
+
+	// [53-56] Frustum/culling — stubs
+
+	// [ 57] Com_WriteCam — variadic wrapper needed (engine fn is non-variadic)
+	import.Com_WriteCam               = Com_WriteCam_wrapper;
+	// [ 58] UpdateScreen
+	import.UpdateScreen               = SCR_UpdateScreen;
+	// [59-65] METIS UI dispatch — stubs
+
+	// [ 66] CM_PointContents
+	import.CM_PointContents           = CM_PointContents;
+	// [ 67] CL_CM_LoadMap
+	import.CL_CM_LoadMap              = CL_CM_LoadMapWrapper;
+	// [ 68] CM_NumInlineModels
+	import.CM_NumInlineModels         = CM_NumInlineModels;
+	// [ 69] CM_InlineModel
+	import.CM_InlineModel             = CM_InlineModel;
+	// [ 70] CM_TempBoxModel
+	import.CM_TempBoxModel            = CM_TempBoxModel;
+	// [ 71] CM_TransformedPointContents
+	import.CM_TransformedPointContents = CM_TransformedPointContents;
+	// [ 72] CM_BoxTrace
+	import.CM_BoxTrace                = CM_BoxTrace;
+	// [ 73] CM_TransformedBoxTrace
+	import.CM_TransformedBoxTrace     = CM_TransformedBoxTrace;
+
+	// [ 74] S_StartSound — wrap to cast soundChannel_t → int
+	import.S_StartSound               = S_StartSound_wrapper;
+	// [ 75] S_StartLocalSound
+	import.S_StartLocalSound          = S_StartLocalSound;
+	// [ 76] S_ClearLoopingSounds — OpenJK takes void; SOF2 slot passes int killall
+	import.S_ClearLoopingSounds       = S_ClearLoopingSounds_stub;
+	// [ 77] S_AddLoopingSound (SOF2: 4 args; OpenJK has 5th soundChannel_t default param)
+	import.S_AddLoopingSound          = S_AddLoopingSound_SOF2;
+	// [ 78] S_StopLoopingSound — stub
+	// [ 79] S_Respatialize (qboolean inwater is compatible with int)
+	import.S_Respatialize             = (void (*)(int, const vec3_t, vec3_t[3], int))S_Respatialize;
+	// [ 80] S_RegisterSound (SOF2: extra compressed/streamed params ignored)
+	import.S_RegisterSound            = S_RegisterSound_SOF2;
+	// [ 81] S_UpdateEntityPosition
+	import.S_UpdateEntityPosition     = S_UpdateEntityPosition;
+	// [ 82] S_MuteSound — stub
+	// [ 83] S_StartBackgroundTrack (SOF2: fadeupTime ignored)
+	import.S_StartBackgroundTrack     = S_StartBackgroundTrack_SOF2;
+	// [ 84] S_StopBackgroundTrack
+	import.S_StopBackgroundTrack      = S_StopBackgroundTrack;
+	// [ 85] S_UpdateAmbientSet — wrap: const vec3_t vs vec3_t
+	import.S_UpdateAmbientSet         = S_UpdateAmbientSet_wrapper;
+	// [ 86] S_AddLocalSet — wrap: SOF2 has 5 params; engine has 3
+	import.S_AddLocalSet              = S_AddLocalSet_wrapper;
+	// [ 87] AS_ParseSets
+	import.AS_ParseSets               = AS_ParseSets_wrapper;
+	// [ 88] AS_AddPrecacheEntry
+	import.AS_AddPrecacheEntry        = AS_AddPrecacheEntry;
+	// [ 89] AS_GetBModelSound — wrap: sfxHandle_t → const char * (bit-compatible)
+	import.AS_GetBModelSound          = AS_GetBModelSound_wrapper;
+
+	// [ 90] CL_GetGlconfig
+	import.CL_GetGlconfig             = CL_GetGlconfig;
+	// [ 91] CL_GetGameState
+	import.CL_GetGameState            = CL_GetGameState;
+	// [ 92] CL_AddCgameCommand
+	import.CL_AddCgameCommand         = CL_AddCgameCommand;
+	// [ 93] CL_AddReliableCommand
+	import.CL_AddReliableCommand      = CL_AddReliableCommand;
+	// [ 94] CL_GetCurrentSnapshotNumber
+	import.CL_GetCurrentSnapshotNumber = CL_GetCurrentSnapshotNumber_wrapper;
+	// [ 95] CL_GetSnapshot
+	import.CL_GetSnapshot             = CL_GetSnapshot;
+	// [ 96] CL_GetEntityBaseline
+	import.CL_GetEntityBaseline       = CL_GetEntityBaseline_SOF2;
+	// [ 97] CL_GetServerCommand — int wrapper (engine fn returns qboolean)
+	import.CL_GetServerCommand        = CL_GetServerCommand_int;
+	// [ 98] CL_GetCurrentCmdNumber
+	import.CL_GetCurrentCmdNumber     = CL_GetCurrentCmdNumber;
+	// [ 99] CL_GetUserCmd
+	import.CL_GetUserCmd              = CL_GetUserCmd;
+
+	// [100] CL_SetClientViewAngles — stub
+	// [101] CL_GetMouseDir — stub
+	// [102] CL_SetUserCmdValue
+	import.CL_SetUserCmdValue         = CL_SetUserCmdValue_SOF2;
+	// [103-108] CM debug / GP2 — stubs
+	// [109] CL_Key_IsDown — wrapper: Key_IsDown returns qboolean; slot expects int
+	import.CL_Key_IsDown              = Key_IsDown_int;
+	// [110] Key_GetCatcher
+	import.Key_GetCatcher             = Key_GetCatcher;
+	// [111] Key_SetCatcher
+	import.Key_SetCatcher             = Key_SetCatcher;
+	// [112] SE_DisplayString — wrap to resolve SE_GetString overload
+	import.SE_DisplayString           = SE_GetString_wrapper;
+	// [113] SE_GetString
+	import.SE_GetString               = SE_GetString_wrapper;
+	// [114] SE_GetStringIndex — stub
+	// [115] CL_SetLastBoneIndex — stub
+
+	// [116] G2_InitWraithBoneMapSingleton — stub
+	// [116-123] Ghoul2 — stubs for non-trivially castable G2 functions
+	// SOF2 cgame accesses G2 via the CWraith C++ interface; only a few slots needed.
+	// These will be wired up properly in Phase 2.
+	// [117] G2API_HaveWeGhoul2Models (slot uses unsigned int handle, not CGhoul2Info_v& directly)
+	// [121] G2API_GetBoltMatrix (slot uses unsigned int handle, not CGhoul2Info_v&)
+	// [123] G2API_CleanGhoul2Models
+	import.G2API_CleanGhoul2Models    = (void (*)(CGhoul2Info_v &))re.G2API_CleanGhoul2Models;
+
+	// [124] RE_MarkFragments — SOF2 signature incompatible with OpenJK; leave NULL for now
+	// TODO: implement proper MarkFragments wrapper in Phase 2
+	// [125] CL_CM_SelectSubBSP — stub
+	// [126] R_GetLighting
+	import.R_GetLighting              = R_GetLighting_SOF2;
+
+	// [127] R_BeginRegistration
+	import.R_BeginRegistration        = re.BeginRegistration;
+	// [128] R_RegisterModel
+	import.R_RegisterModel            = re.RegisterModel;
+	// [129] R_RegisterShader
+	import.R_RegisterShader           = re.RegisterShader;
+	// [130] R_RegisterShaderNoMip
+	import.R_RegisterShaderNoMip      = re.RegisterShaderNoMip;
+	// [131] R_RegisterSkin
+	import.R_RegisterSkin             = re.RegisterSkin;
+
+	// [132] R_ClearScene
+	import.R_ClearScene               = re.ClearScene;
+	// [133] R_AddRefEntityToScene
+	import.R_AddRefEntityToScene      = re.AddRefEntityToScene;
+	// [134] R_AddMiniRefEntityToScene — stub (SOF2-specific mini entity)
+	// [135] R_AddPolyToScene (SOF2 has extra 'num' param ignored)
+	import.R_AddPolyToScene           = R_AddPolyToScene_SOF2;
+	// [136] R_AddLightToScene
+	import.R_AddLightToScene          = re.AddLightToScene;
+	// [137-138] Directed/additive light stubs
+	// [139] R_RenderScene
+	import.R_RenderScene              = re.RenderScene;
+	// [140] R_SetColor
+	import.R_SetColor                 = re.SetColor;
+	// [141] R_DrawStretchPic
+	import.R_DrawStretchPic           = re.DrawStretchPic;
+	// [142] R_FillRect — stub
+	// [143] R_LerpTag (OpenJK returns void; SOF2 wants int)
+	import.R_LerpTag                  = R_LerpTag_SOF2;
+	// [144] R_ModelBounds
+	import.R_ModelBounds              = re.ModelBounds;
+	// [145] R_WorldEffectCommand
+	import.R_WorldEffectCommand       = re.WorldEffectCommand;
+	// [146] R_GetModelBounds — stub
+
+	// [147-153] Font / light style stubs
+	// [154-162] Extended renderer stubs
+
+	// -----------------------------------------------------------------------
+	cge = GetCGameAPI( CGAME_API_VERSION, &import );
+	if ( !cge ) {
+		Sys_UnloadDll( cgameLibrary );
+		cgameLibrary = NULL;
+		Com_Printf( "CL_InitSOF2CGame: GetCGameAPI returned NULL\n" );
+		return qfalse;
+	}
 
 	return qtrue;
 }
@@ -418,20 +836,20 @@ void CL_CM_LoadMap( const char *mapname, qboolean subBSP ) {
 
 /*
 ====================
-CL_ShutdonwCGame
-
+CL_ShutdownCGame
 ====================
 */
 void CL_ShutdownCGame( void ) {
 	cls.cgameStarted = qfalse;
 
-	if ( !cgvm.entryPoint) {
-		return;
+	if ( cge ) {
+		cge->Shutdown();
+		cge = NULL;
 	}
-	VM_Call( CG_SHUTDOWN );
-
-//	VM_Free( cgvm );
-//	cgvm = NULL;
+	if ( cgameLibrary ) {
+		Sys_UnloadDll( cgameLibrary );
+		cgameLibrary = NULL;
+	}
 }
 
 #ifdef JK2_MODE
@@ -1407,8 +1825,13 @@ void CL_InitCGame( void ) {
 
 	cls.state = CA_LOADING;
 
-	// init for this gamestate
-	VM_Call( CG_INIT, clc.serverCommandSequence );
+	// SOF2: load cgamex86.dll and call GetCGameAPI to obtain the export table
+	if ( !CL_InitSOF2CGame() ) {
+		Com_Error( ERR_DROP, "Failed to initialize cgame DLL (cgamex86)" );
+	}
+
+	// init for this gamestate — SOF2 Init(serverMessageNum, serverCommandSequence, clientNum)
+	cge->Init( cl.frame.messageNum, clc.serverCommandSequence, cl.frame.ps.clientNum );
 
 	// reset any CVAR_CHEAT cvars registered by cgame
 	if ( !cl_connectedToCheatServer )
@@ -1448,7 +1871,7 @@ qboolean CL_GameCommand( void ) {
 		return qfalse;
 	}
 
-	return (qboolean)(VM_Call( CG_CONSOLE_COMMAND ) != 0);
+	return cge ? (qboolean)(cge->ConsoleCommand() != 0) : qfalse;
 }
 
 
@@ -1474,7 +1897,7 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		timei-=0;
 	}
 	re.G2API_SetTime(cl.serverTime,G2T_CG_TIME);
-	VM_Call( CG_DRAW_ACTIVE_FRAME,timei, stereo, qfalse );
+	if ( cge ) cge->DrawActiveFrame( timei, stereo, qfalse );
 //	VM_Debug( 0 );
 }
 

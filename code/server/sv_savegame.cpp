@@ -148,7 +148,7 @@ void SV_WipeGame_f(void)
 		return;
 	}
 	SG_WipeSavegame(Cmd_Argv(1));
-//	Com_Printf("%s has been wiped\n", Cmd_Argv(1));	// wurde gel�scht in german, but we've only got one string
+//	Com_Printf("%s has been wiped\n", Cmd_Argv(1));	// wurde gel�scht in german, but we've only got one string
 //	Com_Printf("Ok\n"); // no localization of this
 }
 
@@ -1145,7 +1145,7 @@ qboolean SG_GameAllowedToSaveHere(qboolean inCamera)
 	if (!ge)
 		return inCamera;	// only happens when called to test if inCamera
 
-	return ge->GameAllowedToSaveHere();
+	return (qboolean)ge->GameAllowedToSaveHere();
 }
 
 qboolean SG_WriteSavegame(const char *psPathlessBaseName, qboolean qbAutosave)
@@ -1215,7 +1215,7 @@ qboolean SG_WriteSavegame(const char *psPathlessBaseName, qboolean qbAutosave)
 		CM_WritePortalState();
 		SG_WriteServerConfigStrings();
 	}
-	ge->WriteLevel(qbAutosave);	// always done now, but ent saver only does player if auto
+	ge->WriteLevel();	// SOF2: WriteLevel(void) — no args; ent saver always writes all
 
 	bool is_write_failed = saved_game.is_failed();
 
@@ -1344,10 +1344,8 @@ qboolean SG_ReadSavegame(
 		::SG_ReadServerConfigStrings();
 	}
 
-	// always done now, but ent reader only does player if auto
-	::ge->ReadLevel(
-		qbAutosave,
-		qbLoadTransition);
+	// SOF2: ReadLevel(char *mapname) — pass current mapname
+	::ge->ReadLevel(sv_mapname->string);
 
 	return qtrue;
 }
@@ -1357,6 +1355,6 @@ void SG_TestSave(void)
 	if (sv_testsave->integer && sv.state == SS_GAME)
 	{
 		WriteGame(qfalse);
-		ge->WriteLevel(qfalse);
+		ge->WriteLevel();  // SOF2: WriteLevel(void)
 	}
 }

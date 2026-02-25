@@ -44,6 +44,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // Snapshots are generated at regular time intervals by the server,
 // but they may not be sent if a client's rate level is exceeded, or
 // they may be dropped by the network.
+#ifndef SNAPSHOT_S_DEFINED
+#define SNAPSHOT_S_DEFINED
 struct snapshot_s
 {
 	int				snapFlags;			// SNAPFLAG_RATE_DELAYED, SNAPFLAG_DROPPED_COMMANDS
@@ -67,6 +69,7 @@ struct snapshot_s
 };
 
 typedef snapshot_s snapshot_t;
+#endif // SNAPSHOT_S_DEFINED
 
 
 /*

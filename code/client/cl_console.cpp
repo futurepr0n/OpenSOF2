@@ -62,12 +62,6 @@ Con_ToggleConsole_f
 ================
 */
 void Con_ToggleConsole_f (void) {
-	// closing a full screen console restarts the demo loop
-	if ( cls.state == CA_DISCONNECTED && Key_GetCatcher( ) == KEYCATCH_CONSOLE ) {
-//		CL_StartDemoLoop();
-		return;
-	}
-
 	if( con_autoclear->integer )
 		Field_Clear( &g_consoleField );
 	g_consoleField.widthInChars = g_console_field_width;

@@ -375,6 +375,9 @@ typedef struct {
 	// Performance analysis (perform anal)
 	void		(*G2Time_ResetTimers)(void);
 	void		(*G2Time_ReportTimers)(void);
+
+	// SOF2: get source image dimensions for a shader handle
+	void		(*DrawGetPicSize)( int *w, int *h, qhandle_t hShader );
 } refexport_t;
 
 // this is the only function actually exported at the linker level

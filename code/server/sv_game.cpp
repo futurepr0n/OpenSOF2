@@ -31,6 +31,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../client/vmachine.h"
 #include "../client/client.h"
 #include "qcommon/ojk_saved_game.h"
+#include "qcommon/ojk_saved_game_helper.h"  // needed for write_chunk/read_chunk template bodies
 /*#include "..\renderer\tr_local.h"
 #include "..\renderer\tr_WorldEffects.h"*/
 /*
@@ -50,6 +51,27 @@ static void *gameLibrary;
 extern void Com_WriteCam ( const char *text );
 extern void Com_FlushCamFile();
 
+// --- Signature-adapting wrappers for game_import_t slot type mismatches ---
+
+// slot 23: Com_sprintf — engine returns int, SOF2 slot is void
+static void Com_sprintf_void( char *dest, int size, const char *fmt, ... ) {
+	va_list args;
+	va_start( args, fmt );
+	Q_vsnprintf( dest, size, fmt, args );
+	va_end( args );
+}
+
+// slot 32: Malloc — G_ZMalloc_Helper takes memtag_t (enum), slot takes int
+static void *G_ZMalloc_Wrapper( int size, int tag, qboolean zeroIt ) {
+	return Z_Malloc( size, (memtag_t)tag, zeroIt );
+}
+
+// slots 35, 96: GetEntityToken — SV_GetEntityToken returns qboolean, slot expects int
+qboolean SV_GetEntityToken( char *buffer, int bufferSize );  // forward decl (defined below)
+static int SV_GetEntityToken_int( char *buf, int bufsize ) {
+	return (int)SV_GetEntityToken( buf, bufsize );
+}
+
 extern int	s_entityWavVol[MAX_GENTITIES];
 
 // these functions must be used instead of pointer arithmetic, because
@@ -63,13 +85,16 @@ int	SV_NumForGentity( gentity_t *ent ) {
 	return num;
 }
 */
+// SOF2: entity array and stride are stored here when game DLL calls gi.LocateGameData
+static void *sv_GEntities   = NULL;
+static int   sv_GEntitySize = 0;   // filled in once we know game DLL's gentity_t size
+
 gentity_t	*SV_GentityNum( int num ) {
-	gentity_t	*ent;
-
-	assert (num >=0);
-	ent = (gentity_t *)((byte *)ge->gentities + ge->gentitySize*(num));
-
-	return ent;
+	assert(num >= 0);
+	if ( !sv_GEntities || sv_GEntitySize <= 0 ) {
+		return NULL;
+	}
+	return (gentity_t *)((byte *)sv_GEntities + sv_GEntitySize * num);
 }
 
 svEntity_t	*SV_SvEntityForGentity( gentity_t *gEnt ) {
@@ -403,7 +428,7 @@ void SV_ShutdownGameProgs (qboolean shutdownCin) {
 	if (!ge) {
 		return;
 	}
-	ge->Shutdown ();
+	ge->Shutdown(0);
 
 	SCR_StopCinematic();
 	CL_ShutdownCGame();	//we have cgame burried in here.
@@ -411,7 +436,6 @@ void SV_ShutdownGameProgs (qboolean shutdownCin) {
 	Sys_UnloadDll( gameLibrary );
 
 	ge = NULL;
-	cgvm.entryPoint = 0;
 }
 
 // this is a compile-helper function since Z_Malloc can now become a macro with __LINE__ etc
@@ -878,6 +902,152 @@ static bool SV_WE_SetTempGlobalFogColor( vec3_t color )
 	return re.SetTempGlobalFogColor( color );
 }
 
+// ============================================================
+// SOF2 game_import_t stub/wrapper functions
+// ============================================================
+
+// SV_DPrintf removed — use Com_DPrintf directly (it checks com_developer internally)
+
+// slot 25: Cvar_SetValue(name, val, force) — SOF2 adds 'force' param; engine ignores it
+static void SV_Cvar_SetValue_Wrapper( const char *name, float val, int /*force*/ ) {
+	Cvar_SetValue( name, val );
+}
+
+// slot 36: CM_FreeTerrain — RMG terrain cleanup (no-op in SP retail)
+static void SV_CM_FreeTerrain( int /*terrainId*/ ) {}
+
+// slot 38: RMG_Init
+static void SV_RMG_Init( int /*terrainId*/ ) {}
+
+// slot 40: RMG_GetSpawnPoint
+static void SV_RMG_GetSpawnPoint( int /*terrainId*/, float *pos ) {
+	if (pos) VectorClear( pos );
+}
+
+// slot 41: RMG_GetCellInfo
+static int SV_RMG_GetCellInfo( int /*terrainId*/, int /*x*/, int /*y*/ ) { return 0; }
+
+// slot 43: RMG_UpdateTerrain
+static void SV_RMG_UpdateTerrain( int /*terrainId*/ ) {}
+
+// slots 52-53: SaveGame chunk I/O — wraps ojk SavedGame helper
+static void SV_SaveGame_WriteChunk( int chunkId, void *data, int length ) {
+	ojk::SavedGameHelper( &ojk::SavedGame::get_instance() ).write_chunk(
+		chunkId, static_cast<const uint8_t *>(data), length );
+}
+static void SV_SaveGame_ReadChunk( int chunkId, void *data, int length ) {
+	ojk::SavedGameHelper( &ojk::SavedGame::get_instance() ).read_chunk(
+		chunkId, static_cast<uint8_t *>(data), length );
+}
+
+// slot 54: LocateGameData — SOF2 only passes entity array base pointer
+// Entity stride is communicated separately (or known at compile time in the game DLL).
+// We store the pointer here; sv_GEntitySize is set by SV_SetGameEntitySize() if available.
+static void SV_LocateGameData( void *gentities ) {
+	sv_GEntities = gentities;
+}
+
+// slot 59: MulticastTempEntity
+static void SV_MulticastTempEntity( gentity_t * /*ent*/ ) {}
+
+// slot 60: InitTempEntFinalize
+static void SV_InitTempEntFinalize( gentity_t * /*ent*/ ) {}
+
+// slot 61: GetTempEntCount
+static int SV_GetTempEntCount( void ) { return 0; }
+
+// slot 63: ICARUS_PlaySound
+static void SV_ICARUS_PlaySound( int /*entID*/, const char * /*name*/, const char * /*channel*/ ) {}
+
+// slot 64: ICARUS_RunScript
+static int SV_ICARUS_RunScript( gentity_t * /*ent*/, const char * /*script*/ ) { return 0; }
+
+// slot 65: GetCurrentEntity
+static gentity_t *SV_GetCurrentEntity( void ) { return NULL; }
+
+// slot 67: GetLastErrorString
+static char *SV_GetLastErrorString( void ) {
+	static char buf[64];
+	buf[0] = '\0';
+	return buf;
+}
+
+// slot 68: GetCurrentEntityIndirect
+static gentity_t *SV_GetCurrentEntityIndirect( void ) { return NULL; }
+
+// slot 50: trace — 7-arg wrapper for SV_Trace (which has 2 extra defaulted G2 params)
+static void SV_Trace_7args( trace_t *results, const vec3_t start,
+		const vec3_t mins, const vec3_t maxs, const vec3_t end,
+		int passEnt, int contentmask ) {
+	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask );
+}
+
+// slot 71: traceG2 — ignores extra G2 args, forwards to regular trace
+static void SV_TraceG2( trace_t *results, const vec3_t start,
+		const vec3_t mins, const vec3_t maxs, const vec3_t end,
+		int passEnt, int contentmask, int /*g2TraceType*/, int /*useLod*/ ) {
+	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask );
+}
+
+// slot 72: GetEntityBoundsSize
+static int SV_GetEntityBoundsSize( gentity_t * /*ent*/ ) { return 0; }
+
+// slot 83: GetSurfaceMaterial
+static int SV_GetSurfaceMaterial( int /*surfIndex*/, float * /*vel*/ ) { return 0; }
+
+// slot 84: ModelIndex — server-side model precaching (stub; Phase 2 will use CM_RegisterModel)
+static int SV_ModelIndex_Wrapper( const char * /*name*/ ) {
+	return 0;
+}
+
+// slot 90: G2API_GetGhoul2InfoV
+static CGhoul2Info_v *SV_G2API_GetGhoul2InfoV( int /*ghoul2handle*/ ) { return NULL; }
+
+// slot 91: G2API_CleanGhoul2ModelsRef — via pointer rather than reference
+static void SV_G2API_CleanGhoul2ModelsRef( CGhoul2Info_v *ghoul2ref ) {
+	if ( ghoul2ref ) re.G2API_CleanGhoul2Models( *ghoul2ref );
+}
+
+// slot 93: SE_GetString wrapper — SOF2 has (token, flags); engine's SE_GetString takes (key)
+static char *SV_SE_GetString_Wrapper( const char *token, int /*flags*/ ) {
+	return (char *)SE_GetString( token );
+}
+
+// slot 94: SoundIndex — server-side sound precaching (stub; Phase 2 will register with sound system)
+static int SV_SoundIndex_Wrapper( const char * /*name*/ ) {
+	return 0;
+}
+
+// slot 95: SE_SetStringSoundMap
+static void SV_SE_SetStringSoundMap( const char * /*token*/, int /*idx*/ ) {}
+
+// slot 97: CM_RegisterDamageShader
+static int SV_CM_RegisterDamageShader( const char * /*name*/ ) { return 0; }
+
+// slot 98: WE_GetWindVector — existing SV_WE_GetWindVector returns bool; need void wrapper
+static void SV_WE_GetWindVectorVoid( vec3_t windVector, vec3_t atPoint ) {
+	SV_WE_GetWindVector( windVector, atPoint );
+}
+
+// slot 99: SV_UpdateEntitySoundIndex (leading underscore avoids collision with engine symbol)
+static void SV_UpdateEntitySoundIndex_( int /*entNum*/ ) {}
+
+// slot 100: SoundDuration
+static int SV_SoundDuration( const char * /*name*/ ) { return 0; }
+
+// slot 101: SetMusicState
+static void SV_SetMusicState( int /*state*/ ) {}
+
+// slots 102-110: RMG automap drawing stubs
+static void SV_RMG_AddBreakpoint( int /*terrainId*/, void * /*data*/ ) {}
+static void SV_GameShutdown( void ) {}
+static void SV_RMG_AutomapDrawLine( int /*x1*/, int /*y1*/, int /*x2*/, int /*y2*/, int /*color*/ ) {}
+static void SV_RMG_AutomapDrawRegion( int /*x*/, int /*y*/, int /*w*/, int /*h*/, int /*color*/ ) {}
+static void SV_RMG_AutomapDrawCircle( int /*x*/, int /*y*/, int /*radius*/, int /*color*/ ) {}
+static void SV_RMG_AutomapDrawIcon( int /*x*/, int /*y*/, int /*icon*/, int /*color*/ ) {}
+static void SV_RMG_AutomapDrawSquare( int /*x*/, int /*y*/, int /*size*/, int /*color*/ ) {}
+static void SV_RMG_AutomapDrawSpecial( int /*x*/, int /*y*/, int /*type*/, int /*color*/ ) {}
+
 /*
 ===============
 SV_InitGameProgs
@@ -886,7 +1056,7 @@ Init the game subsystem for a new map
 ===============
 */
 void SV_InitGameProgs (void) {
-	game_import_t	import;
+	game_import_t	import = {};   // zero-initialize — unset slots remain NULL
 	int				i;
 
 	// unload anything we have now
@@ -894,165 +1064,195 @@ void SV_InitGameProgs (void) {
 		SV_ShutdownGameProgs (qtrue);
 	}
 
-	// load a new game dll
-	import.Printf = Com_Printf;
-	import.WriteCam = Com_WriteCam;
-	import.FlushCamFile = Com_FlushCamFile;
-	import.Error = Com_Error;
+	//
+	// Populate SOF2 v8 game_import_t (113 entries, zero-initialized above).
+	// Slots not listed here remain NULL (reserved / unused by SP).
+	//
 
-	import.Milliseconds = Sys_Milliseconds2;
-
-	import.DropClient = SV_GameDropClient;
-
-	import.SendServerCommand = SV_GameSendServerCommand;
-
-
-	import.linkentity = SV_LinkEntity;
-	import.unlinkentity = SV_UnlinkEntity;
-	import.EntitiesInBox = SV_AreaEntities;
-	import.EntityContact = SV_EntityContact;
-	import.trace = SV_Trace;
-	import.pointcontents = SV_PointContents;
-	import.totalMapContents = CM_TotalMapContents;
-	import.SetBrushModel = SV_SetBrushModel;
-
-	import.inPVS = SV_inPVS;
-	import.inPVSIgnorePortals = SV_inPVSIgnorePortals;
-
-	import.SetConfigstring = SV_SetConfigstring;
-	import.GetConfigstring = SV_GetConfigstring;
-
-	import.SetUserinfo = SV_SetUserinfo;
-	import.GetUserinfo = SV_GetUserinfo;
-
-	import.GetServerinfo = SV_GetServerinfo;
-
-	import.cvar = Cvar_Get;
-	import.cvar_set = Cvar_Set;
-	import.Cvar_VariableIntegerValue = Cvar_VariableIntegerValue;
+	// [  0] Printf
+	import.Printf                  = Com_Printf;
+	// [  1] DPrintf — Com_DPrintf checks com_developer internally
+	import.DPrintf                 = Com_DPrintf;
+	// [  2] FlushCamFile
+	import.FlushCamFile            = Com_FlushCamFile;
+	// [  3] Error
+	import.Error                   = Com_Error;
+	// [  4] Milliseconds
+	import.Milliseconds            = Sys_Milliseconds2;
+	// [  5] cvar (Cvar_Get)
+	import.cvar                    = Cvar_Get;
+	// [  6] cvar_set (Cvar_Set)
+	import.cvar_set                = Cvar_Set;
+	// [  7] Cvar_VariableStringBuffer
 	import.Cvar_VariableStringBuffer = Cvar_VariableStringBuffer;
-
-	import.argc = Cmd_Argc;
-	import.argv = Cmd_Argv;
-	import.SendConsoleCommand = Cbuf_AddText;
-
-	import.FS_FOpenFile = FS_FOpenFileByMode;
-	import.FS_Read = FS_Read;
-	import.FS_Write = FS_Write;
-	import.FS_FCloseFile = FS_FCloseFile;
-	import.FS_ReadFile = FS_ReadFile;
-	import.FS_FreeFile = FS_FreeFile;
-	import.FS_GetFileList = FS_GetFileList;
-
-	import.saved_game = &ojk::SavedGame::get_instance();
-
-	import.AdjustAreaPortalState = SV_AdjustAreaPortalState;
-	import.AreasConnected = CM_AreasConnected;
-
-	import.VoiceVolume = s_entityWavVol;
-
-	import.Malloc = G_ZMalloc_Helper;
-	import.Free = Z_Free;
-	import.bIsFromZone = Z_IsFromZone;
-
-	import.G2API_AddBolt = SV_G2API_AddBolt;
-	import.G2API_AttachEnt = SV_G2API_AttachEnt;
-	import.G2API_AttachG2Model = SV_G2API_AttachG2Model;
-	import.G2API_CollisionDetect = SV_G2API_CollisionDetect;
-	import.G2API_DetachEnt = SV_G2API_DetachEnt;
-	import.G2API_DetachG2Model = SV_G2API_DetachG2Model;
-	import.G2API_GetAnimFileName = SV_G2API_GetAnimFileName;
-	import.G2API_GetBoltMatrix = SV_G2API_GetBoltMatrix;
-	import.G2API_GetBoneAnim = SV_G2API_GetBoneAnim;
-	import.G2API_GetBoneAnimIndex = SV_G2API_GetBoneAnimIndex;
-	import.G2API_AddSurface = SV_G2API_AddSurface;
-	import.G2API_HaveWeGhoul2Models = SV_G2API_HaveWeGhoul2Models;
-	import.G2API_InitGhoul2Model = SV_G2API_InitGhoul2Model;
-	import.G2API_SetBoneAngles = SV_G2API_SetBoneAngles;
-	import.G2API_SetBoneAnglesMatrix = SV_G2API_SetBoneAnglesMatrix;
-	import.G2API_SetBoneAnim = SV_G2API_SetBoneAnim;
-	import.G2API_SetSkin = SV_G2API_SetSkin;
-	import.G2API_CopyGhoul2Instance = SV_G2API_CopyGhoul2Instance;
-	import.G2API_SetBoneAnglesIndex = SV_G2API_SetBoneAnglesIndex;
-	import.G2API_SetBoneAnimIndex = SV_G2API_SetBoneAnimIndex;
-	import.G2API_IsPaused = SV_G2API_IsPaused;
-	import.G2API_ListBones = SV_G2API_ListBones;
-	import.G2API_ListSurfaces = SV_G2API_ListSurfaces;
-	import.G2API_PauseBoneAnim = SV_G2API_PauseBoneAnim;
-	import.G2API_PauseBoneAnimIndex = SV_G2API_PauseBoneAnimIndex;
-	import.G2API_PrecacheGhoul2Model = SV_G2API_PrecacheGhoul2Model;
-	import.G2API_RemoveBolt = SV_G2API_RemoveBolt;
-	import.G2API_RemoveBone = SV_G2API_RemoveBone;
-	import.G2API_RemoveGhoul2Model = SV_G2API_RemoveGhoul2Model;
-	import.G2API_SetLodBias = SV_G2API_SetLodBias;
-	import.G2API_SetRootSurface = SV_G2API_SetRootSurface;
-	import.G2API_SetShader = SV_G2API_SetShader;
-	import.G2API_SetSurfaceOnOff = SV_G2API_SetSurfaceOnOff;
-	import.G2API_StopBoneAngles = SV_G2API_StopBoneAngles;
-	import.G2API_StopBoneAnim = SV_G2API_StopBoneAnim;
-	import.G2API_SetGhoul2ModelFlags = SV_G2API_SetGhoul2ModelFlags;
-	import.G2API_AddBoltSurfNum = SV_G2API_AddBoltSurfNum;
-	import.G2API_RemoveSurface = SV_G2API_RemoveSurface;
-	import.G2API_GetAnimRange = SV_G2API_GetAnimRange;
-	import.G2API_GetAnimRangeIndex = SV_G2API_GetAnimRangeIndex;
-	import.G2API_GiveMeVectorFromMatrix = SV_G2API_GiveMeVectorFromMatrix;
-	import.G2API_GetGhoul2ModelFlags = SV_G2API_GetGhoul2ModelFlags;
+	// [  8] FS_FCloseFile
+	import.FS_FCloseFile           = FS_FCloseFile;
+	// [  9] FS_ReadFile
+	import.FS_ReadFile             = FS_ReadFile;
+	// [ 10] FS_Read
+	import.FS_Read                 = FS_Read;
+	// [ 11] FS_Write
+	import.FS_Write                = FS_Write;
+	// [ 12] FS_FOpenFile
+	import.FS_FOpenFile            = FS_FOpenFileByMode;
+	// [ 13] FS_FreeFile
+	import.FS_FreeFile             = FS_FreeFile;
+	// [ 14] FS_GetFileList
+	import.FS_GetFileList          = FS_GetFileList;
+	// [ 15] saved_game — SOF2 uses WriteChunk/ReadChunk (slots 52-53), keep NULL
+	// [ 18] SendConsoleCommand
+	import.SendConsoleCommand      = Cbuf_AddText;
+	// [ 19] DropClient
+	import.DropClient              = SV_GameDropClient;
+	// [ 20] argc
+	import.argc                    = Cmd_Argc;
+	// [ 21] argv
+	import.argv                    = Cmd_Argv;
+	// [ 23] Com_sprintf — void wrapper (engine fn returns int)
+	import.Com_sprintf             = Com_sprintf_void;
+	// [ 24] Cvar_VariableIntegerValue
+	import.Cvar_VariableIntegerValue = Cvar_VariableIntegerValue;
+	// [ 25] Cvar_SetValue(name, val, force) — force param ignored
+	import.Cvar_SetValue           = SV_Cvar_SetValue_Wrapper;
+	// [ 26] SetConfigstring
+	import.SetConfigstring         = SV_SetConfigstring;
+	// [ 27] GetConfigstring
+	import.GetConfigstring         = SV_GetConfigstring;
+	// [ 28] SetUserinfo
+	import.SetUserinfo             = SV_SetUserinfo;
+	// [ 29] GetUserinfo
+	import.GetUserinfo             = SV_GetUserinfo;
+	// [ 30] SendServerCommand
+	import.SendServerCommand       = SV_GameSendServerCommand;
+	// [ 31] SetBrushModel
+	import.SetBrushModel           = SV_SetBrushModel;
+	// [ 32] Malloc — wrapper to cast memtag_t enum to int
+	import.Malloc                  = G_ZMalloc_Wrapper;
+	// [ 33] Free
+	import.Free                    = Z_Free;
+	// [ 35] GetEntityToken — int wrapper (SV_GetEntityToken returns qboolean)
+	import.GetEntityToken          = SV_GetEntityToken_int;
+	// [ 36] CM_FreeTerrain
+	import.CM_FreeTerrain          = SV_CM_FreeTerrain;
+	// [ 38] RMG_Init
+	import.RMG_Init                = SV_RMG_Init;
+	// [ 39] irand
+	import.irand                   = Q_irand;
+	// [ 40] RMG_GetSpawnPoint
+	import.RMG_GetSpawnPoint       = SV_RMG_GetSpawnPoint;
+	// [ 41] RMG_GetCellInfo
+	import.RMG_GetCellInfo         = SV_RMG_GetCellInfo;
+	// [ 43] RMG_UpdateTerrain
+	import.RMG_UpdateTerrain       = SV_RMG_UpdateTerrain;
+	// [ 50] trace — 7-arg wrapper (SV_Trace has 2 extra defaulted G2 params)
+	import.trace                   = SV_Trace_7args;
+	// [ 51] pointcontents
+	import.pointcontents           = SV_PointContents;
+	// [ 52] SaveGame_WriteChunk
+	import.SaveGame_WriteChunk     = SV_SaveGame_WriteChunk;
+	// [ 53] SaveGame_ReadChunk
+	import.SaveGame_ReadChunk      = SV_SaveGame_ReadChunk;
+	// [ 54] LocateGameData — SOF2 only passes entity array pointer
+	import.LocateGameData          = SV_LocateGameData;
+	// [ 56] GetUserinfoAlt (same function, duplicate slot)
+	import.GetUserinfoAlt          = SV_GetUserinfo;
+	// [ 57] linkentity
+	import.linkentity              = SV_LinkEntity;
+	// [ 58] unlinkentity
+	import.unlinkentity            = SV_UnlinkEntity;
+	// [ 59] MulticastTempEntity
+	import.MulticastTempEntity     = SV_MulticastTempEntity;
+	// [ 60] InitTempEntFinalize
+	import.InitTempEntFinalize     = SV_InitTempEntFinalize;
+	// [ 61] GetTempEntCount
+	import.GetTempEntCount         = SV_GetTempEntCount;
+	// [ 63] ICARUS_PlaySound
+	import.ICARUS_PlaySound        = SV_ICARUS_PlaySound;
+	// [ 64] ICARUS_RunScript
+	import.ICARUS_RunScript        = SV_ICARUS_RunScript;
+	// [ 65] GetCurrentEntity
+	import.GetCurrentEntity        = SV_GetCurrentEntity;
+	// [ 66] G2API_CleanGhoul2Models
 	import.G2API_CleanGhoul2Models = SV_G2API_CleanGhoul2Models;
-	import.TheGhoul2InfoArray = SV_TheGhoul2InfoArray;
-	import.G2API_GetParentSurface = SV_G2API_GetParentSurface;
-	import.G2API_GetSurfaceIndex = SV_G2API_GetSurfaceIndex;
-	import.G2API_GetSurfaceName = SV_G2API_GetSurfaceName;
-	import.G2API_GetGLAName = SV_G2API_GetGLAName;
-	import.G2API_SetNewOrigin = SV_G2API_SetNewOrigin;
-	import.G2API_GetBoneIndex = SV_G2API_GetBoneIndex;
-	import.G2API_StopBoneAnglesIndex = SV_G2API_StopBoneAnglesIndex;
-	import.G2API_StopBoneAnimIndex = SV_G2API_StopBoneAnimIndex;
-	import.G2API_SetBoneAnglesMatrixIndex = SV_G2API_SetBoneAnglesMatrixIndex;
-	import.G2API_SetAnimIndex = SV_G2API_SetAnimIndex;
-	import.G2API_GetAnimIndex = SV_G2API_GetAnimIndex;
+	// [ 67] GetLastErrorString
+	import.GetLastErrorString      = SV_GetLastErrorString;
+	// [ 68] GetCurrentEntityIndirect
+	import.GetCurrentEntityIndirect = SV_GetCurrentEntityIndirect;
+	// [ 69] EntitiesInBox
+	import.EntitiesInBox           = SV_AreaEntities;
+	// [ 70] EntityContact
+	import.EntityContact           = SV_EntityContact;
+	// [ 71] traceG2 — extra G2 args ignored for now
+	import.traceG2                 = SV_TraceG2;
+	// [ 72] GetEntityBoundsSize
+	import.GetEntityBoundsSize     = SV_GetEntityBoundsSize;
+	// [ 73] SetBrushModelAlt (duplicate)
+	import.SetBrushModelAlt        = SV_SetBrushModel;
+	// [ 74] inPVS
+	import.inPVS                   = SV_inPVS;
+	// [ 75] inPVSIgnorePortals
+	import.inPVSIgnorePortals      = SV_inPVSIgnorePortals;
+	// [ 77] SetConfigstringAlt (duplicate)
+	import.SetConfigstringAlt      = SV_SetConfigstring;
+	// [ 78] GetConfigstringAlt (duplicate)
+	import.GetConfigstringAlt      = SV_GetConfigstring;
+	// [ 79] GetServerinfo
+	import.GetServerinfo           = SV_GetServerinfo;
+	// [ 80] AdjustAreaPortalState
+	import.AdjustAreaPortalState   = SV_AdjustAreaPortalState;
+	// [ 81] totalMapContents
+	import.totalMapContents        = CM_TotalMapContents;
+	// [ 83] GetSurfaceMaterial
+	import.GetSurfaceMaterial      = SV_GetSurfaceMaterial;
+	// [ 84] ModelIndex
+	import.ModelIndex              = SV_ModelIndex_Wrapper;
+	// [ 87] TheGhoul2InfoArray
+	import.TheGhoul2InfoArray      = SV_TheGhoul2InfoArray;
+	// [ 88] RE_RegisterSkin
+	import.RE_RegisterSkin         = SV_RE_RegisterSkin;
+	// [ 89] RE_GetAnimationCFG
+	import.RE_GetAnimationCFG      = SV_RE_GetAnimationCFG;
+	// [ 90] G2API_GetGhoul2InfoV
+	import.G2API_GetGhoul2InfoV    = SV_G2API_GetGhoul2InfoV;
+	// [ 91] G2API_CleanGhoul2ModelsRef
+	import.G2API_CleanGhoul2ModelsRef = SV_G2API_CleanGhoul2ModelsRef;
+	// [ 93] SE_GetString
+	import.SE_GetString            = SV_SE_GetString_Wrapper;
+	// [ 94] SoundIndex
+	import.SoundIndex              = SV_SoundIndex_Wrapper;
+	// [ 95] SE_SetStringSoundMap
+	import.SE_SetStringSoundMap    = SV_SE_SetStringSoundMap;
+	// [ 96] GetEntityToken2 (alternate slot, same wrapper)
+	import.GetEntityToken2         = SV_GetEntityToken_int;
+	// [ 97] CM_RegisterDamageShader
+	import.CM_RegisterDamageShader = SV_CM_RegisterDamageShader;
+	// [ 98] WE_GetWindVector — void wrapper around bool-returning SV_WE_GetWindVector
+	import.WE_GetWindVector        = SV_WE_GetWindVectorVoid;
+	// [ 99] SV_UpdateEntitySoundIndex
+	import.SV_UpdateEntitySoundIndex = SV_UpdateEntitySoundIndex_;
+	// [100] SoundDuration
+	import.SoundDuration           = SV_SoundDuration;
+	// [101] SetMusicState
+	import.SetMusicState           = SV_SetMusicState;
+	// [102] RMG_AddBreakpoint
+	import.RMG_AddBreakpoint       = SV_RMG_AddBreakpoint;
+	// [103] GameShutdown
+	import.GameShutdown            = SV_GameShutdown;
+	// [104] RMG_AutomapDrawLine
+	import.RMG_AutomapDrawLine     = SV_RMG_AutomapDrawLine;
+	// [105] RMG_AutomapDrawRegion
+	import.RMG_AutomapDrawRegion   = SV_RMG_AutomapDrawRegion;
+	// [106] RMG_AutomapDrawCircle
+	import.RMG_AutomapDrawCircle   = SV_RMG_AutomapDrawCircle;
+	// [107] RMG_AutomapDrawIcon
+	import.RMG_AutomapDrawIcon     = SV_RMG_AutomapDrawIcon;
+	// [108] RMG_AutomapDrawSquare
+	import.RMG_AutomapDrawSquare   = SV_RMG_AutomapDrawSquare;
+	// [110] RMG_AutomapDrawSpecial
+	import.RMG_AutomapDrawSpecial  = SV_RMG_AutomapDrawSpecial;
 
-	import.G2API_SaveGhoul2Models = SV_G2API_SaveGhoul2Models;
-	import.G2API_LoadGhoul2Models = SV_G2API_LoadGhoul2Models;
-	import.G2API_LoadSaveCodeDestructGhoul2Info = SV_G2API_LoadSaveCodeDestructGhoul2Info;
-	import.G2API_GetAnimFileNameIndex = SV_G2API_GetAnimFileNameIndex;
-	import.G2API_GetAnimFileInternalNameIndex = SV_G2API_GetAnimFileInternalNameIndex;
-	import.G2API_GetSurfaceRenderStatus = SV_G2API_GetSurfaceRenderStatus;
-
-	import.G2API_SetRagDoll = SV_G2API_SetRagDoll;
-	import.G2API_AnimateG2Models = SV_G2API_AnimateG2Models;
-
-	import.G2API_RagPCJConstraint = SV_G2API_RagPCJConstraint;
-	import.G2API_RagPCJGradientSpeed = SV_G2API_RagPCJGradientSpeed;
-	import.G2API_RagEffectorGoal = SV_G2API_RagEffectorGoal;
-	import.G2API_GetRagBonePos = SV_G2API_GetRagBonePos;
-	import.G2API_RagEffectorKick = SV_G2API_RagEffectorKick;
-	import.G2API_RagForceSolve = SV_G2API_RagForceSolve;
-
-	import.G2API_SetBoneIKState = SV_G2API_SetBoneIKState;
-    import.G2API_IKMove = SV_G2API_IKMove;
-
-	import.G2API_AddSkinGore = SV_G2API_AddSkinGore;
-	import.G2API_ClearSkinGore = SV_G2API_ClearSkinGore;
-
-	import.SetActiveSubBSP = SV_SetActiveSubBSP;
-
-	import.RE_RegisterSkin = SV_RE_RegisterSkin;
-	import.RE_GetAnimationCFG = SV_RE_GetAnimationCFG;
-
-	import.WE_GetWindVector	= SV_WE_GetWindVector;
-	import.WE_GetWindGusting = SV_WE_GetWindGusting;
-	import.WE_IsOutside	= SV_WE_IsOutside;
-	import.WE_IsOutsideCausingPain	= SV_WE_IsOutsideCausingPain;
-	import.WE_GetChanceOfSaberFizz = SV_WE_GetChanceOfSaberFizz;
-	import.WE_IsShaking = SV_WE_IsShaking;
-	import.WE_AddWeatherZone = SV_WE_AddWeatherZone;
-	import.WE_SetTempGlobalFogColor = SV_WE_SetTempGlobalFogColor;
-
-#ifdef JK2_MODE
-	const char *gamename = "jospgame";
-#else
-	const char *gamename = "jagame";
-#endif
+	// SOF2 SP game DLL name
+	const char *gamename = "gamex86";
 
 	GetGameAPIProc *GetGameAPI;
 	gameLibrary = Sys_LoadSPGameDll( gamename, &GetGameAPI );
@@ -1066,25 +1266,16 @@ void SV_InitGameProgs (void) {
 		Com_Error( ERR_DROP, "Failed to load %s library", gamename );
 	}
 
-	if (ge->apiversion != GAME_API_VERSION)
-	{
-		int apiVersion = ge->apiversion;
-		Sys_UnloadDll( gameLibrary );
-		Com_Error (ERR_DROP, "game is version %i, not %i", apiVersion, GAME_API_VERSION);
-	}
+	// SOF2 game_export_t has NO apiversion field — skip the version check.
 
-	//hook up the client while we're here
-	if ( !CL_InitCGameVM( gameLibrary ) )
-	{
-		Sys_UnloadDll( gameLibrary );
-		Com_Error ( ERR_DROP, "Failed to load client game functions" );
-	}
+	// SOF2 cgame is a SEPARATE DLL (cgamex86.dll) loaded later by CL_InitCGame().
+	// Do NOT call CL_InitCGameVM here.
 
 	sv.entityParsePoint = CM_EntityString();
 
-	// use the current msec count for a random seed
+	// SOF2 Init(levelTime, randomSeed, restart) — 3 args, not JK2's 9
 	Z_TagFree(TAG_G_ALLOC);
-	ge->Init( sv_mapname->string, sv_spawntarget->string, sv_mapChecksum->integer, CM_EntityString(), sv.time, com_frameTime, Com_Milliseconds(), eSavedGameJustLoaded, qbLoadTransition );
+	ge->Init( sv.time, Com_Milliseconds(), (int)eSavedGameJustLoaded );
 
 	// clear all gentity pointers that might still be set from
 	// a previous level
@@ -1107,6 +1298,6 @@ qboolean SV_GameCommand( void ) {
 		return qfalse;
 	}
 
-	return ge->ConsoleCommand();
+	return (qboolean)ge->ConsoleCommand();
 }
 

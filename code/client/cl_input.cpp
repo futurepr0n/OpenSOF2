@@ -899,7 +899,7 @@ void CL_WritePacket( void ) {
 	cl.packetTime[ packetNum ] = cls.realtime;
 	cl.packetCmdNumber[ packetNum ] = cl.cmdNumber;
 	clc.lastPacketSentTime = cls.realtime;
-	Netchan_Transmit (&clc.netchan, buf.cursize, buf.data);
+	CL_Netchan_Transmit (&clc.netchan, &buf);	// SOF2: apply XOR encryption
 }
 
 /*

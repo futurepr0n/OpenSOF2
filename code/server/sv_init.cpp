@@ -144,7 +144,7 @@ void SV_CreateBaseline( void ) {
 	gentity_t			*svent;
 	int				entnum;
 
-	for ( entnum = 0; entnum < ge->num_entities ; entnum++ ) {
+	for ( entnum = 0; entnum < MAX_GENTITIES ; entnum++ ) {
 		svent = SV_GentityNum(entnum);
 		if (!svent->inuse) {
 			continue;
@@ -317,7 +317,7 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 		re.G2API_SetTime(sv.time,G2T_SV_TIME);
 	}
 #ifndef JK2_MODE
-	ge->ConnectNavs(sv_mapname->string, sv_mapChecksum->integer);
+	ge->ConnectNavs();  // SOF2: ConnectNavs(void) — no args
 #endif
 
 	// create a baseline for more efficient communications

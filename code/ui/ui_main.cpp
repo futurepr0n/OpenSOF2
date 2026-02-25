@@ -59,6 +59,9 @@ extern void UI_SaberAttachToChar( itemDef_t *item );
 
 extern qboolean PC_Script_Parse(const char **out);
 
+// SOF2 UI DLL export table — set by CL_InitUI when Menusx86.dll is loaded.
+extern uiExport_t *uie;
+
 #define LISTBUFSIZE 10240
 
 static struct
@@ -481,6 +484,13 @@ int Key_GetCatcher( void );
 #define	UI_FPS_FRAMES	4
 void _UI_Refresh( int realtime )
 {
+	// SOF2 Menusx86.dll dispatch
+	if ( uie ) {
+		if ( uie->UI_Refresh )
+			uie->UI_Refresh();
+		return;
+	}
+
 	static int index;
 	static int	previousTimes[UI_FPS_FRAMES];
 
@@ -4007,6 +4017,13 @@ UI_MouseEvent
 //JLFMOUSE  CALLED EACH FRAME IN UI
 void _UI_MouseEvent( int dx, int dy )
 {
+	// SOF2 Menusx86.dll dispatch
+	if ( uie ) {
+		if ( uie->UI_MouseEvent )
+			uie->UI_MouseEvent( dx, dy );
+		return;
+	}
+
 	// update mouse screen position
 	uiInfo.uiDC.cursorx += dx;
 	if (uiInfo.uiDC.cursorx < 0)
@@ -4044,6 +4061,13 @@ UI_KeyEvent
 */
 void _UI_KeyEvent( int key, qboolean down )
 {
+	// SOF2 Menusx86.dll dispatch
+	if ( uie ) {
+		if ( uie->UI_KeyEvent )
+			uie->UI_KeyEvent( key, (int)down );
+		return;
+	}
+
 /*	extern qboolean SwallowBadNumLockedKPKey( int iKey );
 	if (SwallowBadNumLockedKPKey(key)){
 		return;
@@ -4141,6 +4165,11 @@ void UI_InGameMenu(const char*menuID)
 
 qboolean _UI_IsFullscreen( void )
 {
+	// SOF2 Menusx86.dll has no IsFullscreen callback.
+	// Approximate: if the UI key catcher is active, treat as full-screen.
+	if ( uie )
+		return ( Key_GetCatcher() & KEYCATCH_UI ) ? qtrue : qfalse;
+
 	return Menus_AnyFullScreenVisible();
 }
 

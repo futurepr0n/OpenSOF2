@@ -21,11 +21,31 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 ===========================================================================
 */
 
-#ifndef __G_PUBLIC_H__
-#define __G_PUBLIC_H__
+#ifndef __SOF2_G_PUBLIC_H__
+#define __SOF2_G_PUBLIC_H__
 // g_public.h -- game module information visible to server
+//
+// SOF2 SP game API version 8.
+// Verified from GetGameAPI() @ gamex86.dll:0x2005ef40.
+// See E:\SOF2\structs\game_import_t.h and game_export_t.h for full documentation.
+//
+// KEY DIFFERENCES FROM JK2 v10:
+//   - game_import_t: 113 entries (0x1C4 bytes), not JK2's ~200+
+//   - G2 API accessed via CWraith vtable in game DLL, NOT via import slots
+//   - SaveGame uses WriteChunk/ReadChunk (int chunkId, data, len), NOT ISavedGame
+//   - RMG/Arioche system: 7+ dedicated automap drawing import slots (102-112)
+//   - game_export_t: 26 function pointers (no data members)
+//   - Slots [4] and [5] are SWAPPED vs JK2: SOF2=[4]Disconnect,[5]Command
+//   - ClientUserinfoChanged does NOT exist in SOF2 SP
 
-#define	GAME_API_VERSION	10
+#define	GAME_API_VERSION	8
+
+typedef enum
+{
+	eNO = 0,
+	eFULL,
+	eAUTO,
+} SavedGameJustLoaded_e;
 
 // entity->svFlags
 // the server does not know how to interpret most of the values
@@ -39,7 +59,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define	SVF_BROADCAST			0x00000020	// send to all connected clients
 #define	SVF_PORTAL				0x00000040	// merge a second pvs at origin2 into snapshots
 #define	SVF_USE_CURRENT_ORIGIN	0x00000080	// entity->currentOrigin instead of entity->s.origin
-											// for link position (missiles and movers)
+										// for link position (missiles and movers)
 #define SVF_TRIMODEL			0x00000100	// Use a three piece model make up like a player does
 #define	SVF_OBJECTIVE			0x00000200	// Draw it's name if crosshair comes across it
 #define	SVF_ANIMATING			0x00000400	// Currently animating from startFrame to endFrame
@@ -67,24 +87,12 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 //===============================================================
 
 typedef struct gentity_s gentity_t;
-//typedef struct gclient_s gclient_t;
 
-typedef enum
-{
-	eNO = 0,
-	eFULL,
-	eAUTO,
-} SavedGameJustLoaded_e;
-
-
-#define GAME_INCLUDE
 #ifndef GAME_INCLUDE
-
-// the server needs to know enough information to handle collision and snapshot generation
 
 struct gentity_s {
 	entityState_t	s;				// communicated by server to clients
-	struct playerState_s	*client;
+	playerState_t	*client;
 	qboolean	inuse;
 	qboolean	linked;				// qfalse if not in any good cluster
 
@@ -98,340 +106,264 @@ struct gentity_s {
 
 	vec3_t		absmin, absmax;		// derived from mins/maxs and origin + rotation
 
-	// currentOrigin will be used for all collision detection and world linking.
-	// it will not necessarily be the same as the trajectory evaluation for the current
-	// time, because each entity must be moved one at a time after time is advanced
-	// to avoid simultanious collision issues
 	vec3_t		currentOrigin;
 	vec3_t		currentAngles;
 
-	gentity_t	*owner;				// objects never interact with their owners, to
-									// prevent player missiles from immediately
-									// colliding with their owner
+	gentity_t	*owner;
 /*
 Ghoul2 Insert Start
 */
-	// this marker thing of Jake's is used for memcpy() length calcs, so don't put any ordinary fields (like above)
-	//	below this point or they won't work, and will mess up all sorts of stuff.
-	//
 	CGhoul2Info_v	ghoul2;
 /*
 Ghoul2 Insert End
 */
-	// the game dll can add anything it wants after
-	// this point in the structure
+	// the game dll can add anything it wants after this point in the structure
 };
 
 #endif		// GAME_INCLUDE
 
 //===============================================================
-
 //
-// functions provided by the main engine
-//
-/*
-Ghoul2 Insert Start
-*/
-class CMiniHeap;
-/*
-Ghoul2 Insert End
-*/
-typedef struct {
-	//============== general Quake services ==================
-
-	// print message on the local console
-	void	(*Printf)( const char *fmt, ... );
-
-	// Write a camera ref_tag to cameras.map
-	void	(*WriteCam)( const char *text );
-	void	(*FlushCamFile)();
-
-	// abort the game
-	NORETURN_PTR void	(*Error)( int level, const char *fmt, ... );
-
-	// get current time for profiling reasons
-	// this should NOT be used for any game related tasks,
-	// because it is not journaled
-	int		(*Milliseconds)( void );
-
-	// console variable interaction
-	cvar_t	*(*cvar)( const char *var_name, const char *value, int flags );
-	void	(*cvar_set)( const char *var_name, const char *value );
-	int		(*Cvar_VariableIntegerValue)( const char *var_name );
-	void	(*Cvar_VariableStringBuffer)( const char *var_name, char *buffer, int bufsize );
-
-	// ClientCommand and ServerCommand parameter access
-	int		(*argc)( void );
-	char	*(*argv)( int n );
-
-	int		(*FS_FOpenFile)( const char *qpath, fileHandle_t *file, fsMode_t mode );
-	int		(*FS_Read)( void *buffer, int len, fileHandle_t f );
-	int		(*FS_Write)( const void *buffer, int len, fileHandle_t f );
-	void	(*FS_FCloseFile)( fileHandle_t f );
-	long	(*FS_ReadFile)( const char *name, void **buf );
-	void	(*FS_FreeFile)( void *buf );
-	int		(*FS_GetFileList)(  const char *path, const char *extension, char *listbuf, int bufsize );
-
-	// Savegame handling
-	//
-	ojk::ISavedGame* saved_game;
-
-	// add commands to the console as if they were typed in
-	// for map changing, etc
-	void	(*SendConsoleCommand)( const char *text );
-
-
-	//=========== server specific functionality =============
-
-	// kick a client off the server with a message
-	void	(*DropClient)( int clientNum, const char *reason );
-
-	// reliably sends a command string to be interpreted by the given
-	// client.  If clientNum is -1, it will be sent to all clients
-	void	(*SendServerCommand)( int clientNum, const char *fmt, ... );
-
-	// config strings hold all the index strings, and various other information
-	// that is reliably communicated to all clients
-	// All of the current configstrings are sent to clients when
-	// they connect, and changes are sent to all connected clients.
-	// All confgstrings are cleared at each level start.
-	void	(*SetConfigstring)( int num, const char *string );
-	void	(*GetConfigstring)( int num, char *buffer, int bufferSize );
-
-	// userinfo strings are maintained by the server system, so they
-	// are persistant across level loads, while all other game visible
-	// data is completely reset
-	void	(*GetUserinfo)( int num, char *buffer, int bufferSize );
-	void	(*SetUserinfo)( int num, const char *buffer );
-
-	// the serverinfo info string has all the cvars visible to server browsers
-	void	(*GetServerinfo)( char *buffer, int bufferSize );
-
-	// sets mins and maxs based on the brushmodel name
-	void	(*SetBrushModel)( gentity_t *ent, const char *name );
-
-	// collision detection against all linked entities
-	void	(*trace)( trace_t *results, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end,
-			const int passEntityNum, const int contentmask , const EG2_Collision eG2TraceType , const int useLod );
-
-	// point contents against all linked entities
-	int		(*pointcontents)( const vec3_t point, int passEntityNum );
-	// what contents are on the map?
-	int		(*totalMapContents)();
-
-	qboolean	(*inPVS)( const vec3_t p1, const vec3_t p2 );
-	qboolean	(*inPVSIgnorePortals)( const vec3_t p1, const vec3_t p2 );
-	void		(*AdjustAreaPortalState)( gentity_t *ent, qboolean open );
-	qboolean	(*AreasConnected)( int area1, int area2 );
-
-	// an entity will never be sent to a client or used for collision
-	// if it is not passed to linkentity.  If the size, position, or
-	// solidity changes, it must be relinked.
-	void	(*linkentity)( gentity_t *ent );
-	void	(*unlinkentity)( gentity_t *ent );		// call before removing an interactive entity
-
-	// EntitiesInBox will return brush models based on their bounding box,
-	// so exact determination must still be done with EntityContact
-	int		(*EntitiesInBox)( const vec3_t mins, const vec3_t maxs, gentity_t **list, int maxcount );
-
-	// perform an exact check against inline brush models of non-square shape
-	qboolean	(*EntityContact)( const vec3_t mins, const vec3_t maxs, const gentity_t *ent );
-
-	// sound volume values
-	int		*VoiceVolume;
-
-	// dynamic memory allocator for things that need to be freed
-	void		*(*Malloc)( int iSize, memtag_t eTag, qboolean bZeroIt);	// see qcommon/tags.h for choices
-	int			(*Free)( void *buf );
-	qboolean	(*bIsFromZone)( void *buf, memtag_t eTag);	// see qcommon/tags.h for choices
-
-/*
-Ghoul2 Insert Start
-*/
-	qhandle_t	(*G2API_PrecacheGhoul2Model)(const char *fileName);
-
-	int			(*G2API_InitGhoul2Model)(CGhoul2Info_v &ghoul2, const char *fileName, int modelIndex, qhandle_t customSkin,
-								  qhandle_t customShader, int modelFlags, int lodBias );
-	qboolean	(*G2API_SetSkin)(CGhoul2Info *ghlInfo, qhandle_t customSkin, qhandle_t renderSkin );
-	qboolean	(*G2API_SetBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int startFrame, const int endFrame,
-							  const int flags, const float animSpeed, const int currentTime, const float setFrame, const int blendTime );
-	qboolean	(*G2API_SetBoneAngles)(CGhoul2Info *ghlInfo, const char *boneName, const vec3_t angles,
-								   const int flags, const Eorientations up, const Eorientations right, const Eorientations forward,
-								   qhandle_t *modelList, int blendTime , int blendStart );
-	qboolean	(*G2API_SetBoneAnglesIndex)(CGhoul2Info *ghlInfo, const int index, const vec3_t angles, const int flags,
-							 const Eorientations yaw, const Eorientations pitch, const Eorientations roll,
-							 qhandle_t *modelList, int blendTime, int currentTime );
-	qboolean	(*G2API_SetBoneAnglesMatrix)(CGhoul2Info *ghlInfo, const char *boneName, const mdxaBone_t &matrix, const int flags,
-									  qhandle_t *modelList, int blendTime , int currentTime );
-	void		(*G2API_CopyGhoul2Instance)(CGhoul2Info_v &ghoul2From, CGhoul2Info_v &ghoul2To, int modelIndex );
-	qboolean	(*G2API_SetBoneAnimIndex)(CGhoul2Info *ghlInfo, const int index, const int startFrame, const int endFrame, const int flags,
-							const float animSpeed, const int currentTime, const float setFrame , const int blendTime );
-
-	qboolean	(*G2API_SetLodBias)(CGhoul2Info *ghlInfo, int lodBias);
-	qboolean	(*G2API_SetShader)(CGhoul2Info *ghlInfo, qhandle_t customShader);
-	qboolean	(*G2API_RemoveGhoul2Model)(CGhoul2Info_v &ghlInfo, const int modelIndex);
-	qboolean	(*G2API_SetSurfaceOnOff)(CGhoul2Info *ghlInfo, const char *surfaceName, const int flags);
-	qboolean	(*G2API_SetRootSurface)(CGhoul2Info_v &ghlInfo, const int modelIndex, const char *surfaceName);
-	qboolean	(*G2API_RemoveSurface)(CGhoul2Info *ghlInfo, const int index);
-	int			(*G2API_AddSurface)(CGhoul2Info *ghlInfo, int surfaceNumber, int polyNumber, float BarycentricI, float BarycentricJ, int lod );
-	qboolean	(*G2API_GetBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int currentTime, float *currentFrame,
-							  int *startFrame, int *endFrame, int *flags, float *animSpeed, int *modelList);
-	qboolean	(*G2API_GetBoneAnimIndex)(CGhoul2Info *ghlInfo, const int iBoneIndex, const int currentTime, float *currentFrame,
-							  int *startFrame, int *endFrame, int *flags, float *animSpeed, int *modelList);
-	qboolean	(*G2API_GetAnimRange)(CGhoul2Info *ghlInfo, const char *boneName,	int *startFrame, int *endFrame);
-	qboolean	(*G2API_GetAnimRangeIndex)(CGhoul2Info *ghlInfo, const int boneIndex,	int *startFrame, int *endFrame);
-
-	qboolean	(*G2API_PauseBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int currentTime);
-	qboolean	(*G2API_PauseBoneAnimIndex)(CGhoul2Info *ghlInfo, const int boneIndex, const int currentTime);
-	qboolean	(*G2API_IsPaused)(CGhoul2Info *ghlInfo, const char *boneName);
-	qboolean	(*G2API_StopBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName);
-	qboolean	(*G2API_StopBoneAngles)(CGhoul2Info *ghlInfo, const char *boneName);
-	qboolean	(*G2API_RemoveBone)(CGhoul2Info *ghlInfo, const char *boneName);
-	qboolean	(*G2API_RemoveBolt)(CGhoul2Info *ghlInfo, const int index);
-	int			(*G2API_AddBolt)(CGhoul2Info *ghlInfo, const char *boneName);
-	int			(*G2API_AddBoltSurfNum)(CGhoul2Info *ghlInfo, const int surfIndex);
-	qboolean	(*G2API_AttachG2Model)(CGhoul2Info *ghlInfo, CGhoul2Info *ghlInfoTo, int toBoltIndex, int toModel);
-	qboolean	(*G2API_DetachG2Model)(CGhoul2Info *ghlInfo);
-	qboolean	(*G2API_AttachEnt)(int *boltInfo, CGhoul2Info *ghlInfoTo, int toBoltIndex, int entNum, int toModelNum);
-	void		(*G2API_DetachEnt)(int *boltInfo);
-
-	qboolean	(*G2API_GetBoltMatrix)(CGhoul2Info_v &ghoul2, const int modelIndex, const int boltIndex, mdxaBone_t *matrix,
-			const vec3_t angles, const vec3_t position, const int frameNum, qhandle_t *modelList, const vec3_t scale);
-
-	void		(*G2API_ListSurfaces)(CGhoul2Info *ghlInfo);
-	void		(*G2API_ListBones)(CGhoul2Info *ghlInfo, int frame);
-	qboolean	(*G2API_HaveWeGhoul2Models)(CGhoul2Info_v &ghoul2);
-	qboolean	(*G2API_SetGhoul2ModelFlags)(CGhoul2Info *ghlInfo, const int flags);
-	int			(*G2API_GetGhoul2ModelFlags)(CGhoul2Info *ghlInfo);
-
-	qboolean	(*G2API_GetAnimFileName)(CGhoul2Info *ghlInfo, char **filename);
-	void		(*G2API_CollisionDetect)(CCollisionRecord *collRecMap, CGhoul2Info_v &ghoul2, const vec3_t angles, const vec3_t position,
-									int frameNumber, int entNum, vec3_t rayStart, vec3_t rayEnd, vec3_t scale, CMiniHeap *G2VertSpace,
-									EG2_Collision eG2TraceType, int useLod, float fRadius);
-	void		(*G2API_GiveMeVectorFromMatrix)(mdxaBone_t &boltMatrix, Eorientations flags, vec3_t &vec);
-	void		(*G2API_CleanGhoul2Models)(CGhoul2Info_v &ghoul2);
-	IGhoul2InfoArray &		(*TheGhoul2InfoArray)();
-	int			(*G2API_GetParentSurface)(CGhoul2Info *ghlInfo, const int index);
-	int			(*G2API_GetSurfaceIndex)(CGhoul2Info *ghlInfo, const char *surfaceName);
-	char		*(*G2API_GetSurfaceName)(CGhoul2Info *ghlInfo, int surfNumber);
-	char		*(*G2API_GetGLAName)(CGhoul2Info *ghlInfo);
-	qboolean	(*G2API_SetNewOrigin)(CGhoul2Info *ghlInfo, const int boltIndex);
-	int			(*G2API_GetBoneIndex)(CGhoul2Info *ghlInfo, const char *boneName, qboolean bAddIfNotFound);
-	qboolean	(*G2API_StopBoneAnglesIndex)(CGhoul2Info *ghlInfo, const int index);
-	qboolean	(*G2API_StopBoneAnimIndex)(CGhoul2Info *ghlInfo, const int index);
-	qboolean	(*G2API_SetBoneAnglesMatrixIndex)(CGhoul2Info *ghlInfo, const int index, const mdxaBone_t &matrix,
-								   const int flags, qhandle_t *modelList, int blendTime, int currentTime);
-	qboolean	(*G2API_SetAnimIndex)(CGhoul2Info *ghlInfo, const int index);
-	int			(*G2API_GetAnimIndex)(CGhoul2Info *ghlInfo);
-	void		(*G2API_SaveGhoul2Models)(CGhoul2Info_v &ghoul2);
-	void		(*G2API_LoadGhoul2Models)(CGhoul2Info_v &ghoul2, char *buffer);
-	void		(*G2API_LoadSaveCodeDestructGhoul2Info)(CGhoul2Info_v &ghoul2);
-	char		*(*G2API_GetAnimFileNameIndex)(qhandle_t modelIndex);
-	char		*(*G2API_GetAnimFileInternalNameIndex)(qhandle_t modelIndex);
-	int			(*G2API_GetSurfaceRenderStatus)(CGhoul2Info *ghlInfo, const char *surfaceName);
-
-	//rww - RAGDOLL_BEGIN
-	void		(*G2API_SetRagDoll)(CGhoul2Info_v &ghoul2,void *parms);
-	void		(*G2API_AnimateG2Models)(CGhoul2Info_v &ghoul2, int AcurrentTime,void *params);
-
-	qboolean	(*G2API_RagPCJConstraint)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t min, vec3_t max);
-	qboolean	(*G2API_RagPCJGradientSpeed)(CGhoul2Info_v &ghoul2, const char *boneName, const float speed);
-	qboolean	(*G2API_RagEffectorGoal)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t pos);
-	qboolean	(*G2API_GetRagBonePos)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t pos, vec3_t entAngles, vec3_t entPos, vec3_t entScale);
-	qboolean	(*G2API_RagEffectorKick)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t velocity);
-	qboolean	(*G2API_RagForceSolve)(CGhoul2Info_v &ghoul2, qboolean force);
-
-	qboolean	(*G2API_SetBoneIKState)(CGhoul2Info_v &ghoul2, int time, const char *boneName, int ikState, void *params);
-	qboolean	(*G2API_IKMove) (CGhoul2Info_v &ghoul2, int time, void *params);
-	//rww - RAGDOLL_END
-
-	void		(*G2API_AddSkinGore)(CGhoul2Info_v &ghoul2,void *gore);
-	void		(*G2API_ClearSkinGore)( CGhoul2Info_v &ghoul2 );
-
-	void		(*RMG_Init)(int terrainID);
-
-	int			(*CM_RegisterTerrain)(const char *info);
-
-	const char	*(*SetActiveSubBSP)(int index);
-
-
-	int			(*RE_RegisterSkin)(const char *name);
-	int			(*RE_GetAnimationCFG)(const char *psCFGFilename, char *psDest, int iDestSize);
-
-	bool		(*WE_GetWindVector)(vec3_t windVector, vec3_t atpoint);
-	bool		(*WE_GetWindGusting)(vec3_t atpoint);
-	bool		(*WE_IsOutside)(vec3_t pos);
-	float		(*WE_IsOutsideCausingPain)(vec3_t pos);
-	float		(*WE_GetChanceOfSaberFizz)(void);
-	bool		(*WE_IsShaking)(vec3_t pos);
-	void		(*WE_AddWeatherZone)(vec3_t mins, vec3_t maxs);
-	bool		(*WE_SetTempGlobalFogColor)(vec3_t color);
-
-
-/*
-Ghoul2 Insert End
-*/
-
-
-} game_import_t;
-
-//
-// functions exported by the game subsystem
+// functions provided by the main engine — SOF2 v8 game_import_t
+// 113 entries (0x1C4 bytes), populated by SV_InitGameProgs()
+// Verified from gamex86.dll GetGameAPI @ 0x2005ef40 (memcpy of 0x71 dwords)
 //
 typedef struct {
-	int			apiversion;
+	//============== General Services (slots 0-7) ==================
 
-	// init and shutdown will be called every single level
-	// levelTime will be near zero, while globalTime will be a large number
-	// that can be used to track spectator entry times across restarts
-	void		(*Init)( const char *mapname, const char *spawntarget, int checkSum, const char *entstring,
-		int levelTime, int randomSeed, int globalTime, SavedGameJustLoaded_e eSavedGameJustLoaded, qboolean qbLoadTransition );
-	void		(*Shutdown) (void);
+	void    (*Printf)(const char *fmt, ...);                    // +0x000 [slot  0] gi_Printf
+	void    (*DPrintf)(const char *fmt, ...);                   // +0x004 [slot  1] gi_DPrintf (debug print)
+	void    (*FlushCamFile)(void);                              // +0x008 [slot  2] gi_FlushCamFile (UNUSED)
+	NORETURN_PTR void (*Error)(int errLevel, const char *fmt, ...); // +0x00c [slot  3] gi_Error (ERR_DROP=1)
+	int     (*Milliseconds)(void);                              // +0x010 [slot  4] gi_Milliseconds
+	cvar_t *(*cvar)(const char *name, const char *val, int f);  // +0x014 [slot  5] gi_cvar (Cvar_Get)
+	void    (*cvar_set)(const char *name, const char *val);     // +0x018 [slot  6] gi_cvar_set (Cvar_Set)
+	void    (*Cvar_VariableStringBuffer)(const char *name,      // +0x01c [slot  7] gi_Cvar_VariableStringBuffer
+				char *buffer, int bufsize);
 
-	// ReadLevel is called after the default map information has been
-	// loaded with SpawnEntities
-	void		(*WriteLevel) (qboolean qbAutosave);
-	void		(*ReadLevel)  (qboolean qbAutosave, qboolean qbLoadTransition);
-	qboolean	(*GameAllowedToSaveHere)(void);
+	//============== File System (slots 8-17) ==================
 
-	// return NULL if the client is allowed to connect, otherwise return
-	// a text string with the reason for denial
-	char		*(*ClientConnect)( int clientNum, qboolean firstTime, SavedGameJustLoaded_e eSavedGameJustLoaded );
+	void    (*FS_FCloseFile)(fileHandle_t handle);              // +0x020 [slot  8] gi_FS_FCloseFile
+	long    (*FS_ReadFile)(const char *name, void **buf);       // +0x024 [slot  9] gi_FS_ReadFile
+	int     (*FS_Read)(void *buffer, int len, fileHandle_t fh); // +0x028 [slot 10] gi_FS_Read
+	int     (*FS_Write)(const void *buf, int len, fileHandle_t fh); // +0x02c [slot 11] gi_FS_Write
+	int     (*FS_FOpenFile)(const char *path, fileHandle_t *handle, // +0x030 [slot 12] gi_FS_FOpenFile
+				fsMode_t mode);
+	void    (*FS_FreeFile)(void *buf);                          // +0x034 [slot 13] gi_FS_FreeFile
+	int     (*FS_GetFileList)(const char *path,                 // +0x038 [slot 14] gi_FS_GetFileList
+				const char *ext, char *listbuf, int bufsize);
+	void   *saved_game;                                         // +0x03c [slot 15] gi_saved_game (opaque ISavedGame ptr, unused by SOF2)
+	void   *reserved_16;                                        // +0x040 [slot 16] (unused)
+	void   *reserved_17;                                        // +0x044 [slot 17] (unused)
 
-	void		(*ClientBegin)( int clientNum, usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded);
-	void		(*ClientUserinfoChanged)( int clientNum );
-	void		(*ClientDisconnect)( int clientNum );
-	void		(*ClientCommand)( int clientNum );
-	void		(*ClientThink)( int clientNum, usercmd_t *cmd );
+	//============== Console & Client (slots 18-23) ==================
 
-	void		(*RunFrame)( int levelTime );
-	void		(*ConnectNavs)( const char *mapname, int checkSum );
+	void    (*SendConsoleCommand)(const char *text);            // +0x048 [slot 18] gi_SendConsoleCommand
+	void    (*DropClient)(int clientNum, const char *reason);   // +0x04c [slot 19] gi_DropClient
+	int     (*argc)(void);                                      // +0x050 [slot 20] gi_argc
+	char   *(*argv)(int n);                                     // +0x054 [slot 21] gi_argv
+	void   *reserved_22;                                        // +0x058 [slot 22] (unused)
+	void    (*Com_sprintf)(char *dest, int size,                // +0x05c [slot 23] gi_sprintf
+				const char *fmt, ...);
 
-	// ConsoleCommand will be called when a command has been issued
-	// that is not recognized as a builtin function.
-	// The game can issue gi.argc() / gi.argv() commands to get the command
-	// and parameters.  Return qfalse if the game doesn't recognize it as a command.
-	qboolean	(*ConsoleCommand)( void );
+	//============== Cvar Extended (slots 24-25) ==================
 
-	//void		(*PrintEntClassname)( int clientNum );
-	//int			(*ValidateAnimRange)( int startFrame, int endFrame, float animSpeed );
+	int     (*Cvar_VariableIntegerValue)(const char *name);     // +0x060 [slot 24] gi_Cvar_VariableIntegerValue
+	void    (*Cvar_SetValue)(const char *name, float val,       // +0x064 [slot 25] gi_Cvar_SetValue
+				int force);
 
-	void		(*GameSpawnRMGEntity)(char *s);
-	//
-	// global variables shared between game and server
-	//
+	//============== Config & Server (slots 26-31) ==================
 
-	// The gentities array is allocated in the game dll so it
-	// can vary in size from one game to another.
-	//
-	// The size will be fixed when ge->Init() is called
-	// the server can't just use pointer arithmetic on gentities, because the
-	// server's sizeof(struct gentity_s) doesn't equal gentitySize
-	struct gentity_s	*gentities;
-	int			gentitySize;
-	int			num_entities;		// current number, <= MAX_GENTITIES
-} game_export_t;
+	void    (*SetConfigstring)(int num, const char *string);    // +0x068 [slot 26] gi_SetConfigstring
+	void    (*GetConfigstring)(int num, char *buf, int bufsize);// +0x06c [slot 27] gi_GetConfigstring
+	void    (*SetUserinfo)(int num, const char *buffer);        // +0x070 [slot 28] gi_SetUserinfo
+	void    (*GetUserinfo)(int num, char *buffer, int bufsize); // +0x074 [slot 29] gi_GetUserinfo
+	void    (*SendServerCommand)(int clientNum,                 // +0x078 [slot 30] gi_SendServerCommand
+				const char *fmt, ...);
+	void    (*SetBrushModel)(gentity_t *ent, const char *name); // +0x07c [slot 31] gi_SetBrushModel
 
-game_export_t *GetGameApi (game_import_t *import);
+	//============== Memory (slots 32-34) ==================
+	// NOTE: SOF2 uses malloc-based zone memory, NOT tagged memory (no memtag_t)
 
-#endif//#ifndef __G_PUBLIC_H__
+	void   *(*Malloc)(int size, int tag, qboolean zeroIt);      // +0x080 [slot 32] gi_Malloc (Z_Malloc wrapper)
+	int     (*Free)(void *buf);                                 // +0x084 [slot 33] gi_Free (Z_Free wrapper)
+	void   *reserved_34;                                        // +0x088 [slot 34] (unused)
+
+	//============== Entity Tokens & Terrain (slots 35-49) ==================
+
+	int     (*GetEntityToken)(char *buf, int bufsize);          // +0x08c [slot 35] gi_GetEntityToken
+	void    (*CM_FreeTerrain)(int terrainId);                   // +0x090 [slot 36] gi_CM_FreeTerrain
+	void   *reserved_37;                                        // +0x094 [slot 37] (unused)
+	void    (*RMG_Init)(int terrainId);                         // +0x098 [slot 38] gi_RMG_Init
+	int     (*irand)(int min, int max);                         // +0x09c [slot 39] gi_irand
+	void    (*RMG_GetSpawnPoint)(int terrainId, float *pos);    // +0x0a0 [slot 40] gi_RMG_GetSpawnPoint
+	int     (*RMG_GetCellInfo)(int terrainId, int x, int y);    // +0x0a4 [slot 41] gi_RMG_GetCellInfo
+	void   *reserved_42;                                        // +0x0a8 [slot 42] (unused)
+	void    (*RMG_UpdateTerrain)(int terrainId);                // +0x0ac [slot 43] gi_RMG_UpdateTerrain
+	void   *reserved_44;                                        // +0x0b0 [slot 44] (unused)
+	void   *reserved_45;                                        // +0x0b4 [slot 45] (unused)
+	void   *reserved_46;                                        // +0x0b8 [slot 46] (unused)
+	void   *reserved_47;                                        // +0x0bc [slot 47] (unused)
+	void   *reserved_48;                                        // +0x0c0 [slot 48] (unused)
+	void   *reserved_49;                                        // +0x0c4 [slot 49] (unused)
+
+	//============== Collision & Tracing (slots 50-51) ==================
+
+	void    (*trace)(trace_t *results, const vec3_t start,      // +0x0c8 [slot 50] gi_trace (basic)
+				const vec3_t mins, const vec3_t maxs,
+				const vec3_t end, int passEnt, int contentmask);
+	int     (*pointcontents)(const vec3_t point, int passEntityNum); // +0x0cc [slot 51] gi_pointcontents
+
+	//============== SaveGame System (slots 52-53) ==================
+	// SOF2 replaces JK2's ISavedGame interface with explicit chunk I/O.
+	// The game DLL calls these instead of saved_game->WriteChunk()/ReadChunk().
+
+	void    (*SaveGame_WriteChunk)(int chunkId, void *data,     // +0x0d0 [slot 52] gi_SaveGame_WriteChunk
+				int length);
+	void    (*SaveGame_ReadChunk)(int chunkId, void *data,      // +0x0d4 [slot 53] gi_SaveGame_ReadChunk
+				int length);
+
+	//============== Entity Management (slots 54-62) ==================
+
+	void    (*LocateGameData)(void *gentities);                 // +0x0d8 [slot 54] gi_LocateGameData
+	void   *reserved_55;                                        // +0x0dc [slot 55] (unused)
+	void    (*GetUserinfoAlt)(int num, char *buf, int bufsize);  // +0x0e0 [slot 56] gi_GetUserinfo (alt)
+	void    (*linkentity)(gentity_t *ent);                      // +0x0e4 [slot 57] gi_linkentity
+	void    (*unlinkentity)(gentity_t *ent);                    // +0x0e8 [slot 58] gi_unlinkentity
+	void    (*MulticastTempEntity)(gentity_t *ent);             // +0x0ec [slot 59] gi_SV_MulticastTempEntity
+	void    (*InitTempEntFinalize)(gentity_t *ent);             // +0x0f0 [slot 60] gi_InitTempEntFinalize
+	int     (*GetTempEntCount)(void);                           // +0x0f4 [slot 61] gi_GetTempEntCount
+	void   *reserved_62;                                        // +0x0f8 [slot 62] (unused)
+
+	//============== ICARUS & Entity Access (slots 63-68) ==================
+
+	void    (*ICARUS_PlaySound)(int entID, const char *name,    // +0x0fc [slot 63] gi_ICARUS_PlaySound
+				const char *channel);
+	int     (*ICARUS_RunScript)(gentity_t *ent, const char *script); // +0x100 [slot 64] gi_ICARUS_RunScript
+	gentity_t *(*GetCurrentEntity)(void);                       // +0x104 [slot 65] gi_GetCurrentEntity
+	void    (*G2API_CleanGhoul2Models)(CGhoul2Info_v &ghoul2);  // +0x108 [slot 66] gi_G2API_CleanGhoul2Models
+	char   *(*GetLastErrorString)(void);                        // +0x10c [slot 67] gi_GetLastErrorString
+	gentity_t *(*GetCurrentEntityIndirect)(void);               // +0x110 [slot 68] gi_GetCurrentEntityIndirect
+
+	//============== Spatial Queries (slots 69-75) ==================
+
+	int     (*EntitiesInBox)(const vec3_t mins, const vec3_t maxs, // +0x114 [slot 69] gi_EntitiesInBox
+				gentity_t **list, int maxcount);
+	qboolean (*EntityContact)(const vec3_t mins, const vec3_t maxs, // +0x118 [slot 70] gi_EntityContact
+				const gentity_t *ent);
+	void    (*traceG2)(trace_t *results, const vec3_t start,    // +0x11c [slot 71] gi_trace (G2-enabled)
+				const vec3_t mins, const vec3_t maxs,
+				const vec3_t end, int passEnt, int contentmask,
+				int g2TraceType, int useLod);
+	int     (*GetEntityBoundsSize)(gentity_t *ent);             // +0x120 [slot 72] gi_GetEntityBoundsSize
+	void    (*SetBrushModelAlt)(gentity_t *ent, const char *name); // +0x124 [slot 73] gi_SetBrushModel (alt)
+	qboolean (*inPVS)(const vec3_t p1, const vec3_t p2);        // +0x128 [slot 74] gi_inPVS
+	qboolean (*inPVSIgnorePortals)(const vec3_t p1, const vec3_t p2); // +0x12c [slot 75] gi_inPVSIgnorePortals
+
+	//============== Server Data (slots 76-83) ==================
+
+	void   *reserved_76;                                        // +0x130 [slot 76] (unused)
+	void    (*SetConfigstringAlt)(int num, const char *str);    // +0x134 [slot 77] gi_SetConfigstring (alt)
+	void    (*GetConfigstringAlt)(int num, char *buf, int sz);  // +0x138 [slot 78] gi_GetConfigstring (alt)
+	void    (*GetServerinfo)(char *buffer, int bufferSize);     // +0x13c [slot 79] gi_GetServerinfo
+	void    (*AdjustAreaPortalState)(gentity_t *ent, qboolean open); // +0x140 [slot 80] gi_AdjustAreaPortalState
+	int     (*totalMapContents)(void);                          // +0x144 [slot 81] gi_totalMapContents
+	void   *reserved_82;                                        // +0x148 [slot 82] (unused)
+	int     (*GetSurfaceMaterial)(int surfIndex, float *vel);   // +0x14c [slot 83] gi_GetSurfaceMaterial
+
+	//============== Model & Ghoul2 (slots 84-92) ==================
+	// NOTE: Most G2 API accessed via CWraith vtable, not these slots.
+	// Only a few G2 operations come through the import table directly.
+
+	int     (*ModelIndex)(const char *name);                    // +0x150 [slot 84] gi_ModelIndex
+	void   *reserved_85;                                        // +0x154 [slot 85] (unused)
+	void   *reserved_86;                                        // +0x158 [slot 86] (unused)
+	IGhoul2InfoArray &(*TheGhoul2InfoArray)(void);              // +0x15c [slot 87] gi_TheGhoul2InfoArray
+	int     (*RE_RegisterSkin)(const char *name);               // +0x160 [slot 88] gi_RE_RegisterSkin
+	int     (*RE_GetAnimationCFG)(const char *cfg,              // +0x164 [slot 89] gi_RE_GetAnimationCFG
+				char *dest, int destSize);
+	CGhoul2Info_v *(*G2API_GetGhoul2InfoV)(int ghoul2handle);   // +0x168 [slot 90] gi_G2API_GetGhoul2InfoV
+	void    (*G2API_CleanGhoul2ModelsRef)(CGhoul2Info_v *ghoul2ref); // +0x16c [slot 91] gi_G2API_CleanGhoul2ModelsRef
+	void   *reserved_92;                                        // +0x170 [slot 92] (unused)
+
+	//============== String Editor & Sound (slots 93-101) ==================
+
+	char   *(*SE_GetString)(const char *token, int flags);      // +0x174 [slot 93] gi_SE_GetString
+	int     (*SoundIndex)(const char *name);                    // +0x178 [slot 94] gi_SoundIndex
+	void    (*SE_SetStringSoundMap)(const char *token, int idx);// +0x17c [slot 95] gi_SE_SetStringSoundMap
+	int     (*GetEntityToken2)(char *buf, int bufsize);         // +0x180 [slot 96] gi_GetEntityToken2
+	int     (*CM_RegisterDamageShader)(const char *name);       // +0x184 [slot 97] gi_CM_RegisterDamageShader
+	void    (*WE_GetWindVector)(vec3_t wind, vec3_t atpoint);   // +0x188 [slot 98] gi_WE_GetWindVector
+	void    (*SV_UpdateEntitySoundIndex)(int entNum);           // +0x18c [slot 99] gi_SV_UpdateEntitySoundIndex
+	int     (*SoundDuration)(const char *name);                 // +0x190 [slot100] gi_SoundDuration
+	void    (*SetMusicState)(int state);                        // +0x194 [slot101] gi_SetMusicState
+
+	//============== RMG Automap (slots 102-112) ==================
+
+	void    (*RMG_AddBreakpoint)(int terrainId, void *data);    // +0x198 [slot102] gi_RMG_AddBreakpoint
+	void    (*GameShutdown)(void);                              // +0x19c [slot103] gi_GameShutdown
+	void    (*RMG_AutomapDrawLine)(int x1, int y1,              // +0x1a0 [slot104] gi_RMG_AutomapDrawLine
+				int x2, int y2, int color);
+	void    (*RMG_AutomapDrawRegion)(int x, int y,              // +0x1a4 [slot105] gi_RMG_AutomapDrawRegion
+				int w, int h, int color);
+	void    (*RMG_AutomapDrawCircle)(int x, int y,              // +0x1a8 [slot106] gi_RMG_AutomapDrawCircle
+				int radius, int color);
+	void    (*RMG_AutomapDrawIcon)(int x, int y,                // +0x1ac [slot107] gi_RMG_AutomapDrawIcon
+				int icon, int color);
+	void    (*RMG_AutomapDrawSquare)(int x, int y,              // +0x1b0 [slot108] gi_RMG_AutomapDrawSquare
+				int size, int color);
+	void   *reserved_109;                                       // +0x1b4 [slot109] (unused)
+	void    (*RMG_AutomapDrawSpecial)(int x, int y,             // +0x1b8 [slot110] gi_RMG_AutomapDrawSpecial
+				int type, int color);
+	void   *reserved_111;                                       // +0x1bc [slot111] (unused)
+	void   *reserved_112;                                       // +0x1c0 [slot112] (unused)
+
+} game_import_t;  // 0x1C4 bytes total (113 pointers × 4 bytes)
+
+//
+// functions exported by the game subsystem — SOF2 v8 game_export_t
+// 26 function pointer slots (0x68 bytes), returned by GetGameAPI()
+// IMPORTANT: Slot [4]=ClientDisconnect, [5]=ClientCommand (SWAPPED vs JK2 v10)
+//
+typedef struct {
+	// --- Core game callbacks (slots 0-8) ---
+	void    (*Init)(int levelTime, int randomSeed, int restart); // +0x00 [0]  InitGame
+	void    (*Shutdown)(int restart);                            // +0x04 [1]  G_ShutdownGame
+	char   *(*ClientConnect)(int clientNum, int firstTime,       // +0x08 [2]  ClientConnect
+				int isBot);
+	void    (*ClientBegin)(int clientNum);                       // +0x0c [3]  ClientBegin
+	void    (*ClientDisconnect)(int clientNum);                  // +0x10 [4]  ClientDisconnect
+	                                                             //            NOTE: slot[4]=Disconnect in SOF2 v8
+	                                                             //            (was ClientUserinfoChanged in JK2 v10)
+	void    (*ClientCommand)(int clientNum);                     // +0x14 [5]  ClientCommand (dev dispatch)
+	                                                             //            NOTE: slot[5]=Command in SOF2 v8
+	                                                             //            (was ClientDisconnect in JK2 v10)
+	void    (*ClientThink)(int clientNum);                       // +0x18 [6]  ClientThink
+	void    (*RunFrame)(int levelTime);                          // +0x1c [7]  G_RunFrame
+	int     (*ConsoleCommand)(void);                             // +0x20 [8]  G_ConsoleCommand
+
+	// --- Raven extended slots (9-15) ---
+	void    (*SpawnEntitiesFromString)(void);                    // +0x24 [9]  G_SpawnGEntityFromSpawnVars
+	void   *reserved0;                                          // +0x28 [10] NULL
+	void    (*ClientCommand_Arioche)(int clientNum);             // +0x2c [11] ClientCommand_Arioche (RMG only)
+	void    (*InitIcarus)(void);                                 // +0x30 [12] G_InitIcarus
+	void    (*ConnectNavs)(void);                                // +0x34 [13] G_ConnectNavs
+	void    (*UpdateSavesLeft)(void);                            // +0x38 [14] G_UpdateSavesLeft
+	void   *reserved1;                                          // +0x3c [15] NULL
+
+	// --- Save/load and level callbacks (slots 16-25) ---
+	void    (*PostLoadInit)(void);                               // +0x40 [16] G_PostLoadInit
+	void    (*SaveGame)(void);                                   // +0x44 [17] G_SaveGame
+	int     (*GameAllowedToSaveHere)(void);                     // +0x48 [18] G_GameAllowedToSaveHere
+	void    (*GetSavedGameJustLoaded)(void);                     // +0x4c [19] G_GetSavedGameJustLoaded
+	void    (*WriteLevel)(void);                                 // +0x50 [20] G_WriteLevel
+	void    (*ReadLevel)(char *mapname);                         // +0x54 [21] G_ReadLevel
+	void    (*GameSpawnRMGEntity)(char *entityString);           // +0x58 [22] G_GameSpawnRMGEntity
+	void    (*InitNavigation)(void);                             // +0x5c [23] G_InitNavigation
+	void    (*InitSquads)(void);                                 // +0x60 [24] G_InitSquads
+	void    (*InitWeaponSystem)(void);                           // +0x64 [25] CWpnSysManager_InitGlobalInstance
+} game_export_t;  // 0x68 bytes total (26 function pointers)
+
+game_export_t *GetGameAPI (game_import_t *import);
+
+#endif//#ifndef __SOF2_G_PUBLIC_H__

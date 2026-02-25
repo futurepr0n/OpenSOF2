@@ -379,7 +379,7 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 	}
 #endif // !JK2_MODE
 
-	for ( e = 0 ; e < ge->num_entities ; e++ ) {
+	for ( e = 0 ; e < MAX_GENTITIES ; e++ ) {
 		ent = SV_GentityNum(e);
 
 		if (!ent->inuse) {
@@ -638,8 +638,8 @@ void SV_SendMessageToClient( msg_t *msg, client_t *client ) {
 	client->frames[client->netchan.outgoingSequence & PACKET_MASK].messageSize = msg->cursize;
 	client->frames[client->netchan.outgoingSequence & PACKET_MASK].messageSent = sv.time;
 
-	// send the datagram
-	Netchan_Transmit( &client->netchan, msg->cursize, msg->data );
+	// send the datagram (SOF2: apply XOR encryption layer)
+	SV_Netchan_Transmit( client, msg );
 }
 
 /*

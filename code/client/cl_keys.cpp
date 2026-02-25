@@ -1262,7 +1262,7 @@ void CL_KeyDownEvent( int key, unsigned time )
 				UI_SetActiveMenu( "ingame", NULL );
 			else {
 				CL_Disconnect_f();
-				UI_SetActiveMenu( "mainMenu", NULL );
+				UI_SetActiveMenu( "main", NULL );  // SOF2 main menu is "main"
 			}
 			return;
 		}
@@ -1367,7 +1367,7 @@ void Key_ClearStates( void ) {
 	}
 }
 
-static int keyCatchers = 0;
+int keyCatchers = 0;
 
 /*
 ====================
@@ -1384,6 +1384,7 @@ Key_SetCatcher
 ====================
 */
 void Key_SetCatcher( int catcher ) {
+	Com_Printf( "Key_SetCatcher: %d (was %d)\n", catcher, keyCatchers );
 	// If the catcher state is changing, clear all key states
 	if ( catcher != keyCatchers )
 		Key_ClearStates();

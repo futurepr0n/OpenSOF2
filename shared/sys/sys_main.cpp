@@ -551,7 +551,8 @@ void *Sys_LoadSPGameDll( const char *name, GetGameAPIProc **GetGameAPI )
 	void	*libHandle = NULL;
 	char	filename[MAX_OSPATH];
 
-	assert( GetGameAPI );
+	// GetGameAPI may be NULL when the caller wants to load a SOF2-style DLL
+	// that uses a different entry point (e.g. GetUIAPI, GetCGameAPI).
 
 	Com_sprintf (filename, sizeof(filename), "%s" ARCH_STRING DLL_EXT, name);
 
@@ -587,11 +588,13 @@ void *Sys_LoadSPGameDll( const char *name, GetGameAPIProc **GetGameAPI )
 			return NULL;
 	}
 
-	*GetGameAPI = (GetGameAPIProc *)Sys_LoadFunction( libHandle, "GetGameAPI" );
-	if ( !*GetGameAPI ) {
-		Com_DPrintf ( "%s(%s) failed to find GetGameAPI function:\n...%s!\n", __FUNCTION__, name, Sys_LibraryError() );
-		Sys_UnloadLibrary( libHandle );
-		return NULL;
+	if ( GetGameAPI ) {
+		*GetGameAPI = (GetGameAPIProc *)Sys_LoadFunction( libHandle, "GetGameAPI" );
+		if ( !*GetGameAPI ) {
+			Com_DPrintf ( "%s(%s) failed to find GetGameAPI function:\n...%s!\n", __FUNCTION__, name, Sys_LibraryError() );
+			Sys_UnloadLibrary( libHandle );
+			return NULL;
+		}
 	}
 
 	return libHandle;

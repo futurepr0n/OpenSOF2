@@ -1,0 +1,8 @@
+MSBuild version 17.14.23+b0019275e for .NET Framework
+MSBUILD : error MSB1008: Only one project can be specified.
+    Full command line: '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe" "C:/Program Files/Git/noautoresponse" E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj p:Configuration=Debug p:Platform=Win32 "C:/Program Files/Git/nologo" M:/'
+  Switches appended by response files:
+'' came from 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.rsp'
+Switch: E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj
+
+For switch syntax, type "MSBuild -help"

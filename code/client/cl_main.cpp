@@ -678,7 +678,7 @@ void CL_PacketEvent( netadr_t from, msg_t *msg ) {
 		return;
 	}
 
-	if (!Netchan_Process( &clc.netchan, msg) ) {
+	if (!CL_Netchan_Process( &clc.netchan, msg) ) {
 		return;		// out of order, duplicated, etc
 	}
 
@@ -775,7 +775,7 @@ void CL_Frame ( int msec,float fractionMsec ) {
 		// if disconnected, bring up the menu
 		if (!CL_CheckPendingCinematic())	// this avoid having the menu flash for one frame before pending cinematics
 		{
-			UI_SetActiveMenu( "mainMenu",NULL );
+			UI_SetActiveMenu( "main",NULL );  // SOF2 main menu is "main" (menus/main.rmf)
 		}
 	}
 
@@ -934,8 +934,8 @@ void CL_InitRenderer( void ) {
 	re.BeginRegistration( &cls.glconfig );
 
 	// load character sets
-	cls.charSetShader = re.RegisterShaderNoMip("gfx/2d/charsgrid_med");
-	cls.consoleFont = re.RegisterFont( "ocr_a" );
+	cls.charSetShader = re.RegisterShaderNoMip("gfx/2d/bigchars");
+	cls.consoleFont = 0;
 	cls.whiteShader = re.RegisterShader( "white" );
 	cls.consoleShader = re.RegisterShader( "console" );
 	g_console_field_width = cls.glconfig.vidWidth / SMALLCHAR_WIDTH - 2;

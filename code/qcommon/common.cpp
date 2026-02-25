@@ -1129,7 +1129,7 @@ void Com_Init( char *commandLine ) {
 		Cmd_AddCommand ("writeconfig", Com_WriteConfig_f );
 
 		com_developer = Cvar_Get ("developer", "0", CVAR_TEMP );
-		com_logfile = Cvar_Get ("logfile", "0", CVAR_TEMP );
+		com_logfile = Cvar_Get ("logfile", "2", CVAR_TEMP );	// DEBUG: always flush-write qconsole.log
 		com_speedslog = Cvar_Get ("speedslog", "0", CVAR_TEMP );
 
 		com_timescale = Cvar_Get ("timescale", "1", CVAR_CHEAT );
@@ -1191,7 +1191,8 @@ void Com_Init( char *commandLine ) {
 			// if the user didn't give any commands, run default action
 			if ( com_bootlogo->integer )
 			{
-				Cbuf_AddText ("cinematic openinglogos\n");
+				Cvar_Set("nextmap", "cinematic raven(512x512)");
+				Cbuf_AddText ("cinematic atvi(512x512)\n");
 			}
 		}
 		CL_StartHunkUsers();

@@ -74,12 +74,12 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define HOMEPATH_NAME_WIN "OpenJO"
 #define HOMEPATH_NAME_MACOSX HOMEPATH_NAME_WIN
 #else
-#define PRODUCT_NAME			"openjk_sp"
+#define PRODUCT_NAME			"sof2sp"
 
-#define CLIENT_WINDOW_TITLE "OpenJK (SP)"
-#define CLIENT_CONSOLE_TITLE "OpenJK Console (SP)"
-#define HOMEPATH_NAME_UNIX "openjk"
-#define HOMEPATH_NAME_WIN "OpenJK"
+#define CLIENT_WINDOW_TITLE "OpenSOF2 (SP)"
+#define CLIENT_CONSOLE_TITLE "OpenSOF2 Console (SP)"
+#define HOMEPATH_NAME_UNIX "opensof2"
+#define HOMEPATH_NAME_WIN "OpenSOF2"
 #define HOMEPATH_NAME_MACOSX HOMEPATH_NAME_WIN
 #endif
 

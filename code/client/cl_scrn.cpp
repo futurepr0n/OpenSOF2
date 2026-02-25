@@ -428,8 +428,8 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			SCR_DrawCinematic();
 			break;
 		case CA_DISCONNECTED:
-			// force menu up
-			UI_SetActiveMenu( "mainMenu", NULL );
+			// force menu up — SOF2 main menu is "main" (menus/main.rmf)
+			UI_SetActiveMenu( "main", NULL );
 			break;
 		case CA_CONNECTING:
 		case CA_CHALLENGING:
@@ -456,7 +456,6 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	}
 
 	re.ProcessDissolve();
-
 	// draw downloading progress bar
 
 	// the menu draws next

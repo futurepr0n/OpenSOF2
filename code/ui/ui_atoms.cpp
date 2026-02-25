@@ -31,9 +31,14 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "ui_local.h"
 #include "gameinfo.h"
+#include <excpt.h>   // EXCEPTION_EXECUTE_HANDLER
+#include <windows.h> // EXCEPTION_POINTERS, GetExceptionInformation
 
 uiimport_t	ui;
 uiStatic_t	uis;
+
+// SOF2 UI DLL export table — set by CL_InitUI when Menusx86.dll is loaded.
+extern uiExport_t *uie;
 
 //externs
 static void UI_LoadMenu_f( void );
@@ -64,6 +69,37 @@ UI_SetActiveMenu -
 */
 void UI_SetActiveMenu( const char* menuname,const char *menuID )
 {
+	Com_Printf( "UI_SetActiveMenu: %s\n", menuname ? menuname : "(hide)" );
+	// SOF2 Menusx86.dll dispatch
+	if ( uie ) {
+		if ( uie->UI_SetActiveMenu ) {
+			extern int s_ui_in_setactivemenu;
+			Com_Printf( "UI_SetActiveMenu: calling DLL...\n" );
+			s_ui_in_setactivemenu = 1;
+			__try {
+				uie->UI_SetActiveMenu( (char *)menuname, (char *)menuID, 0 );
+			} __except(
+				Com_Printf( "UI_SetActiveMenu: EXCEPTION code=0x%08X at=0x%08X %s=0x%08X\n",
+					GetExceptionInformation()->ExceptionRecord->ExceptionCode,
+					(unsigned int)GetExceptionInformation()->ExceptionRecord->ExceptionAddress,
+					GetExceptionInformation()->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
+					(unsigned int)GetExceptionInformation()->ExceptionRecord->ExceptionInformation[1] ),
+				EXCEPTION_EXECUTE_HANDLER ) {
+				Com_Printf( "UI_SetActiveMenu: handler caught, continuing\n" );
+			}
+			s_ui_in_setactivemenu = 0;
+			Com_Printf( "UI_SetActiveMenu: DLL returned\n" );
+		}
+		// The DLL path bypasses the static UI key-catcher setup; manage it here.
+		// Mirrors what the static path does: set KEYCATCH_UI when showing a menu,
+		// clear it when hiding (menuname == NULL).
+		if ( menuname )
+			trap_Key_SetCatcher( KEYCATCH_UI );   // Force UI-only; clears any KEYCATCH_CONSOLE
+		else
+			trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
+		return;
+	}
+
 	// this should be the ONLY way the menu system is brought up (besides the UI_ConsoleCommand below)
 
 	if (cls.state != CA_DISCONNECTED && !ui.SG_GameAllowedToSaveHere(qtrue))	//don't check full sytem, only if incamera
@@ -200,6 +236,13 @@ void UI_Load(void);	//in UI_main.cpp
 
 qboolean UI_ConsoleCommand( void )
 {
+	// SOF2 Menusx86.dll dispatch
+	if ( uie ) {
+		if ( uie->UI_ConsoleCommand )
+			uie->UI_ConsoleCommand( 0 );
+		return qtrue;
+	}
+
 	char	*cmd;
 
 	if (!ui.SG_GameAllowedToSaveHere(qtrue))	//only check if incamera

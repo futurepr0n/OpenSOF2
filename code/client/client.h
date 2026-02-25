@@ -169,6 +169,10 @@ typedef struct {
 
 extern	clientConnection_t clc;
 
+// SOF2 netchan XOR wrappers (cl_net_chan.cpp)
+void		CL_Netchan_Transmit( netchan_t *chan, msg_t *msg );
+qboolean	CL_Netchan_Process( netchan_t *chan, msg_t *msg );
+
 /*
 ==================================================================
 

@@ -202,7 +202,7 @@ typedef struct {
 
 
 #define BSP_IDENT	(('P'<<24)+('S'<<16)+('B'<<8)+'R')
-		// little-endian "IBSP"
+		// little-endian "RBSP" (Raven BSP)
 
 #define BSP_VERSION			1
 

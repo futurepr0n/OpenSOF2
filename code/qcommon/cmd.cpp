@@ -148,11 +148,11 @@ void Cbuf_ExecuteText (int exec_when, const char *text)
 	{
 	case EXEC_NOW:
 		if (text && strlen(text) > 0) {
-			Com_DPrintf(S_COLOR_YELLOW "EXEC_NOW %s\n", text);
+			Com_Printf(S_COLOR_YELLOW "EXEC_NOW: %s\n", text);
 			Cmd_ExecuteString (text);
 		} else {
+			Com_Printf(S_COLOR_YELLOW "EXEC_NOW(flush): buf=%d bytes\n", cmd_text.cursize);
 			Cbuf_Execute();
-			Com_DPrintf(S_COLOR_YELLOW "EXEC_NOW %s\n", cmd_text.data);
 		}
 		break;
 	case EXEC_INSERT:

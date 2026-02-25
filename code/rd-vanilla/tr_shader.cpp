@@ -3486,11 +3486,24 @@ shader_t *R_FindShader( const char *name, const int *lightmapIndex, const byte *
 	//
 	shaderText = FindShaderInShaderText( strippedName );
 	if ( shaderText ) {
+		if ( strstr(strippedName, "guage") )
+			ri.Printf( PRINT_ALL, "R_FindShader: '%s' found in shader text, parsing...\n", strippedName );
 		if ( !ParseShader( &shaderText ) ) {
 			// had errors, so use default shader
 			shader.defaultShader = true;
 		}
 		sh = FinishShader();
+		if ( strstr(strippedName, "guage") ) {
+			ri.Printf( PRINT_ALL, "R_FindShader: '%s' from shader text → idx=%d default=%d stages=%p numPasses=%d\n",
+				strippedName, sh->index, (int)sh->defaultShader,
+				(void*)sh->stages, (int)sh->numUnfoggedPasses );
+			if ( sh->stages && sh->numUnfoggedPasses > 0 ) {
+				ri.Printf( PRINT_ALL, "  stage[0]: active=%d bundle[0].image=%p isLightmap=%d\n",
+					(int)sh->stages[0].active,
+					(void*)sh->stages[0].bundle[0].image,
+					(int)sh->stages[0].bundle[0].isLightmap );
+			}
+		}
 		return sh;
 	}
 
@@ -3499,6 +3512,8 @@ shader_t *R_FindShader( const char *name, const int *lightmapIndex, const byte *
 	// if not defined in the in-memory shader descriptions,
 	// look for a single TGA, BMP, or PCX
 	//
+	if ( strstr(strippedName, "guage") )
+		ri.Printf( PRINT_ALL, "R_FindShader: '%s' not in shader text, trying image file...\n", strippedName );
 	image = R_FindImageFile( name, mipRawImage, mipRawImage, qtrue, mipRawImage ? GL_REPEAT : GL_CLAMP );
 	if ( !image ) {
 		if (strncmp(name, "levelshots", 10 )  && strcmp(name, "*off"))
@@ -3637,6 +3652,37 @@ shader_t *R_GetShaderByHandle( qhandle_t hShader ) {
 		return tr.defaultShader;
 	}
 	return tr.shaders[hShader];
+}
+
+/*
+===============
+RE_DrawGetPicSize
+
+SOF2-specific: Returns the source image dimensions for a shader handle.
+===============
+*/
+void RE_DrawGetPicSize( int *w, int *h, qhandle_t hShader ) {
+	shader_t *shader;
+
+	if ( w ) *w = 0;
+	if ( h ) *h = 0;
+
+	shader = R_GetShaderByHandle( hShader );
+	if ( shader->stages && shader->stages[0].active && shader->stages[0].bundle[0].image ) {
+		image_t *img;
+		if ( shader->stages[0].bundle[0].numImageAnimations > 1 ) {
+			// Animated textures (animMap/clampanimMap): bundle->image is actually
+			// an array of image_t* pointers, not a single image_t*.
+			img = ((image_t **)shader->stages[0].bundle[0].image)[0];
+		} else {
+			img = shader->stages[0].bundle[0].image;
+		}
+		if ( img && img->width > 0 && img->width <= 4096 &&
+			 img->height > 0 && img->height <= 4096 ) {
+			if ( w ) *w = img->width;
+			if ( h ) *h = img->height;
+		}
+	}
 }
 
 /*

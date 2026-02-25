@@ -5857,6 +5857,8 @@ void  Menus_CloseAll(void)
 {
 	int i;
 
+	if (!DC) return;
+
 	for (i = 0; i < menuCount; i++)
 	{
 		Menu_RunCloseScript ( &Menus[i] );
@@ -11542,6 +11544,7 @@ UI_Cursor_Show
 */
 void UI_Cursor_Show(qboolean flag)
 {
+	if (!DC) return;
 	DC->cursorShow = flag;
 
 	if ((DC->cursorShow != qtrue) && (DC->cursorShow != qfalse))

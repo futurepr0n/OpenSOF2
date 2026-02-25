@@ -43,7 +43,7 @@ void SV_DirectConnect( netadr_t from ) {
 	int			clientNum;
 	int			version;
 	int			qport;
-	//int			challenge;
+	int			challenge;
 	char		*denied;
 
 	Com_DPrintf ("SVC_DirectConnect ()\n");
@@ -59,7 +59,7 @@ void SV_DirectConnect( netadr_t from ) {
 
 	qport = atoi( Info_ValueForKey( userinfo, "qport" ) );
 
-	//challenge = atoi( Info_ValueForKey( userinfo, "challenge" ) );
+	challenge = atoi( Info_ValueForKey( userinfo, "challenge" ) );
 
 	// see if the challenge is valid (local clients don't need to challenge)
 	if ( !NET_IsLocalAddress (from) ) {
@@ -122,6 +122,9 @@ gotnewcl:
 
 	// save the address
 	Netchan_Setup (NS_SERVER, &newcl->netchan , from, qport);
+
+	// SOF2: store challenge for netchan XOR encryption key derivation
+	newcl->challenge = challenge;
 
 	// save the userinfo
 	Q_strncpyz( newcl->userinfo, userinfo, sizeof(newcl->userinfo) );
@@ -261,8 +264,8 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	client->deltaMessage = -1;
 	client->cmdNum = 0;
 
-	// call the game begin function
-	ge->ClientBegin( client - svs.clients, cmd, eSavedGameJustLoaded );
+	// call the game begin function — SOF2 ClientBegin(clientNum) takes 1 arg only
+	ge->ClientBegin( client - svs.clients );
 }
 
 /*
@@ -308,8 +311,8 @@ static void SV_UpdateUserinfo_f( client_t *cl ) {
 	Q_strncpyz( cl->userinfo, Cmd_Argv(1), sizeof(cl->userinfo) );
 
 	SV_UserinfoChanged( cl );
-	// call prog code to allow overrides
-	ge->ClientUserinfoChanged( cl - svs.clients );
+	// SOF2 SP: ClientUserinfoChanged does not exist in game_export_t v8
+	// (no player name changes in single-player)
 }
 
 typedef struct {
@@ -396,7 +399,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 		return;		// may have been kicked during the last usercmd
 	}
 
-	ge->ClientThink( cl - svs.clients, cmd );
+	ge->ClientThink( cl - svs.clients );  // SOF2: ClientThink(int clientNum) — cmd not passed
 }
 
 /*
