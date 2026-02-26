@@ -162,7 +162,12 @@ static sof2_cvar_t  s_sof2Cvars[MAX_SOF2_CVARS];
 static cvar_t      *s_sof2CvarReal[MAX_SOF2_CVARS];
 static int          s_sof2CvarCount = 0;
 
-static void SOF2_SyncCvar( int idx ) {
+// Sync metadata fields from the real engine cvar to the SOF2 wrapper.
+// IMPORTANT: Do NOT sync value/integer on existing wrappers — the DLL writes
+// cursor position (and potentially other state) directly to wrapper.value via
+// fstp [cvar+0x5c].  Overwriting that from the real cvar would lose the DLL's
+// direct writes and cause the cursor to be stuck at its initial position.
+static void SOF2_SyncCvar( int idx, qboolean includeValue = qtrue ) {
 	cvar_t *r = s_sof2CvarReal[idx];
 	s_sof2Cvars[idx].string            = r->string;
 	s_sof2Cvars[idx].resetString       = r->resetString;
@@ -170,8 +175,29 @@ static void SOF2_SyncCvar( int idx ) {
 	s_sof2Cvars[idx].flags             = r->flags;
 	s_sof2Cvars[idx].modified          = r->modified;
 	s_sof2Cvars[idx].modificationCount = r->modificationCount;
-	s_sof2Cvars[idx].value             = r->value;
-	s_sof2Cvars[idx].integer           = r->integer;
+	if ( includeValue ) {
+		s_sof2Cvars[idx].value             = r->value;
+		s_sof2Cvars[idx].integer           = r->integer;
+	}
+}
+
+// Find the SOF2 wrapper index for a given name, or -1 if not found.
+static int SOF2_FindCvarByName( const char *name ) {
+	if ( !name ) return -1;
+	for ( int i = 0; i < s_sof2CvarCount; i++ ) {
+		if ( !Q_stricmp( s_sof2Cvars[i].name, name ) )
+			return i;
+	}
+	return -1;
+}
+
+// After the engine updates a real cvar (via Cvar_Set/Cvar_SetValue), push the
+// new value into the SOF2 wrapper so the DLL sees the change immediately.
+static void SOF2_SyncAfterSet( const char *name ) {
+	int idx = SOF2_FindCvarByName( name );
+	if ( idx >= 0 ) {
+		SOF2_SyncCvar( idx, qtrue );  // full sync including value
+	}
 }
 
 // Cvar_Get wrapper: returns a SOF2-layout cvar to the DLL.
@@ -179,10 +205,11 @@ static cvar_t *UI_Cvar_Get_SOF2( const char *name, const char *val, int flags ) 
 	cvar_t *real = Cvar_Get( name, val, flags );
 	if ( !real ) return NULL;
 
-	// Find existing wrapper for this cvar
+	// Find existing wrapper for this cvar — sync metadata but NOT value/integer,
+	// because the DLL may have written directly to wrapper.value (e.g. cursor pos).
 	for ( int i = 0; i < s_sof2CvarCount; i++ ) {
 		if ( s_sof2CvarReal[i] == real ) {
-			SOF2_SyncCvar( i );
+			SOF2_SyncCvar( i, qfalse );  // sync string/flags/modified but NOT value
 			return (cvar_t *)&s_sof2Cvars[i];
 		}
 	}
@@ -234,6 +261,10 @@ static void Cvar_SetValue_Traced( const char *var_name, float value )
 	else
 		Com_sprintf( val, sizeof(val), "%f", value );
 	Cvar_Set( var_name, val );
+	// Push the new value into the SOF2 wrapper so the DLL sees it immediately.
+	// This is critical for cursor initialization: the constructor calls
+	// Cvar_SetValue(wrapperPtr, vidWidth/2) and the DLL later reads wrapper.value.
+	SOF2_SyncAfterSet( var_name );
 }
 
 static int Milliseconds_Traced( void )
@@ -588,10 +619,9 @@ static void UI_UnpackColor( unsigned int color, float *rgba ) {
 static void UI_RE_StretchPic( float x, float y, float w, float h, int color, int hShader, int adjustFrom ) {
 	g_stretchPicCount++;
 	if (g_stretchPicCount <= 30) {
-		Com_Printf("[DBG] StretchPic #%d: x=%.0f y=%.0f w=%.0f h=%.0f color=0x%08X shader=%d\n",
-			g_stretchPicCount, x, y, w, h, (unsigned int)color, hShader);
+		Com_Printf("[DBG] StretchPic #%d: x=%.0f y=%.0f w=%.0f h=%.0f color=0x%08X shader=%d adj=%d\n",
+			g_stretchPicCount, x, y, w, h, (unsigned int)color, hShader, adjustFrom);
 	}
-	(void)adjustFrom;
 	// Apply SOF2 packed RGBA color tint before drawing
 	if ( color != 0 && color != (int)0xFFFFFFFF ) {
 		float rgba[4];
@@ -1053,6 +1083,9 @@ void CL_InitUI( void ) {
 				// Guard against NULL name — DLL calls Cvar_Set(NULL) during ConsoleCommand.
 				if ( !name ) return;
 				Cvar_Set( name, value );
+				// Push the new value into the SOF2 wrapper so the DLL sees the
+				// update immediately (e.g. for cursor position cvars).
+				SOF2_SyncAfterSet( name );
 			}
 		};
 		import.Cvar_Set                  = CvarSetSafe::Set;

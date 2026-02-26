@@ -461,24 +461,6 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	// the menu draws next
 	_UI_Refresh( cls.realtime );
 
-	// Engine-side cursor drawing for SOF2 DLL — the DLL registers cursor shaders
-	// but doesn't draw the cursor itself. Draw it here using the renderer directly.
-	{
-		extern uiExport_t *uie;
-		extern float uie_cursorx, uie_cursory;
-		if ( uie && (Key_GetCatcher() & KEYCATCH_UI) ) {
-			static qhandle_t cursorShader = 0;
-			if ( !cursorShader ) {
-				cursorShader = re.RegisterShaderNoMip( "gfx/menus/cursor/cursor" );
-				Com_Printf("[DBG] Registered engine cursor shader: %d\n", cursorShader);
-			}
-			if ( cursorShader ) {
-				re.DrawStretchPic( uie_cursorx, uie_cursory, 32, 32,
-					0.0f, 0.0f, 1.0f, 1.0f, cursorShader );
-			}
-		}
-	}
-
 	// console draws next
 	Con_DrawConsole ();
 

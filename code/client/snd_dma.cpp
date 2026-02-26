@@ -2702,8 +2702,10 @@ void S_Update( void ) {
 
 	static int s_updateTrace = 0;
 	if ( ++s_updateTrace <= 3 || (s_updateTrace % 1000 == 0) ) {
-		Com_Printf("[SND] S_Update #%d: started=%d muted=%d\n",
-			s_updateTrace, s_soundStarted, (int)s_soundMuted);
+		Com_Printf("[SND] S_Update #%d: started=%d muted=%d vol=%.2f music=%.2f\n",
+			s_updateTrace, s_soundStarted, (int)s_soundMuted,
+			s_volume ? s_volume->value : -1.0f,
+			s_musicVolume ? s_musicVolume->value : -1.0f);
 	}
 
 	if ( !s_soundStarted || s_soundMuted ) {
@@ -5045,6 +5047,13 @@ static void S_UpdateBackgroundTrack( void )
 		//
 		// internal to this code is a volume-smoother...
 		//
+		static int s_bgTrackTrace = 0;
+		if ( ++s_bgTrackTrace <= 5 || (s_bgTrackTrace % 1000 == 0) ) {
+			MusicInfo_t *pInfo = &tMusic_Info[eBGRNDTRACK_NONDYNAMIC];
+			Com_Printf("[SND] BGTrack #%d: file=%d vol=%.2f smooth=%.2f rawend=%d stime=%d\n",
+				s_bgTrackTrace, (int)pInfo->s_backgroundFile, fDesiredVolume,
+				pInfo->fSmoothedOutVolume, s_rawend, s_soundtime);
+		}
 		qboolean bNewTrackDesired = S_UpdateBackgroundTrack_Actual(&tMusic_Info[eBGRNDTRACK_NONDYNAMIC], qtrue, fDesiredVolume);
 
 		if (bNewTrackDesired)
