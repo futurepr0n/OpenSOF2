@@ -67,6 +67,11 @@ extern uiExport_t *uie;
 float uie_cursorx = 320.0f;
 float uie_cursory = 240.0f;
 
+// Actual GL video dimensions — set by CL_InitUI, used to scale mouse deltas
+// from pixel space to virtual (640x480) space for the DLL.
+extern int ui_actual_vidWidth;
+extern int ui_actual_vidHeight;
+
 #define LISTBUFSIZE 10240
 
 static struct
@@ -492,7 +497,12 @@ void _UI_Refresh( int realtime )
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
 		extern int g_stretchPicCount;
+		extern void SyncSOF2ShadowKeys(void);
 		static int slot5Calls = 0;
+
+		// Sync shadow keys array so DLL sees correct key states
+		SyncSOF2ShadowKeys();
+
 		// slot 6 — state management (pop menus, exec cfgs)
 		if ( uie->UI_Refresh ) {
 			uie->UI_Refresh();
@@ -512,6 +522,7 @@ void _UI_Refresh( int realtime )
 			}
 		}
 
+		// DLL draws its own cursor via RE_StretchPic (shader 10 = gfx/menus/cursor/cursor)
 		return;
 	}
 
@@ -4043,20 +4054,33 @@ void _UI_MouseEvent( int dx, int dy )
 {
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
+		// Scale mouse deltas from pixel space to virtual (640x480) space.
+		// The DLL receives vidWidth=640/vidHeight=480, so its cursor and
+		// widget hit-testing are in the same virtual coordinate space.
+		static float accum_dx = 0.0f, accum_dy = 0.0f;
+		int aw = ui_actual_vidWidth  > 0 ? ui_actual_vidWidth  : 640;
+		int ah = ui_actual_vidHeight > 0 ? ui_actual_vidHeight : 480;
+		accum_dx += (float)dx * 640.0f / (float)aw;
+		accum_dy += (float)dy * 480.0f / (float)ah;
+		int vdx = (int)accum_dx;
+		int vdy = (int)accum_dy;
+		accum_dx -= (float)vdx;
+		accum_dy -= (float)vdy;
+
 		if ( uie->UI_MouseEvent )
-			uie->UI_MouseEvent( dx, dy );
+			uie->UI_MouseEvent( vdx, vdy );
 		// Also track cursor position engine-side for fallback cursor drawing
-		uie_cursorx += dx;
+		uie_cursorx += vdx;
 		if (uie_cursorx < 0) uie_cursorx = 0;
 		else if (uie_cursorx > SCREEN_WIDTH) uie_cursorx = SCREEN_WIDTH;
-		uie_cursory += dy;
+		uie_cursory += vdy;
 		if (uie_cursory < 0) uie_cursory = 0;
 		else if (uie_cursory > SCREEN_HEIGHT) uie_cursory = SCREEN_HEIGHT;
 		// Log first few mouse events for diagnostics
 		static int mouseLogCount = 0;
-		if ( (dx || dy) && ++mouseLogCount <= 10 ) {
-			Com_Printf("[DBG] UI_MouseEvent: dx=%d dy=%d cursor=(%.0f,%.0f)\n",
-				dx, dy, uie_cursorx, uie_cursory);
+		if ( (vdx || vdy) && ++mouseLogCount <= 10 ) {
+			Com_Printf("[DBG] UI_MouseEvent: raw=%d,%d virtual=%d,%d cursor=(%.0f,%.0f)\n",
+				dx, dy, vdx, vdy, uie_cursorx, uie_cursory);
 		}
 		return;
 	}
@@ -4091,6 +4115,88 @@ void _UI_MouseEvent( int dx, int dy )
 
 }
 
+// ---- Q3A/SoF2 keycodes the DLL expects (different from OpenJK fakeAscii_t) ----
+enum sof2Key_t {
+	SOF2_K_TAB = 9, SOF2_K_ENTER = 13, SOF2_K_ESCAPE = 27, SOF2_K_SPACE = 32,
+	SOF2_K_BACKSPACE = 127,
+	SOF2_K_CAPSLOCK = 129, SOF2_K_PAUSE = 131,
+	SOF2_K_UPARROW = 132, SOF2_K_DOWNARROW = 133,
+	SOF2_K_LEFTARROW = 134, SOF2_K_RIGHTARROW = 135,
+	SOF2_K_ALT = 136, SOF2_K_CTRL = 137, SOF2_K_SHIFT = 138,
+	SOF2_K_INS = 139, SOF2_K_DEL = 140,
+	SOF2_K_PGDN = 141, SOF2_K_PGUP = 142, SOF2_K_HOME = 143, SOF2_K_END = 144,
+	SOF2_K_F1 = 145, SOF2_K_F2 = 146, SOF2_K_F3 = 147, SOF2_K_F4 = 148,
+	SOF2_K_F5 = 149, SOF2_K_F6 = 150, SOF2_K_F7 = 151, SOF2_K_F8 = 152,
+	SOF2_K_F9 = 153, SOF2_K_F10 = 154, SOF2_K_F11 = 155, SOF2_K_F12 = 156,
+	SOF2_K_KP_HOME = 160, SOF2_K_KP_UPARROW = 161, SOF2_K_KP_PGUP = 162,
+	SOF2_K_KP_LEFTARROW = 163, SOF2_K_KP_5 = 164, SOF2_K_KP_RIGHTARROW = 165,
+	SOF2_K_KP_END = 166, SOF2_K_KP_DOWNARROW = 167, SOF2_K_KP_PGDN = 168,
+	SOF2_K_KP_ENTER = 169, SOF2_K_KP_INS = 170, SOF2_K_KP_DEL = 171,
+	SOF2_K_KP_SLASH = 172, SOF2_K_KP_MINUS = 173, SOF2_K_KP_PLUS = 174,
+	SOF2_K_MOUSE1 = 178, SOF2_K_MOUSE2 = 179, SOF2_K_MOUSE3 = 180,
+	SOF2_K_MOUSE4 = 181, SOF2_K_MOUSE5 = 182,
+	SOF2_K_MWHEELDOWN = 183, SOF2_K_MWHEELUP = 184,
+};
+
+static int TranslateKeyToSOF2( int key ) {
+	if ( key >= 32 && key <= 126 ) return key;  // ASCII printable — identical
+	switch ( key ) {
+		case A_TAB:          return SOF2_K_TAB;
+		case A_ENTER:        return SOF2_K_ENTER;
+		case A_ESCAPE:       return SOF2_K_ESCAPE;
+		case A_BACKSPACE:    return SOF2_K_BACKSPACE;
+		case A_SHIFT:        return SOF2_K_SHIFT;
+		case A_CTRL:         return SOF2_K_CTRL;
+		case A_ALT:          return SOF2_K_ALT;
+		case A_CAPSLOCK:     return SOF2_K_CAPSLOCK;
+		case A_PAUSE:        return SOF2_K_PAUSE;
+		case A_CURSOR_UP:    return SOF2_K_UPARROW;
+		case A_CURSOR_DOWN:  return SOF2_K_DOWNARROW;
+		case A_CURSOR_LEFT:  return SOF2_K_LEFTARROW;
+		case A_CURSOR_RIGHT: return SOF2_K_RIGHTARROW;
+		case A_INSERT:       return SOF2_K_INS;
+		case A_DELETE:       return SOF2_K_DEL;
+		case A_HOME:         return SOF2_K_HOME;
+		case A_END:          return SOF2_K_END;
+		case A_PAGE_UP:      return SOF2_K_PGUP;
+		case A_PAGE_DOWN:    return SOF2_K_PGDN;
+		case A_F1:           return SOF2_K_F1;
+		case A_F2:           return SOF2_K_F2;
+		case A_F3:           return SOF2_K_F3;
+		case A_F4:           return SOF2_K_F4;
+		case A_F5:           return SOF2_K_F5;
+		case A_F6:           return SOF2_K_F6;
+		case A_F7:           return SOF2_K_F7;
+		case A_F8:           return SOF2_K_F8;
+		case A_F9:           return SOF2_K_F9;
+		case A_F10:          return SOF2_K_F10;
+		case A_F11:          return SOF2_K_F11;
+		case A_F12:          return SOF2_K_F12;
+		case A_KP_ENTER:     return SOF2_K_KP_ENTER;
+		case A_KP_PLUS:      return SOF2_K_KP_PLUS;
+		case A_KP_MINUS:     return SOF2_K_KP_MINUS;
+		case A_KP_PERIOD:    return SOF2_K_KP_DEL;
+		case A_KP_0:         return SOF2_K_KP_INS;
+		case A_KP_1:         return SOF2_K_KP_END;
+		case A_KP_2:         return SOF2_K_KP_DOWNARROW;
+		case A_KP_3:         return SOF2_K_KP_PGDN;
+		case A_KP_4:         return SOF2_K_KP_LEFTARROW;
+		case A_KP_5:         return SOF2_K_KP_5;
+		case A_KP_6:         return SOF2_K_KP_RIGHTARROW;
+		case A_KP_7:         return SOF2_K_KP_HOME;
+		case A_KP_8:         return SOF2_K_KP_UPARROW;
+		case A_KP_9:         return SOF2_K_KP_PGUP;
+		case A_MOUSE1:       return SOF2_K_MOUSE1;
+		case A_MOUSE2:       return SOF2_K_MOUSE2;
+		case A_MOUSE3:       return SOF2_K_MOUSE3;
+		case A_MOUSE4:       return SOF2_K_MOUSE4;
+		case A_MOUSE5:       return SOF2_K_MOUSE5;
+		case A_MWHEELUP:     return SOF2_K_MWHEELUP;
+		case A_MWHEELDOWN:   return SOF2_K_MWHEELDOWN;
+		default:             return key;
+	}
+}
+
 /*
 =================
 UI_KeyEvent
@@ -4100,8 +4206,38 @@ void _UI_KeyEvent( int key, qboolean down )
 {
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
-		if ( uie->UI_KeyEvent )
-			uie->UI_KeyEvent( key, (int)down );
+		// SoF2 DLL only receives key-DOWN events, never key-up
+		if ( !down ) return;
+
+		if ( uie->UI_KeyEvent ) {
+			int isChar = 0;
+			int sof2Key;
+			int menuKey = 0;
+
+			if ( key & K_CHAR_FLAG ) {
+				// Character event from CL_CharEvent: strip flag, set isChar=1
+				sof2Key = key & ~K_CHAR_FLAG;
+				isChar = 1;
+				menuKey = 0;  // typed characters are not menu keys
+			} else {
+				// Key event: translate OpenJK fakeAscii_t -> Q3A/SoF2 keycode
+				sof2Key = TranslateKeyToSOF2( key );
+				// Original SOF2 CL_KeyEvent passes keynames[key].menukey as
+				// the 3rd parameter. Mouse/navigation/special keys are "menu
+				// keys" (=1) — the DLL checks this to process clicks/nav.
+				// All non-printable SOF2 keys (>126 or special codes) are menu keys.
+				menuKey = (sof2Key > 126 || sof2Key == 9 || sof2Key == 13 || sof2Key == 27) ? 1 : 0;
+			}
+
+			// Diagnostic logging (temporary)
+			static int keyLogCount = 0;
+			if ( ++keyLogCount <= 30 ) {
+				Com_Printf("[DBG] UI_KeyEvent: openJK=%d -> sof2=%d isChar=%d menuKey=%d\n",
+				           key, sof2Key, isChar, menuKey);
+			}
+
+			uie->UI_KeyEvent( sof2Key, isChar, menuKey );
+		}
 		return;
 	}
 

@@ -55,6 +55,91 @@ extern int     keyCatchers;
 extern keyGlobals_t kg;
 
 // ---------------------------------------------------------------------------
+// Shadow keys array: indexed by Q3A/SOF2 keycodes, synced from OpenJK kg.keys
+// each frame. The DLL reads keys_array[sof2_keycode].down but OpenJK stores
+// key state at fakeAscii_t indices (different numbering). This bridge fixes
+// mouse hover/click by making the DLL's key lookups hit the right state.
+// ---------------------------------------------------------------------------
+static qkey_t sof2_shadow_keys[MAX_KEYS];
+
+// Mapping table: sof2Keycode -> openJK keycode (fakeAscii_t)
+// Built once, used each frame to sync shadow array
+static int sof2_to_openjk[256];
+static bool sof2_keymap_built = false;
+
+static void BuildSOF2KeyMap(void) {
+	memset(sof2_to_openjk, -1, sizeof(sof2_to_openjk));
+	// ASCII 32-126 map 1:1
+	for (int i = 32; i <= 126; i++) sof2_to_openjk[i] = i;
+	// Special keys (reverse of TranslateKeyToSOF2 in ui_main.cpp)
+	sof2_to_openjk[9]   = A_TAB;
+	sof2_to_openjk[13]  = A_ENTER;
+	sof2_to_openjk[27]  = A_ESCAPE;
+	sof2_to_openjk[127] = A_BACKSPACE;
+	sof2_to_openjk[129] = A_CAPSLOCK;
+	sof2_to_openjk[131] = A_PAUSE;
+	sof2_to_openjk[132] = A_CURSOR_UP;
+	sof2_to_openjk[133] = A_CURSOR_DOWN;
+	sof2_to_openjk[134] = A_CURSOR_LEFT;
+	sof2_to_openjk[135] = A_CURSOR_RIGHT;
+	sof2_to_openjk[136] = A_ALT;
+	sof2_to_openjk[137] = A_CTRL;
+	sof2_to_openjk[138] = A_SHIFT;
+	sof2_to_openjk[139] = A_INSERT;
+	sof2_to_openjk[140] = A_DELETE;
+	sof2_to_openjk[141] = A_PAGE_DOWN;
+	sof2_to_openjk[142] = A_PAGE_UP;
+	sof2_to_openjk[143] = A_HOME;
+	sof2_to_openjk[144] = A_END;
+	sof2_to_openjk[145] = A_F1;  sof2_to_openjk[146] = A_F2;
+	sof2_to_openjk[147] = A_F3;  sof2_to_openjk[148] = A_F4;
+	sof2_to_openjk[149] = A_F5;  sof2_to_openjk[150] = A_F6;
+	sof2_to_openjk[151] = A_F7;  sof2_to_openjk[152] = A_F8;
+	sof2_to_openjk[153] = A_F9;  sof2_to_openjk[154] = A_F10;
+	sof2_to_openjk[155] = A_F11; sof2_to_openjk[156] = A_F12;
+	sof2_to_openjk[160] = A_KP_7; sof2_to_openjk[161] = A_KP_8;
+	sof2_to_openjk[162] = A_KP_9; sof2_to_openjk[163] = A_KP_4;
+	sof2_to_openjk[164] = A_KP_5; sof2_to_openjk[165] = A_KP_6;
+	sof2_to_openjk[166] = A_KP_1; sof2_to_openjk[167] = A_KP_2;
+	sof2_to_openjk[168] = A_KP_3; sof2_to_openjk[169] = A_KP_ENTER;
+	sof2_to_openjk[170] = A_KP_0; sof2_to_openjk[171] = A_KP_PERIOD;
+	sof2_to_openjk[172] = A_DIVIDE;      // KP_SLASH
+	sof2_to_openjk[173] = A_KP_MINUS;
+	sof2_to_openjk[174] = A_KP_PLUS;
+	sof2_to_openjk[178] = A_MOUSE1; sof2_to_openjk[179] = A_MOUSE2;
+	sof2_to_openjk[180] = A_MOUSE3; sof2_to_openjk[181] = A_MOUSE4;
+	sof2_to_openjk[182] = A_MOUSE5;
+	sof2_to_openjk[183] = A_MWHEELDOWN;
+	sof2_to_openjk[184] = A_MWHEELUP;
+	sof2_keymap_built = true;
+}
+
+// Call each frame before DLL refresh to sync shadow keys from OpenJK state
+void SyncSOF2ShadowKeys(void) {
+	if (!sof2_keymap_built) BuildSOF2KeyMap();
+	static qboolean prevMouse1 = qfalse;
+	for (int sof2Key = 0; sof2Key < 256; sof2Key++) {
+		int ojkKey = sof2_to_openjk[sof2Key];
+		if (ojkKey >= 0 && ojkKey < MAX_KEYS) {
+			sof2_shadow_keys[sof2Key].down    = kg.keys[ojkKey].down;
+			sof2_shadow_keys[sof2Key].repeats  = kg.keys[ojkKey].repeats;
+			sof2_shadow_keys[sof2Key].binding  = kg.keys[ojkKey].binding;
+		} else {
+			sof2_shadow_keys[sof2Key].down    = qfalse;
+			sof2_shadow_keys[sof2Key].repeats  = 0;
+			sof2_shadow_keys[sof2Key].binding  = NULL;
+		}
+	}
+	// Log MOUSE1 state changes for diagnostics
+	qboolean curMouse1 = sof2_shadow_keys[178].down;
+	if ( curMouse1 != prevMouse1 ) {
+		Com_Printf("[KEY] MOUSE1 shadow[178].down changed: %d → %d (kg[%d].down=%d)\n",
+			(int)prevMouse1, (int)curMouse1, A_MOUSE1, (int)kg.keys[A_MOUSE1].down);
+		prevMouse1 = curMouse1;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Static wrappers and stubs for menu_import_t slots
 // ---------------------------------------------------------------------------
 
@@ -231,6 +316,12 @@ static cvar_t *UI_Cvar_Get_SOF2( const char *name, const char *val, int flags ) 
 
 int s_ui_in_setactivemenu = 0;  // 1 while inside uie->UI_SetActiveMenu
 
+// Actual GL video dimensions — stored for mouse-delta scaling in _UI_MouseEvent.
+// The DLL receives virtual dims (640x480) as vidWidth/vidHeight so its cursor
+// and widget hit-testing are in the same coordinate space.
+int ui_actual_vidWidth  = 640;
+int ui_actual_vidHeight = 480;
+
 static char *UI_SE_GetString( const char *token, int flags )
 {
 	return (char *)SE_GetString( token );
@@ -293,6 +384,12 @@ static char *UI_Info_ValueForKey( const char *s, const char *key )
 
 static int UI_Key_IsDown( int keynum )
 {
+	// Translate Q3A/SOF2 keycode to OpenJK fakeAscii_t before lookup
+	if (!sof2_keymap_built) BuildSOF2KeyMap();
+	if (keynum >= 0 && keynum < 256) {
+		int ojkKey = sof2_to_openjk[keynum];
+		if (ojkKey >= 0) keynum = ojkKey;
+	}
 	return (int)Key_IsDown( keynum );
 }
 
@@ -386,20 +483,14 @@ static void UI_RE_SetClipRegion( int clipRightEdge ) {
 	// no-op: clipping not supported in this renderer build
 }
 
-// Slot 98: RE_SetColor — SOF2 passes 5 ints; (-1,-1,-1,-1,0) = reset to white.
-// OpenJK's re.SetColor takes a float[4] rgba array or NULL for white.
-static void UI_RE_SetColor5( int r, int g, int b, int a, int flags ) {
-	if ( r == -1 && g == -1 && b == -1 && a == -1 ) {
-		re.SetColor( NULL );  // reset to default (white)
-	} else {
-		float color[4] = {
-			(float)(r & 0xFF) / 255.0f,
-			(float)(g & 0xFF) / 255.0f,
-			(float)(b & 0xFF) / 255.0f,
-			(float)(a & 0xFF) / 255.0f
-		};
-		re.SetColor( color );
-	}
+// Slot 98: RE_SetScissor — SOF2 passes (x, y, w, h, enable).
+// enable=1 sets a clip rectangle; (-1,-1,-1,-1, 0) disables clipping.
+// OpenJK has no direct scissor API in refexport — no-op for now.
+// CRITICAL: This was previously misidentified as RE_SetColor and calling
+// re.SetColor() with coordinate values, which caused a persistent blue tint
+// on all subsequent draws (the "blue gauge" bug).
+static void UI_RE_SetScissor( int x, int y, int w, int h, int enable ) {
+	// no-op: scissor clipping not implemented in this renderer build
 }
 
 // Traced wrapper for Cbuf_ExecuteText (slot 22)
@@ -472,61 +563,62 @@ static char *UI_SE_GetString_WithFallback( const char *token, int flags ) {
 	const char *result = SE_GetString( token );
 	if ( result && *result ) return (char *)result;
 
-	// Fallback: hardcoded lookup for the most important menu strings
+	// Fallback: hardcoded lookup for the most important menu strings.
+	// Original SOF2 strings are ALL CAPS.
 	static const struct { const char *ref; const char *text; } known[] = {
 		// Main menu
-		{"MENU_GAME_SINGLE",     "Single Player"},
-		{"MENU_GAME_RMG",        "Random Mission"},
-		{"MENU_GAME_OPTIONS",    "Options"},
-		{"MENU_GAME_CREDITS",    "Credits"},
-		{"MENU_GAME_QUIT",       "Quit"},
-		{"MENU_GAME_BACK",       "Back"},
-		{"MENU_GAME_LOADGAME",   "Load Game"},
-		{"MENU_GAME_LOADAUTO",   "Load Autosave"},
-		{"MENU_GAME_LOADAGAME",  "Load a Game"},
-		{"MENU_GAME_SAVEGAME",   "Save Game"},
-		{"MENU_GAME_START",      "Start Game"},
-		{"MENU_GAME_TUT",        "Tutorial"},
-		{"MENU_GAME_LANG",       "Language"},
-		{"MENU_GAME_CONTROLS",   "Controls"},
-		{"MENU_GAME_SOUND",      "Sound"},
-		{"MENU_GAME_SDIFF",      "Select Difficulty"},
+		{"MENU_GAME_SINGLE",     "SINGLE PLAYER"},
+		{"MENU_GAME_RMG",        "RANDOM MISSION"},
+		{"MENU_GAME_OPTIONS",    "OPTIONS"},
+		{"MENU_GAME_CREDITS",    "CREDITS"},
+		{"MENU_GAME_QUIT",       "QUIT"},
+		{"MENU_GAME_BACK",       "BACK"},
+		{"MENU_GAME_LOADGAME",   "LOAD GAME"},
+		{"MENU_GAME_LOADAUTO",   "LOAD AUTOSAVE"},
+		{"MENU_GAME_LOADAGAME",  "LOAD A GAME"},
+		{"MENU_GAME_SAVEGAME",   "SAVE GAME"},
+		{"MENU_GAME_START",      "START GAME"},
+		{"MENU_GAME_TUT",        "TUTORIAL"},
+		{"MENU_GAME_LANG",       "LANGUAGE"},
+		{"MENU_GAME_CONTROLS",   "CONTROLS"},
+		{"MENU_GAME_SOUND",      "SOUND"},
+		{"MENU_GAME_SDIFF",      "SELECT DIFFICULTY"},
 		// Generic
-		{"MENU_GENERIC_YES",     "Yes"},
-		{"MENU_GENERIC_NO",      "No"},
+		{"MENU_GENERIC_YES",     "YES"},
+		{"MENU_GENERIC_NO",      "NO"},
 		{"MENU_GENERIC_OK",      "OK"},
-		{"MENU_GENERIC_GAME",    "Game"},
-		{"MENU_GENERIC_LOADING", "Loading..."},
-		{"MENU_GENERIC_GENERATING", "Generating..."},
-		{"MENU_GENERIC_RETURN_TO_GAME", "Return to Game"},
-		{"MENU_GENERIC_APPLY_CHANGES",  "Apply Changes"},
-		{"MENU_GENERIC_APPLY_DEFAULTS", "Restore Defaults"},
-		{"MENU_GENERIC_ENGLISH",   "English"},
-		{"MENU_GENERIC_AMERICAN",  "American"},
-		{"MENU_GENERIC_GERMAN",    "German"},
-		{"MENU_GENERIC_FRENCH",    "French"},
-		{"MENU_GENERIC_ITALIAN",   "Italian"},
-		{"MENU_GENERIC_SPANISH",   "Spanish"},
-		{"MENU_GENERIC_MISSIONINFO", "Mission Info"},
-		{"MENU_GENERIC_OBJS",       "Objectives"},
-		{"MENU_GENERIC_WEAPONINFO",  "Weapon Info"},
+		{"MENU_GENERIC_GAME",    "GAME"},
+		{"MENU_GENERIC_LOADING", "LOADING..."},
+		{"MENU_GENERIC_GENERATING", "GENERATING..."},
+		{"MENU_GENERIC_RETURN_TO_GAME", "RETURN TO GAME"},
+		{"MENU_GENERIC_APPLY_CHANGES",  "APPLY CHANGES"},
+		{"MENU_GENERIC_APPLY_DEFAULTS", "RESTORE DEFAULTS"},
+		{"MENU_GENERIC_ENGLISH",   "ENGLISH"},
+		{"MENU_GENERIC_AMERICAN",  "AMERICAN"},
+		{"MENU_GENERIC_GERMAN",    "GERMAN"},
+		{"MENU_GENERIC_FRENCH",    "FRENCH"},
+		{"MENU_GENERIC_ITALIAN",   "ITALIAN"},
+		{"MENU_GENERIC_SPANISH",   "SPANISH"},
+		{"MENU_GENERIC_MISSIONINFO", "MISSION INFO"},
+		{"MENU_GENERIC_OBJS",       "OBJECTIVES"},
+		{"MENU_GENERIC_WEAPONINFO",  "WEAPON INFO"},
 		// Difficulty
-		{"GENERIC_EASY",       "Easy"},
-		{"GENERIC_MEDIUM",     "Medium"},
-		{"GENERIC_HARD",       "Hard"},
-		{"GENERIC_SUPERHARD",  "Extreme"},
-		{"GENERIC_CUSTOM",     "Custom"},
+		{"GENERIC_EASY",       "EASY"},
+		{"GENERIC_MEDIUM",     "MEDIUM"},
+		{"GENERIC_HARD",       "HARD"},
+		{"GENERIC_SUPERHARD",  "EXTREME"},
+		{"GENERIC_CUSTOM",     "CUSTOM"},
 		// Audio
-		{"MENU_AUDIO_DYNAMIC",      "Audio Settings"},
-		{"MENU_AUDIO_FX_VOLUME",    "Effects Volume"},
-		{"MENU_AUDIO_MUSIC_VOLUME", "Music Volume"},
+		{"MENU_AUDIO_DYNAMIC",      "AUDIO SETTINGS"},
+		{"MENU_AUDIO_FX_VOLUME",    "EFFECTS VOLUME"},
+		{"MENU_AUDIO_MUSIC_VOLUME", "MUSIC VOLUME"},
 		// Keys/controls
-		{"MENU_KEYS_MISC",          "Miscellaneous"},
-		{"MENU_KEYS_DEFAULTS",      "Restore Defaults"},
+		{"MENU_KEYS_MISC",          "MISCELLANEOUS"},
+		{"MENU_KEYS_DEFAULTS",      "RESTORE DEFAULTS"},
 		// Inventory
-		{"MENU_INV_SELECT_REC",  "Recommended"},
-		{"MENU_INV_GO_BRIEF",    "Mission Briefing"},
-		{"MENU_INV_DEPLOY",      "Deploy"},
+		{"MENU_INV_SELECT_REC",  "RECOMMENDED"},
+		{"MENU_INV_GO_BRIEF",    "MISSION BRIEFING"},
+		{"MENU_INV_DEPLOY",      "DEPLOY"},
 		{NULL, NULL}
 	};
 
@@ -551,16 +643,17 @@ static int UI_RE_RegisterFont_SOF2( const char *name, int size, int scaleRaw, in
 	(void)size; (void)scaleRaw; (void)flags;
 
 	const char *actual = name;
-	// Map missing SOF2 fonts to available ones
+	// Map missing SOF2 fonts to available ones — use "hud" font which best matches
+	// the original SOF2 menu font metrics and appearance.
 	if ( name ) {
-		if ( !Q_stricmp( name, "small" ) )        actual = "lcdsmall";
-		else if ( !Q_stricmp( name, "medium" ) )   actual = "lcd";
-		else if ( !Q_stricmp( name, "title" ) )    actual = "credtitle";
-		else if ( !Q_stricmp( name, "credmed" ) )  actual = "lcd";
+		if ( !Q_stricmp( name, "small" ) )        actual = "hud";
+		else if ( !Q_stricmp( name, "medium" ) )   actual = "hud";
+		else if ( !Q_stricmp( name, "title" ) )    actual = "hud";
+		else if ( !Q_stricmp( name, "credmed" ) )  actual = "hud";
 	}
 
 	int h = re.RegisterFont( actual );
-	if ( h == 0 ) h = re.RegisterFont( "lcd" );  // ultimate fallback
+	if ( h == 0 ) h = re.RegisterFont( "hud" );  // ultimate fallback
 	Com_Printf( "RegisterFont: '%s'%s%s%s -> %d\n",
 		name ? name : "(null)",
 		(actual != name) ? " (mapped to '" : "",
@@ -608,12 +701,13 @@ static void UI_RE_DrawGetPicSize( int *w, int *h, int hShader ) {
 // SOF2 signature: void RE_StretchPic(float x, float y, float w, float h, int color, int hShader, int adjustFrom)
 // Map to OpenJK DrawStretchPic with full UV coverage and no tint.
 int g_stretchPicCount = 0;
-// Helper: unpack SOF2 packed RGBA (uint32) to float[4] color
+// Helper: unpack SOF2 packed color (uint32) to float[4] RGBA
+// Q3A/SOF2 packs as memory bytes [R,G,B,A] → on little-endian x86 reads as A<<24|B<<16|G<<8|R
 static void UI_UnpackColor( unsigned int color, float *rgba ) {
-	rgba[0] = (float)( color        & 0xFF) / 255.0f;
-	rgba[1] = (float)((color >>  8) & 0xFF) / 255.0f;
-	rgba[2] = (float)((color >> 16) & 0xFF) / 255.0f;
-	rgba[3] = (float)((color >> 24) & 0xFF) / 255.0f;
+	rgba[0] = (float)( color        & 0xFF) / 255.0f;  // R from byte 0
+	rgba[1] = (float)((color >>  8) & 0xFF) / 255.0f;  // G from byte 1
+	rgba[2] = (float)((color >> 16) & 0xFF) / 255.0f;  // B from byte 2
+	rgba[3] = (float)((color >> 24) & 0xFF) / 255.0f;  // A from byte 3
 }
 
 static void UI_RE_StretchPic( float x, float y, float w, float h, int color, int hShader, int adjustFrom ) {
@@ -1103,11 +1197,18 @@ void CL_InitUI( void ) {
 		import.Z_Free     = UI_SysFree;
 
 		// [39-43] Data fields (NOT function pointers — raw values/addresses)
-		import.vidWidth    = cls.glconfig.vidWidth;
-		import.vidHeight   = cls.glconfig.vidHeight;
+		// Pass virtual dimensions (640x480) so the DLL's cursor clamping and
+		// widget hit-testing use the same coordinate space as its rendering.
+		// Actual GL dims stored in ui_actual_vidWidth/Height for mouse scaling.
+		ui_actual_vidWidth  = cls.glconfig.vidWidth;
+		ui_actual_vidHeight = cls.glconfig.vidHeight;
+		Com_Printf("CL_InitUI: actual vidWidth=%d vidHeight=%d, passing 640x480 to DLL\n",
+			ui_actual_vidWidth, ui_actual_vidHeight);
+		import.vidWidth    = 640;
+		import.vidHeight   = 480;
 		import.keyCatchers = &keyCatchers;
 		import.clsState    = (int *)&cls.state;
-		import.keys_array  = kg.keys;
+		import.keys_array  = sof2_shadow_keys;
 
 		// [44-53] Utility / String / Key
 		import.Cvar_InfoString    = Cvar_InfoString;
@@ -1210,7 +1311,7 @@ void CL_InitUI( void ) {
 		import.RE_reserved_95   = (void *)UI_RE_FillRect;                // re+0x98 = RE_FillRect
 		import.RE_reserved_96   = (void *)UI_RE_DrawLine;               // re+0x9c = RE_DrawLine
 		import.RE_reserved_97   = (void *)UI_RE_DrawBox;                // re+0xa0 = RE_DrawBox
-		import.RE_reserved_98   = (void *)UI_RE_SetColor5;             // re+0xa8 = RE_SetColor (5 int params; -1,-1,-1,-1,0 = reset)
+		import.RE_reserved_98   = (void *)UI_RE_SetScissor;            // re+0xa8 = RE_SetScissor (x,y,w,h,enable) — clip region
 		import.RE_reserved_99   = (void *)UI_RE_SetClipRegion;         // re+0xac = RE_SetClipRegion (1 int param; clip right edge)
 
 		// [100-101] ICARUS scripting

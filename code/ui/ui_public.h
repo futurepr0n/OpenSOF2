@@ -237,7 +237,7 @@ typedef struct {
 	void   *(*slot12)(void);                                           // +0x30 [12]
 	void   *(*slot13)(void);                                           // +0x34 [13]
 	void   *(*slot14)(void);                                           // +0x38 [14]
-	void    (*UI_KeyEvent)(int key, int down);                         // +0x3c [15] key event handler
+	int     (*UI_KeyEvent)(int key, int isChar, int flags);            // +0x3c [15] key event handler
 	void    (*UI_MouseEvent)(int dx, int dy);                          // +0x40 [16] confirmed: calls UI_MenuSystem_MoveMouseClamped
 	void    (*UI_RegisterSounds)(void);                                // +0x44 [17]
 } uiExport_t;  // 0x48 bytes total (18 function pointers)
