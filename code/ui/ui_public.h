@@ -224,8 +224,8 @@ uiExport_t — 18 function pointers returned by GetUIAPI()
 typedef struct {
 	void    (*UI_Init)(void);                                           // +0x00 [0]
 	void    (*UI_Shutdown)(void);                                       // +0x04 [1]
-	void    (*UI_KeyEvent)(int key, int down);                         // +0x08 [2]
-	void    (*UI_MouseEvent)(int dx, int dy);                          // +0x0c [3]
+	int     (*UI_IsFullscreen)(void);                                  // +0x08 [2] returns bool, no args
+	void   *(*slot3)(void);                                            // +0x0c [3] unknown
 	void    (*UI_SetActiveMenu)(char *menuName, char *cfgFile, byte flags); // +0x10 [4]
 	void   *(*slot5)(void);                                            // +0x14 [5]
 	void    (*UI_Refresh)(void);                                       // +0x18 [6]
@@ -237,8 +237,8 @@ typedef struct {
 	void   *(*slot12)(void);                                           // +0x30 [12]
 	void   *(*slot13)(void);                                           // +0x34 [13]
 	void   *(*slot14)(void);                                           // +0x38 [14]
-	void   *(*slot15)(void);                                           // +0x3c [15]
-	void   *(*slot16)(void);                                           // +0x40 [16]
+	void    (*UI_KeyEvent)(int key, int down);                         // +0x3c [15] key event handler
+	void    (*UI_MouseEvent)(int dx, int dy);                          // +0x40 [16] confirmed: calls UI_MenuSystem_MoveMouseClamped
 	void    (*UI_RegisterSounds)(void);                                // +0x44 [17]
 } uiExport_t;  // 0x48 bytes total (18 function pointers)
 

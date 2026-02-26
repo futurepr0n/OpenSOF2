@@ -451,7 +451,11 @@ void S_Init( void ) {
 	s_allowDynamicMusic = Cvar_Get( "s_allowDynamicMusic", "1",       CVAR_ARCHIVE_ND );
 	s_debugdynamic      = Cvar_Get( "s_debugdynamic",      "0",       0 );
 	s_initsound         = Cvar_Get( "s_initsound",         "1",       CVAR_ARCHIVE | CVAR_LATCH );
-	s_khz               = Cvar_Get( "s_khz",               "44",      CVAR_ARCHIVE | CVAR_LATCH );
+	s_khz               = Cvar_Get( "s_khz",               "22",      CVAR_ARCHIVE | CVAR_LATCH );
+	// SOF2 audio assets expect 22050Hz. Force to 22 if saved config still has the old default of 44.
+	if ( s_khz->integer == 44 ) {
+		Cvar_Set( "s_khz", "22" );
+	}
 	s_language          = Cvar_Get( "s_language",          "english", CVAR_ARCHIVE | CVAR_NORESTART );
 	s_lip_threshold_1   = Cvar_Get( "s_threshold1",        "0.3",     0 );
 	s_lip_threshold_2   = Cvar_Get( "s_threshold2",        "4",       0 );
@@ -2696,6 +2700,12 @@ void S_Update( void ) {
 	int			i;
 	channel_t	*ch;
 
+	static int s_updateTrace = 0;
+	if ( ++s_updateTrace <= 3 || (s_updateTrace % 1000 == 0) ) {
+		Com_Printf("[SND] S_Update #%d: started=%d muted=%d\n",
+			s_updateTrace, s_soundStarted, (int)s_soundMuted);
+	}
+
 	if ( !s_soundStarted || s_soundMuted ) {
 		return;
 	}
@@ -4121,6 +4131,9 @@ static qboolean S_StartBackgroundTrack_Actual( MusicInfo_t *pMusicInfo, qboolean
 			pMusicInfo->iLoadedDataLen = FS_FOpenFileRead( name, &pMusicInfo->s_backgroundFile, qtrue );
 		}
 
+		Com_Printf("[SND] S_StartBackgroundTrack_Actual: file='%s' handle=%d len=%d\n",
+			name, pMusicInfo->s_backgroundFile, pMusicInfo->iLoadedDataLen);
+
 		if (!pMusicInfo->s_backgroundFile)
 		{
 			Com_Printf( S_COLOR_RED"Couldn't open music file %s\n", name );
@@ -4166,6 +4179,8 @@ static qboolean S_StartBackgroundTrack_Actual( MusicInfo_t *pMusicInfo, qboolean
 													qtrue	// bStereoDesired
 													);
 
+			Com_Printf("[SND] MP3 DecodeInit: file='%s' error=%s dma.speed=%d\n",
+				name, psError ? psError : "OK", dma.speed);
 
 			if (psError == NULL)
 			{
@@ -4267,6 +4282,8 @@ static qboolean S_StartBackgroundTrack_Actual( MusicInfo_t *pMusicInfo, qboolean
 
 		if ( pMusicInfo->s_backgroundInfo.channels != 2 || pMusicInfo->s_backgroundInfo.rate != 22050 ) {
 			Com_Printf(S_COLOR_YELLOW "WARNING: music file %s is not 22k stereo\n", name );
+			Com_Printf("[SND] Music rate mismatch: channels=%d rate=%d (expected 2ch/22050Hz)\n",
+				pMusicInfo->s_backgroundInfo.channels, pMusicInfo->s_backgroundInfo.rate);
 		}
 
 		if ( ( len = S_FindWavChunk( pMusicInfo->s_backgroundFile, "data" ) ) == 0 ) {
@@ -4561,6 +4578,9 @@ void S_StartBackgroundTrack( const char *intro, const char *loop, qboolean bCall
 
 	// conceptually we always play the 'intro'[/sName] track, intro-to-loop transition is handled in UpdateBackGroundTrack().
 	//
+	Com_Printf("[SND] S_StartBackgroundTrack: intro='%s' loop='%s' exists=%d\n",
+		sNameIntro, sNameLoop, (strstr(sNameIntro,"/") ? (int)S_FileExists( sNameIntro ) : -1));
+
 	if ( (strstr(sNameIntro,"/") && S_FileExists( sNameIntro )) )	// strstr() check avoids extra file-exists check at runtime if reverting from streamed music to dynamic since literal files all need at least one slash in their name (eg "music/blah")
 	{
 		const char *psLoopName = S_FileExists( sNameLoop ) ? sNameLoop : sNameIntro;

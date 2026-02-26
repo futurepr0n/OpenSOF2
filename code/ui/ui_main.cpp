@@ -62,6 +62,11 @@ extern qboolean PC_Script_Parse(const char **out);
 // SOF2 UI DLL export table — set by CL_InitUI when Menusx86.dll is loaded.
 extern uiExport_t *uie;
 
+// Engine-tracked cursor position for fallback cursor drawing when uie is active.
+// The DLL doesn't draw a cursor, so the engine draws one using these coordinates.
+float uie_cursorx = 320.0f;
+float uie_cursory = 240.0f;
+
 #define LISTBUFSIZE 10240
 
 static struct
@@ -486,8 +491,27 @@ void _UI_Refresh( int realtime )
 {
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
-		if ( uie->UI_Refresh )
+		extern int g_stretchPicCount;
+		static int slot5Calls = 0;
+		// slot 6 — state management (pop menus, exec cfgs)
+		if ( uie->UI_Refresh ) {
 			uie->UI_Refresh();
+		}
+		// slot 5 — the actual render/draw call that paints widgets
+		if ( uie->slot5 ) {
+			int prevSP = g_stretchPicCount;
+			int kc = Key_GetCatcher();
+			slot5Calls++;
+			if ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) {
+				Com_Printf("[DBG] slot5 PRE #%d: keyCatchers=%d\n", slot5Calls, kc);
+			}
+			uie->slot5();
+			if ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) {
+				Com_Printf("[DBG] slot5 POST #%d: stretchPic=%d (delta=%d)\n",
+					slot5Calls, g_stretchPicCount, g_stretchPicCount - prevSP);
+			}
+		}
+
 		return;
 	}
 
@@ -4021,6 +4045,19 @@ void _UI_MouseEvent( int dx, int dy )
 	if ( uie ) {
 		if ( uie->UI_MouseEvent )
 			uie->UI_MouseEvent( dx, dy );
+		// Also track cursor position engine-side for fallback cursor drawing
+		uie_cursorx += dx;
+		if (uie_cursorx < 0) uie_cursorx = 0;
+		else if (uie_cursorx > SCREEN_WIDTH) uie_cursorx = SCREEN_WIDTH;
+		uie_cursory += dy;
+		if (uie_cursory < 0) uie_cursory = 0;
+		else if (uie_cursory > SCREEN_HEIGHT) uie_cursory = SCREEN_HEIGHT;
+		// Log first few mouse events for diagnostics
+		static int mouseLogCount = 0;
+		if ( (dx || dy) && ++mouseLogCount <= 10 ) {
+			Com_Printf("[DBG] UI_MouseEvent: dx=%d dy=%d cursor=(%.0f,%.0f)\n",
+				dx, dy, uie_cursorx, uie_cursory);
+		}
 		return;
 	}
 

@@ -133,6 +133,75 @@ static void UI_Cvar_SetInternalAllowed( const char *name, int val )
 	// Raven-internal cvar flag setter; stub.
 }
 
+// ============================================================================
+// SOF2-compatible cvar_t wrapper for Menusx86.dll ABI compatibility
+//
+// SOF2's cvar_t has char name[64] at offset 0, so (char*)cvar_ptr == cvar->name.
+// The DLL exploits this: it passes cvar_t* to Cvar_Set(name, val) and directly
+// reads cvar_t+0x44 for the string field.  OpenJK's cvar_t has char *name at
+// offset 0 and hashIndex at +0x44, causing crashes.
+//
+// We return pointers to these SOF2-layout wrappers from Cvar_Get and keep them
+// synced with the real engine cvars.
+// ============================================================================
+typedef struct sof2_cvar_s {
+	char    name[64];           // 0x00  inline name (SOF2 ABI: (char*)this == name)
+	void   *next;               // 0x40
+	char   *string;             // 0x44  ← DLL reads this directly
+	char   *resetString;        // 0x48
+	char   *latchedString;      // 0x4C
+	int     flags;              // 0x50
+	int     modified;           // 0x54
+	int     modificationCount;  // 0x58
+	float   value;              // 0x5C
+	int     integer;            // 0x60
+} sof2_cvar_t;
+
+#define MAX_SOF2_CVARS 256
+static sof2_cvar_t  s_sof2Cvars[MAX_SOF2_CVARS];
+static cvar_t      *s_sof2CvarReal[MAX_SOF2_CVARS];
+static int          s_sof2CvarCount = 0;
+
+static void SOF2_SyncCvar( int idx ) {
+	cvar_t *r = s_sof2CvarReal[idx];
+	s_sof2Cvars[idx].string            = r->string;
+	s_sof2Cvars[idx].resetString       = r->resetString;
+	s_sof2Cvars[idx].latchedString     = r->latchedString;
+	s_sof2Cvars[idx].flags             = r->flags;
+	s_sof2Cvars[idx].modified          = r->modified;
+	s_sof2Cvars[idx].modificationCount = r->modificationCount;
+	s_sof2Cvars[idx].value             = r->value;
+	s_sof2Cvars[idx].integer           = r->integer;
+}
+
+// Cvar_Get wrapper: returns a SOF2-layout cvar to the DLL.
+static cvar_t *UI_Cvar_Get_SOF2( const char *name, const char *val, int flags ) {
+	cvar_t *real = Cvar_Get( name, val, flags );
+	if ( !real ) return NULL;
+
+	// Find existing wrapper for this cvar
+	for ( int i = 0; i < s_sof2CvarCount; i++ ) {
+		if ( s_sof2CvarReal[i] == real ) {
+			SOF2_SyncCvar( i );
+			return (cvar_t *)&s_sof2Cvars[i];
+		}
+	}
+
+	// Allocate new wrapper
+	if ( s_sof2CvarCount >= MAX_SOF2_CVARS ) {
+		Com_Error( ERR_FATAL, "UI_Cvar_Get_SOF2: too many cvars (%d)", MAX_SOF2_CVARS );
+		return NULL;
+	}
+
+	int idx = s_sof2CvarCount++;
+	s_sof2CvarReal[idx] = real;
+	Q_strncpyz( s_sof2Cvars[idx].name, real->name, sizeof( s_sof2Cvars[idx].name ) );
+	s_sof2Cvars[idx].next = NULL;
+	SOF2_SyncCvar( idx );
+
+	return (cvar_t *)&s_sof2Cvars[idx];
+}
+
 int s_ui_in_setactivemenu = 0;  // 1 while inside uie->UI_SetActiveMenu
 
 static char *UI_SE_GetString( const char *token, int flags )
@@ -258,9 +327,48 @@ static void UI_RE_ClearScene( void ) {
 
 // Safe stub for NULL import slots — returns 0 to signal "not found" / "no-op".
 // Prevents a crash if the DLL calls a slot we haven't fully identified yet.
-static int UI_NullSlotStub( void ) {
-	Com_Printf("[DBG] NullSlotStub called!\n");
-	return 0;
+static int UI_NullSlotStub( void ) { return 0; }
+
+// Per-slot stubs to identify which import slots fire during rendering
+#define MAKE_SLOT_STUB(N) \
+	static int UI_SlotStub_##N( void ) { \
+		static int calls = 0; calls++; \
+		if ( calls <= 3 || (calls % 1000 == 0) ) \
+			Com_Printf("[DBG] Slot " #N " called (#%d)\n", calls); \
+		return 0; \
+	}
+MAKE_SLOT_STUB(55)
+MAKE_SLOT_STUB(58)
+MAKE_SLOT_STUB(60)
+MAKE_SLOT_STUB(66)
+MAKE_SLOT_STUB(67)
+MAKE_SLOT_STUB(68)
+MAKE_SLOT_STUB(75)
+MAKE_SLOT_STUB(76)
+MAKE_SLOT_STUB(81)
+MAKE_SLOT_STUB(82)
+MAKE_SLOT_STUB(83)
+// Slot 99: RE_SetClipRegion — SOF2 passes a single int (clip right-edge pixel).
+// This OpenJK build's refexport_t has no SetClipRegion, so just no-op.
+// Text won't be clipped, but that's fine — ensures it's always visible.
+static void UI_RE_SetClipRegion( int clipRightEdge ) {
+	// no-op: clipping not supported in this renderer build
+}
+
+// Slot 98: RE_SetColor — SOF2 passes 5 ints; (-1,-1,-1,-1,0) = reset to white.
+// OpenJK's re.SetColor takes a float[4] rgba array or NULL for white.
+static void UI_RE_SetColor5( int r, int g, int b, int a, int flags ) {
+	if ( r == -1 && g == -1 && b == -1 && a == -1 ) {
+		re.SetColor( NULL );  // reset to default (white)
+	} else {
+		float color[4] = {
+			(float)(r & 0xFF) / 255.0f,
+			(float)(g & 0xFF) / 255.0f,
+			(float)(b & 0xFF) / 255.0f,
+			(float)(a & 0xFF) / 255.0f
+		};
+		re.SetColor( color );
+	}
 }
 
 // Traced wrapper for Cbuf_ExecuteText (slot 22)
@@ -320,29 +428,115 @@ static int UI_COM_GetNextChar( char **cursor, int flags ) {
 	return (int)c;
 }
 
-// Slot 64: Key_GetBindingByName — SOF2's STM parser uses &KEYNAME& syntax to expand
-// key bindings in menu text.  The DLL calls this with the accumulated key-name string
-// (e.g. "MOUSE1") and expects back the engine binding string (e.g. "+attack").
-// Signature (verified from UIW_MenuBuffer_ParseNextToken disasm 0x400232a0):
-//   PUSH ECX (key-name string buffer)
-//   CALL [slot 64]
-// Returns const char * (binding string; empty string → ParseError "key not found").
-static const char *UI_Key_GetBindingByName( const char *keyname ) {
-	if ( !keyname || !keyname[0] ) return "";
-	int keynum = Key_StringToKeynum( (char *)keyname );
-	if ( keynum < 0 ) return "";
-	const char *binding = Key_GetBinding( keynum );
-	return binding ? binding : "";
+// Slot 64: SE_GetString with fallback — string reference resolver.
+// Original SoF2.exe maps slot 64 to SE_GetString (confirmed by decompiling CL_InitUI).
+// DLL's UIW_MenuBuffer_ParseNextToken calls this for &REFERENCE& expansion
+// (e.g. &MENU_GAME_SINGLE& → "Single Player").
+// Since .str string definition files are missing from game assets, we provide a
+// hardcoded fallback table for common menu strings.
+static char *UI_SE_GetString_WithFallback( const char *token, int flags ) {
+	if ( !token || !*token ) return (char *)"";
+
+	// Try the real string table first (for when .str files exist)
+	const char *result = SE_GetString( token );
+	if ( result && *result ) return (char *)result;
+
+	// Fallback: hardcoded lookup for the most important menu strings
+	static const struct { const char *ref; const char *text; } known[] = {
+		// Main menu
+		{"MENU_GAME_SINGLE",     "Single Player"},
+		{"MENU_GAME_RMG",        "Random Mission"},
+		{"MENU_GAME_OPTIONS",    "Options"},
+		{"MENU_GAME_CREDITS",    "Credits"},
+		{"MENU_GAME_QUIT",       "Quit"},
+		{"MENU_GAME_BACK",       "Back"},
+		{"MENU_GAME_LOADGAME",   "Load Game"},
+		{"MENU_GAME_LOADAUTO",   "Load Autosave"},
+		{"MENU_GAME_LOADAGAME",  "Load a Game"},
+		{"MENU_GAME_SAVEGAME",   "Save Game"},
+		{"MENU_GAME_START",      "Start Game"},
+		{"MENU_GAME_TUT",        "Tutorial"},
+		{"MENU_GAME_LANG",       "Language"},
+		{"MENU_GAME_CONTROLS",   "Controls"},
+		{"MENU_GAME_SOUND",      "Sound"},
+		{"MENU_GAME_SDIFF",      "Select Difficulty"},
+		// Generic
+		{"MENU_GENERIC_YES",     "Yes"},
+		{"MENU_GENERIC_NO",      "No"},
+		{"MENU_GENERIC_OK",      "OK"},
+		{"MENU_GENERIC_GAME",    "Game"},
+		{"MENU_GENERIC_LOADING", "Loading..."},
+		{"MENU_GENERIC_GENERATING", "Generating..."},
+		{"MENU_GENERIC_RETURN_TO_GAME", "Return to Game"},
+		{"MENU_GENERIC_APPLY_CHANGES",  "Apply Changes"},
+		{"MENU_GENERIC_APPLY_DEFAULTS", "Restore Defaults"},
+		{"MENU_GENERIC_ENGLISH",   "English"},
+		{"MENU_GENERIC_AMERICAN",  "American"},
+		{"MENU_GENERIC_GERMAN",    "German"},
+		{"MENU_GENERIC_FRENCH",    "French"},
+		{"MENU_GENERIC_ITALIAN",   "Italian"},
+		{"MENU_GENERIC_SPANISH",   "Spanish"},
+		{"MENU_GENERIC_MISSIONINFO", "Mission Info"},
+		{"MENU_GENERIC_OBJS",       "Objectives"},
+		{"MENU_GENERIC_WEAPONINFO",  "Weapon Info"},
+		// Difficulty
+		{"GENERIC_EASY",       "Easy"},
+		{"GENERIC_MEDIUM",     "Medium"},
+		{"GENERIC_HARD",       "Hard"},
+		{"GENERIC_SUPERHARD",  "Extreme"},
+		{"GENERIC_CUSTOM",     "Custom"},
+		// Audio
+		{"MENU_AUDIO_DYNAMIC",      "Audio Settings"},
+		{"MENU_AUDIO_FX_VOLUME",    "Effects Volume"},
+		{"MENU_AUDIO_MUSIC_VOLUME", "Music Volume"},
+		// Keys/controls
+		{"MENU_KEYS_MISC",          "Miscellaneous"},
+		{"MENU_KEYS_DEFAULTS",      "Restore Defaults"},
+		// Inventory
+		{"MENU_INV_SELECT_REC",  "Recommended"},
+		{"MENU_INV_GO_BRIEF",    "Mission Briefing"},
+		{"MENU_INV_DEPLOY",      "Deploy"},
+		{NULL, NULL}
+	};
+
+	for ( int i = 0; known[i].ref; i++ ) {
+		if ( Q_stricmp( token, known[i].ref ) == 0 )
+			return (char *)known[i].text;
+	}
+
+	// Ultimate fallback: return the reference name itself
+	static char fallback[256];
+	Q_strncpyz( fallback, token, sizeof( fallback ) );
+	return fallback;
 }
 
-// Slot 86: R_RegisterFont — SOF2's DLL calls this as RegisterFont(name, 0, 1.0f, 0).
-// OpenJK's re.RegisterFont has a different signature (takes fontInfo_t*), so we stub it.
-// The DLL stores the returned handle and uses it for text rendering.
-// Return 1 (non-zero = "registered") so font drawing code doesn't skip text entirely.
-static int UI_RE_RegisterFont_Stub( const char *name, int size, int scaleRaw, int flags ) {
-	static int s_nf = 0;
-	Com_Printf( "UI_RE_RegisterFont[%d]: %s → 1\n", ++s_nf, name ? name : "(null)" );
-	return 1;
+// Slot 86: R_RegisterFont — SOF2's DLL calls this as RegisterFont(name, size, scaleRaw, flags).
+// OpenJK's re.RegisterFont takes (const char *name) and returns an int handle.
+//
+// SOF2 has font names (small, medium, title, credmed) that don't have .fontdat files
+// in any PK3.  The original SOF2 renderer created these internally.  Map them to the
+// closest available fonts that DO have .fontdat files.
+static int UI_RE_RegisterFont_SOF2( const char *name, int size, int scaleRaw, int flags ) {
+	(void)size; (void)scaleRaw; (void)flags;
+
+	const char *actual = name;
+	// Map missing SOF2 fonts to available ones
+	if ( name ) {
+		if ( !Q_stricmp( name, "small" ) )        actual = "lcdsmall";
+		else if ( !Q_stricmp( name, "medium" ) )   actual = "lcd";
+		else if ( !Q_stricmp( name, "title" ) )    actual = "credtitle";
+		else if ( !Q_stricmp( name, "credmed" ) )  actual = "lcd";
+	}
+
+	int h = re.RegisterFont( actual );
+	if ( h == 0 ) h = re.RegisterFont( "lcd" );  // ultimate fallback
+	Com_Printf( "RegisterFont: '%s'%s%s%s -> %d\n",
+		name ? name : "(null)",
+		(actual != name) ? " (mapped to '" : "",
+		(actual != name) ? actual : "",
+		(actual != name) ? "')" : "",
+		h );
+	return h;
 }
 
 // Slot 94: RE_RegisterShaderNoMip — traced wrapper so we can confirm shader
@@ -382,44 +576,222 @@ static void UI_RE_DrawGetPicSize( int *w, int *h, int hShader ) {
 // Slot 90: RE_StretchPic — SOF2 simple image draw (no UV, colour-tinted).
 // SOF2 signature: void RE_StretchPic(float x, float y, float w, float h, int color, int hShader, int adjustFrom)
 // Map to OpenJK DrawStretchPic with full UV coverage and no tint.
+int g_stretchPicCount = 0;
+// Helper: unpack SOF2 packed RGBA (uint32) to float[4] color
+static void UI_UnpackColor( unsigned int color, float *rgba ) {
+	rgba[0] = (float)( color        & 0xFF) / 255.0f;
+	rgba[1] = (float)((color >>  8) & 0xFF) / 255.0f;
+	rgba[2] = (float)((color >> 16) & 0xFF) / 255.0f;
+	rgba[3] = (float)((color >> 24) & 0xFF) / 255.0f;
+}
+
 static void UI_RE_StretchPic( float x, float y, float w, float h, int color, int hShader, int adjustFrom ) {
-	Com_Printf("[DBG] StretchPic: x=%.0f y=%.0f w=%.0f h=%.0f shader=%d\n", x, y, w, h, hShader);
-	(void)color; (void)adjustFrom;
+	g_stretchPicCount++;
+	if (g_stretchPicCount <= 30) {
+		Com_Printf("[DBG] StretchPic #%d: x=%.0f y=%.0f w=%.0f h=%.0f color=0x%08X shader=%d\n",
+			g_stretchPicCount, x, y, w, h, (unsigned int)color, hShader);
+	}
+	(void)adjustFrom;
+	// Apply SOF2 packed RGBA color tint before drawing
+	if ( color != 0 && color != (int)0xFFFFFFFF ) {
+		float rgba[4];
+		UI_UnpackColor( (unsigned int)color, rgba );
+		re.SetColor( rgba );
+	}
 	re.DrawStretchPic( x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, hShader );
+	if ( color != 0 && color != (int)0xFFFFFFFF ) {
+		re.SetColor( NULL );
+	}
+}
+
+// Slot 95: RE_FillRect — SOF2 fills a rectangle with a packed RGBA color.
+// Signature: void RE_FillRect(float x, float y, float w, float h, unsigned int color)
+static void UI_RE_FillRect( float x, float y, float w, float h, unsigned int color ) {
+	if ((color & 0xFF000000) == 0) return; // fully transparent
+	float rgba[4];
+	UI_UnpackColor( color, rgba );
+	re.SetColor( rgba );
+	re.DrawStretchPic( x, y, w, h, 0, 0, 0, 0, cls.whiteShader );
+	re.SetColor( NULL );
+}
+
+// Slot 96: RE_DrawLine — SOF2 draws a 2D line between two points.
+// Signature: void RE_DrawLine(float x1, float y1, float x2, float y2, float width, unsigned int color)
+static void UI_RE_DrawLine( float x1, float y1, float x2, float y2, float width, unsigned int color ) {
+	if ((color & 0xFF000000) == 0) return;
+	float rgba[4];
+	UI_UnpackColor( color, rgba );
+	re.SetColor( rgba );
+	// Approximate: draw a thin filled rectangle along the line
+	float dx = x2 - x1, dy = y2 - y1;
+	if (dx < 0) { dx = -dx; x1 = x2; }
+	if (dy < 0) { dy = -dy; y1 = y2; }
+	if (dx == 0) { // vertical
+		int hw = (int)(width + 1) >> 1;
+		re.DrawStretchPic( x1 - hw, y1, width, dy, 0, 0, 0, 0, cls.whiteShader );
+	} else { // horizontal
+		int hh = (int)(width + 1) >> 1;
+		re.DrawStretchPic( x1, y1 - hh, dx, width, 0, 0, 0, 0, cls.whiteShader );
+	}
+	re.SetColor( NULL );
+}
+
+// Slot 97: RE_DrawBox — SOF2 draws a filled box with outline.
+// Signature: void RE_DrawBox(int x, int y, int w, int h, unsigned int color)
+static void UI_RE_DrawBox( int x, int y, int w, int h, unsigned int color ) {
+	// Fill
+	UI_RE_FillRect( (float)x, (float)y, (float)w, (float)h, color );
+	// Outline (alpha-only from high byte)
+	unsigned int outlineColor = color & 0xFF000000;
+	UI_RE_DrawLine( (float)(x-1), (float)(y-1), (float)(x+w), (float)(y-1), 1.0f, outlineColor );
+	UI_RE_DrawLine( (float)(x-1), (float)(y+h), (float)(x+w), (float)(y+h), 1.0f, outlineColor );
+	UI_RE_DrawLine( (float)(x-1), (float)(y-1), (float)(x-1), (float)(y+h), 1.0f, outlineColor );
+	UI_RE_DrawLine( (float)(x+w), (float)(y-1), (float)(x+w), (float)(y+h), 1.0f, outlineColor );
 }
 
 // Slot 87: RE_Font_HeightPixels — font height in pixels scaled by 'scale'.
 // SOF2 signature: float RE_Font_HeightPixels(uint fontHandle, float scale)
-// OpenJK doesn't expose this; return a reasonable fixed height.
+// OpenJK's re.Font_HeightPixels returns int; SOF2 DLL expects float return.
+// Safety: never return 0 — DLL may divide by font height.
 static float UI_RE_Font_HeightPixels( unsigned int fontHandle, float scale ) {
-	Com_Printf("[DBG] Font_HeightPixels(font=%u, scale=%.2f)\n", fontHandle, scale);
-	(void)fontHandle;
-	return 14.0f * scale;
+	int px = re.Font_HeightPixels( (int)fontHandle, scale );
+	if ( px <= 0 ) px = 14;  // fallback to reasonable height
+	return (float)px;
 }
 
 // Slot 88: RE_Font_StrLenPixels — pixel width of a string.
 // SOF2 signature: int RE_Font_StrLenPixels(char *text, int setIndex, float scale)
-// OpenJK doesn't expose this; estimate based on character count.
 static int UI_RE_Font_StrLenPixels( const char *text, int setIndex, float scale ) {
-	(void)setIndex;
-	if ( !text ) return 0;
-	int len = 0;
-	while ( text[len] ) len++;
-	int px = (int)( len * 8.0f * scale );
-	Com_Printf("[DBG] Font_StrLenPixels('%s', set=%d, scale=%.2f) = %d\n", text, setIndex, scale, px);
-	return px;
+	return re.Font_StrLenPixels( text, setIndex, scale );
 }
 
 // Slot 89: RE_Font_DrawString — draw a text string.
-// SOF2 signature: void RE_Font_DrawString(int ox, int oy, char *text, float *rgba, int setIndex, int limit, float scale)
-// OpenJK uses a different font format; no-op for now (menus will be layout-correct but textless).
-static void UI_RE_Font_DrawString( int ox, int oy, const char *text, const float *rgba,
-								   int setIndex, int limit, float scale ) {
-	Com_Printf("[DBG] Font_DrawString(x=%d, y=%d, '%s', set=%d, lim=%d, scale=%.2f)\n",
-		ox, oy, text ? text : "(null)", setIndex, limit, scale);
-	(void)ox; (void)oy; (void)text; (void)rgba; (void)setIndex; (void)limit; (void)scale;
+// SOF2 DLL pushes 7 values (verified from UI_Widget_DrawText disasm at 0x4000cc60):
+//   p0 = float ox (bit pattern)       → e.g. 0 = 0.0
+//   p1 = float oy (bit pattern)       → e.g. 0x43580000 = 216.0
+//   p2 = const char *text
+//   p3 = color (packed uint32 or float[4] ptr)
+//   p4 = int setIndex/fontHandle
+//   p5 = float scale (bit pattern)    → e.g. 0x3F800000 = 1.0
+//   p6 = int iMaxPixelWidth or style  → 0 = unlimited
+//
+// CRITICAL: The DLL may pass rgba (param 3) as either a float[4] pointer OR a packed
+// uint32 color.  Accept all params as raw ints and safely probe to determine which case.
+// Uses Windows SEH (__try/__except) to guard against bad pointer dereferences.
+static void UI_RE_Font_DrawString_Safe( int p0, int p1, int p2, int p3,
+                                        int p4, int p5, int p6 ) {
+	const char *text = (const char *)p2;
+	if ( !text || !*text ) return;
+
+	// SOF2 passes ox/oy/scale as floats, reinterpret the raw int bits
+	float ox = *(float *)&p0;
+	float oy = *(float *)&p1;
+	int setIndex = p4;
+	float scale = *(float *)&p5;
+	// p6 = iMaxPixelWidth (0 = unlimited), passed through to renderer
+
+	// Determine rgba: if p3 looks like a valid heap/stack pointer (>64K),
+	// try to use it as float[4].  Otherwise fall back to white.
+	float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	const float *color = white;
+	if ( (unsigned int)p3 > 0x10000 ) {
+		// Likely a valid pointer — probe with SEH to be safe
+		const float *rgba = (const float *)p3;
+		__try {
+			if ( rgba[0] >= 0.0f && rgba[0] <= 1.0f &&
+			     rgba[3] >= 0.0f && rgba[3] <= 2.0f ) {
+				color = rgba;
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			// Bad pointer — use white
+		}
+	}
+
+	if ( scale <= 0.0f || scale > 10.0f ) scale = 1.0f;
+
+	static int s_drawCalls = 0;
+	if ( ++s_drawCalls <= 20 ) {
+		Com_Printf("[DBG] Font_DrawString #%d: ox=%.1f oy=%.1f text='%.32s' set=%d scale=%.2f p6=%d\n",
+			s_drawCalls, ox, oy, text, setIndex, scale, p6);
+	}
+
+	re.Font_DrawString( (int)ox, (int)oy, text, color, setIndex, p6, scale );
 }
 
+
+// Traced sound wrappers — log what sounds the DLL tries to play
+static int UI_S_RegisterSound_Traced( const char *name ) {
+	sfxHandle_t h = S_RegisterSound( name );
+	Com_Printf( "[SND] RegisterSound: '%s' -> %d\n", name ? name : "(null)", (int)h );
+	return (int)h;
+}
+static void UI_S_StartLocalSound_Traced( sfxHandle_t sfxHandle, int channelNum ) {
+	// Completely suppress "invalid" sound (handle 2) after the first few plays —
+	// this fires every frame when DLL cursor state is stuck, creating a rhythmic beep
+	static int invalidCount = 0;
+	if ( (int)sfxHandle == 2 ) {
+		if ( ++invalidCount > 3 ) return;  // allow first 3 then silence
+		Com_Printf("[SND] StartLocalSound: INVALID #%d chan=%d\n", invalidCount, channelNum);
+	}
+
+	// Rate-limit all other sounds: max 1 per 500ms to prevent spam
+	static int lastTime = 0;
+	static int callsThisWindow = 0;
+	int now = Sys_Milliseconds();
+	if ( now - lastTime > 500 ) { lastTime = now; callsThisWindow = 0; }
+	if ( ++callsThisWindow > 1 ) return;
+
+	if ( sfxHandle > 0 ) S_StartLocalSound( sfxHandle, channelNum );
+}
+
+// s_music command handler — SOF2 DLL issues "s_music <track>" via Cbuf_ExecuteText
+// during menu init.  Without this, the command falls through to UI_GameCommand
+// re-entrant path and causes issues.
+//
+// SOF2 dynamic music uses _fast/_slow suffixes (e.g. "music/shop/shopa" expands to
+// "music/shop/shopa_slow.mp3" for ambient and "music/shop/shopa_fast.mp3" for action).
+// For menu music we play the _slow (ambient) variant.
+extern qboolean S_FileExists( const char *psFilename );
+static void CL_SMusic_f( void ) {
+	const char *track = Cmd_Argc() > 1 ? Cmd_Argv(1) : "";
+	Com_Printf( "[SND] s_music: '%s'\n", track );
+
+	if ( !track[0] ) {
+		S_StopBackgroundTrack();
+		return;
+	}
+
+	// Try exact name first (e.g. "music/shop/shopa.mp3")
+	char tryName[MAX_QPATH];
+	Com_sprintf( tryName, sizeof(tryName), "%s.mp3", track );
+	if ( S_FileExists( tryName ) ) {
+		Com_Printf( "[SND] s_music: playing '%s'\n", tryName );
+		S_StartBackgroundTrack( track, track, qfalse );
+		return;
+	}
+
+	// Try SOF2 _slow suffix for ambient/menu music
+	Com_sprintf( tryName, sizeof(tryName), "%s_slow.mp3", track );
+	if ( S_FileExists( tryName ) ) {
+		char slowTrack[MAX_QPATH];
+		Com_sprintf( slowTrack, sizeof(slowTrack), "%s_slow", track );
+		Com_Printf( "[SND] s_music: playing '%s' (slow variant)\n", tryName );
+		S_StartBackgroundTrack( slowTrack, slowTrack, qfalse );
+		return;
+	}
+
+	// Try SOF2 _fast suffix as last resort
+	Com_sprintf( tryName, sizeof(tryName), "%s_fast.mp3", track );
+	if ( S_FileExists( tryName ) ) {
+		char fastTrack[MAX_QPATH];
+		Com_sprintf( fastTrack, sizeof(fastTrack), "%s_fast", track );
+		Com_Printf( "[SND] s_music: playing '%s' (fast variant)\n", tryName );
+		S_StartBackgroundTrack( fastTrack, fastTrack, qfalse );
+		return;
+	}
+
+	Com_Printf( "[SND] s_music: no matching file for '%s'\n", track );
+}
 
 /*
 ====================
@@ -594,9 +966,16 @@ CL_InitUI
 ====================
 */
 void CL_InitUI( void ) {
+	Com_Printf("=== OpenSOF2 build %s %s ===\n", __DATE__, __TIME__);
+
 #ifdef JK2_MODE
 	JK2SP_Register("keynames", 0	/*SP_REGISTER_REQUIRED*/);		// reference is KEYNAMES
 #endif
+
+	// Ensure sound is unmuted — OpenJK starts with s_soundMuted=qtrue and only
+	// clears it in S_BeginRegistration().  Without this call, all sound playback
+	// (music AND effects) is silently suppressed during the main menu.
+	S_BeginRegistration();
 
 	// -----------------------------------------------------------------------
 	// Attempt to load SOF2's Menusx86.dll via struct-based GetUIAPI().
@@ -626,13 +1005,6 @@ void CL_InitUI( void ) {
 		// -------------------------------------------------------------------
 		menu_import_t import;
 		memset( &import, 0, sizeof( import ) );
-
-		// CvarGet wrapper — local struct for scope convenience
-		struct DLLTrace {
-			static cvar_t *CvarGet( const char *nm, const char *val, int fl ) {
-				return Cvar_Get(nm,val,fl);
-			}
-		};
 
 		// [0-4] General — use Com_Printf directly to test if the issue is in our wrapper
 		import.Printf       = Com_Printf;
@@ -672,8 +1044,8 @@ void CL_InitUI( void ) {
 
 
 
-		// [28-35] Cvar — trace Cvar_Get to see what DLL reads at init
-		import.Cvar_Get                  = DLLTrace::CvarGet;
+		// [28-35] Cvar — SOF2 cvar ABI wrapper (inline name[64] at offset 0)
+		import.Cvar_Get                  = UI_Cvar_Get_SOF2;
 		// NULL-safe wrapper: DLL calls Cvar_Set(0) during MenuSystem init to
 		// reset some state; guard against crashing on NULL var_name.
 		struct CvarSetSafe {
@@ -722,34 +1094,31 @@ void CL_InitUI( void ) {
 		import.reserved_56        = (void *)UI_Slot56_GetBinding;  // Key_GetBinding variant
 		import.Key_GetKey         = Key_GetKey;
 		// slot 58 reserved_58 = Key_GetClipboardData variant — stub for safety
-		import.reserved_58  = (void *)UI_NullSlotStub;
+		import.reserved_58  = (void *)UI_SlotStub_58;
 		import.Key_ClearStates    = Key_ClearStates;
 		// slot 60: unknown — stub for safety
-		import.reserved_60  = (void *)UI_NullSlotStub;
+		import.reserved_60  = (void *)UI_SlotStub_60;
 		// slot 61: ACTUAL FS_ReadFile (verified from UIW_MenuFile_Init disasm: CALL [0x400376cc])
 		// Our struct placed FS_ReadFile at slot 9 but the DLL uses slot 61. Fix here.
 		import.reserved_61  = (void *)UI_FS_ReadFile_Traced;
 		// slot 62: ACTUAL FS_FreeFile for success path (verified: CALL [0x400376d0])
 		import.reserved_62  = (void *)FS_FreeFile;
 		import.SP_GetStringTextByIndex = UI_SP_GetStringTextByIndex;
-		// slot 64: ACTUAL Key_GetBindingByName (verified from UIW_MenuBuffer_ParseNextToken disasm 0x400232a0)
-		// DLL calls this with &KEYNAME& text to expand key bindings in menus.
-		// Was UI_SE_GetString which would return empty string (wrong).
-		import.SE_GetString       = (char *(*)(const char *, int))UI_Key_GetBindingByName;
+		// slot 64: SE_GetString with fallback (verified: original SoF2.exe CL_InitUI maps this to SE_GetString).
+		// DLL's UIW_MenuBuffer_ParseNextToken calls this for &REFERENCE& expansion.
+		// Previous mapping to Key_GetBindingByName was wrong — caused all menu text to be empty.
+		import.SE_GetString       = UI_SE_GetString_WithFallback;
 		import.SE_GetString2      = UI_SE_GetString;
 
 		// [66-74] Client / G2
 		// slot 66: UI_MenuPage_RenderFrame calls this WITHOUT a null-check — must be a callable.
 		// SoF2.exe provides RE_RenderScene here; a stub returning 0 is safe (no map loaded yet).
-		import.reserved_66  = (void *)UI_NullSlotStub;
-		// slot 67: Key_SetCatcher variant — DLL sets keycatcher state when opening/closing menus
-		// slot 67: DLL calls with no args + checks return value as gate (not Key_SetCatcher!).
-		// The DLL's UI_SetActiveMenu calls (*ui_Key_SetCatcher)() with NO args and returns early
-		// if non-zero. Original SoF2.exe provides UI_RE_RenderScene here (returns 0 normally).
-		// NullSlotStub returns 0 → gate passes → menu opens. Key_SetCatcher was wrong here.
-		import.reserved_67  = (void *)UI_NullSlotStub;
+		import.reserved_66  = (void *)UI_SlotStub_66;
+		// slot 67: DLL calls with no args + checks return value as gate.
+		// Original SoF2.exe provides UI_RE_RenderScene here (returns 0 normally).
+		import.reserved_67  = (void *)UI_SlotStub_67;
 		// slot 68: G2API_CleanGhoul2Models variant — stub (not needed for menus)
-		import.reserved_68  = (void *)UI_NullSlotStub;
+		import.reserved_68  = (void *)UI_SlotStub_68;
 		import.G2_SpawnGhoul2Model    = UI_G2_SpawnGhoul2Model;
 		import.G2_PlayModelAnimation  = UI_G2_PlayModelAnimation;
 		// slots 71-73: engine renderer wrappers needed for 3D model rendering in menus
@@ -759,18 +1128,18 @@ void CL_InitUI( void ) {
 		import.CL_IsCgameActive       = UI_CL_IsCgameActive;
 
 		// [75-77] Save game
-		import.reserved_75  = (void *)UI_NullSlotStub;   // SV_LoadGame variant — stub
-		import.reserved_76  = (void *)UI_NullSlotStub;   // SV_SaveGame variant — stub
+		import.reserved_75  = (void *)UI_SlotStub_75;   // SV_LoadGame variant — stub
+		import.reserved_76  = (void *)UI_SlotStub_76;   // SV_SaveGame variant — stub
 		import.SV_WipeSavegame        = UI_SV_WipeSavegame;
 
 		// [78-83] Sound module
-		// slot 78 (snd+0x14): S_RegisterSoundSimple — verified at DLL addr 0x40037710 (slot 78)
-		import.S_MuteSound      = (void *)S_RegisterSound;   // slot 78 = S_RegisterSoundSimple
-		import.S_StartLocalSound= (void *)S_StartLocalSound; // slot 79 = S_StartLocalSound ✓
-		import.S_StopAllSounds  = (void *)S_StopAllSounds;   // slot 80 = S_StopAllSounds ✓
-		import.S_reserved_81    = (void *)UI_NullSlotStub;               // slot 81 = snd+0x64
-		import.S_reserved_82    = (void *)UI_NullSlotStub;   // slot 82 = snd+0x24 — stub
-		import.S_reserved_83    = (void *)UI_NullSlotStub;   // slot 83 = snd+0x28 — stub
+		// slot 78 (snd+0x14): S_RegisterSoundSimple — traced wrapper
+		import.S_MuteSound      = (void *)UI_S_RegisterSound_Traced;   // slot 78 = S_RegisterSound
+		import.S_StartLocalSound= (void *)UI_S_StartLocalSound_Traced; // slot 79 = S_StartLocalSound
+		import.S_StopAllSounds  = (void *)S_StopAllSounds;   // slot 80 = S_StopAllSounds
+		import.S_reserved_81    = (void *)UI_SlotStub_81;               // slot 81 = snd+0x64
+		import.S_reserved_82    = (void *)UI_SlotStub_82;   // slot 82 = snd+0x24 — stub
+		import.S_reserved_83    = (void *)UI_SlotStub_83;   // slot 83 = snd+0x28 — stub
 
 		// [84-99] Renderer vtable — SOF2's CL_InitUI loads these from cls.refExport by byte offset.
 		// SOF2 refexport_t layout verified by decompiling SoF2.exe GetRefAPI @ 0x10091ee0.
@@ -784,13 +1153,13 @@ void CL_InitUI( void ) {
 		import.RE_reserved_85   = (void *)Key_GetOverstrikeMode;
 		// slot 86: ACTUAL R_RegisterFont (verified from UI_Frame_Ctor disasm: CALL [0x40037730])
 		// Our struct had UI_NullSlotStub here returning 0 (invalid font handle).
-		import.RE_DamageSurface = (void *)UI_RE_RegisterFont_Stub;
+		import.RE_DamageSurface = (void *)UI_RE_RegisterFont_SOF2;
 		// slot 87 (SOF2 re+0x8c): RE_Font_HeightPixels(uint fontHandle, float scale) -> float
 		import.RE_reserved_87   = (void *)UI_RE_Font_HeightPixels;
 		// slot 88 (SOF2 re+0x90): RE_Font_StrLenPixels(char *text, int setIndex, float scale) -> int
 		import.RE_reserved_88   = (void *)UI_RE_Font_StrLenPixels;
 		// slot 89 (SOF2 re+0x94): RE_Font_DrawString(int ox, int oy, char *text, float *rgba, int setIndex, int limit, float scale)
-		import.RE_reserved_89   = (void *)UI_RE_Font_DrawString;
+		import.RE_reserved_89   = (void *)UI_RE_Font_DrawString_Safe;
 		// slot 90 (SOF2 re+0x58): RE_StretchPic(float x, float y, float w, float h, int color, int hShader, int adjustFrom)
 		import.RE_LerpTag       = (void *)UI_RE_StretchPic;
 		// slot 91 (SOF2 re+0x5c): RE_DrawStretchPic — same signature as OpenJK DrawStretchPic
@@ -803,11 +1172,13 @@ void CL_InitUI( void ) {
 		import.CL_SaveGameScreenshot = UI_CL_SaveGameScreenshot;
 		// SOF2 re+0x14 = RegisterShaderNoMip; traced wrapper to confirm shader processing
 		import.RE_RegisterShaderNoMip = (void *)UI_RE_RegisterShaderNoMip_Traced;
-		import.RE_reserved_95   = (void *)re.LerpTag;                    // re+0x98 (OpenJK SP at-offset)
-		import.RE_reserved_96   = (void *)re.ModelBounds;                // re+0x9c (OpenJK SP at-offset)
-		import.RE_reserved_97   = (void *)re.GetLightStyle;              // re+0xa0 (OpenJK SP at-offset)
-		import.RE_reserved_98   = (void *)re.GetBModelVerts;             // re+0xa8 (OpenJK SP at-offset; skips SetLightStyle at 0xa4)
-		import.RE_reserved_99   = (void *)re.WorldEffectCommand;         // re+0xac (OpenJK SP at-offset)
+		// SOF2 re+0x98 = RE_FillRect, re+0x9c = RE_DrawLine, re+0xa0 = RE_DrawBox
+		// These are SOF2-specific renderer calls; implement via OpenJK SetColor+DrawStretchPic.
+		import.RE_reserved_95   = (void *)UI_RE_FillRect;                // re+0x98 = RE_FillRect
+		import.RE_reserved_96   = (void *)UI_RE_DrawLine;               // re+0x9c = RE_DrawLine
+		import.RE_reserved_97   = (void *)UI_RE_DrawBox;                // re+0xa0 = RE_DrawBox
+		import.RE_reserved_98   = (void *)UI_RE_SetColor5;             // re+0xa8 = RE_SetColor (5 int params; -1,-1,-1,-1,0 = reset)
+		import.RE_reserved_99   = (void *)UI_RE_SetClipRegion;         // re+0xac = RE_SetClipRegion (1 int param; clip right edge)
 
 		// [100-101] ICARUS scripting
 		import.ICARUS_SignalEvent = UI_ICARUS_SignalEvent;
@@ -829,6 +1200,10 @@ void CL_InitUI( void ) {
 				}
 			}
 		}
+
+		// Register s_music command before DLL init — the DLL issues
+		// "s_music <track>" via Cbuf_ExecuteText during menu setup.
+		Cmd_AddCommand( "s_music", CL_SMusic_f );
 
 		// -------------------------------------------------------------------
 		// Call GetUIAPI — DLL populates its export table and returns it.

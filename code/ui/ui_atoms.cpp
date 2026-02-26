@@ -77,7 +77,10 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID )
 			Com_Printf( "UI_SetActiveMenu: calling DLL...\n" );
 			s_ui_in_setactivemenu = 1;
 			__try {
-				uie->UI_SetActiveMenu( (char *)menuname, (char *)menuID, 0 );
+				// flags byte is OR'd into menuSystem[1] — a "lock" flag that
+			// prevents UI_MenuSystem_UpdateTopMenu from immediately popping
+			// the menu each frame.  Must be non-zero to keep the menu alive.
+			uie->UI_SetActiveMenu( (char *)menuname, (char *)menuID, 1 );
 			} __except(
 				Com_Printf( "UI_SetActiveMenu: EXCEPTION code=0x%08X at=0x%08X %s=0x%08X\n",
 					GetExceptionInformation()->ExceptionRecord->ExceptionCode,
