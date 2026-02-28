@@ -388,56 +388,65 @@ Ghoul2 Insert End
 //
 // functions exported by the game subsystem
 //
+// SOF2 game_export_t: flat array of 26 function pointers (no apiversion field).
+// The DLL's GetGameAPI(int apiVersion, void *imports) checks apiVersion internally
+// and returns a pointer to this table. API version = 8.
+// See E:\SOF2\structs\game_export_t.h for full documentation.
+//
 typedef struct {
-	int			apiversion;
-
-	// init and shutdown will be called every single level
-	// levelTime will be near zero, while globalTime will be a large number
-	// that can be used to track spectator entry times across restarts
-	void		(*Init)( const char *mapname, const char *spawntarget, int checkSum, const char *entstring,
-		int levelTime, int randomSeed, int globalTime, SavedGameJustLoaded_e eSavedGameJustLoaded, qboolean qbLoadTransition );
-	void		(*Shutdown) (void);
-
-	// ReadLevel is called after the default map information has been
-	// loaded with SpawnEntities
-	void		(*WriteLevel) (qboolean qbAutosave);
-	void		(*ReadLevel)  (qboolean qbAutosave, qboolean qbLoadTransition);
-	qboolean	(*GameAllowedToSaveHere)(void);
-
-	// return NULL if the client is allowed to connect, otherwise return
-	// a text string with the reason for denial
+	// Slot  0: InitGame — called once per level load
+	void		(*Init)( int levelTime, int randomSeed, int restart, void *handlePool, int savedGameJustLoaded );
+	// Slot  1: G_ShutdownGame
+	void		(*Shutdown)( int restart );
+	// Slot  2: ClientConnect — return NULL to allow, or denial string
 	char		*(*ClientConnect)( int clientNum, qboolean firstTime, SavedGameJustLoaded_e eSavedGameJustLoaded );
-
-	void		(*ClientBegin)( int clientNum, usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded);
-	void		(*ClientUserinfoChanged)( int clientNum );
+	// Slot  3: ClientBegin
+	void		(*ClientBegin)( int clientNum );
+	// Slot  4: ClientDisconnect (NOTE: slot[4] in SOF2 v8, not ClientUserinfoChanged like JK2)
 	void		(*ClientDisconnect)( int clientNum );
+	// Slot  5: ClientCommand (NOTE: slot[5] in SOF2 v8, not ClientDisconnect like JK2)
 	void		(*ClientCommand)( int clientNum );
-	void		(*ClientThink)( int clientNum, usercmd_t *cmd );
-
+	// Slot  6: ClientThink
+	void		(*ClientThink)( int clientNum );
+	// Slot  7: G_RunFrame
 	void		(*RunFrame)( int levelTime );
-	void		(*ConnectNavs)( const char *mapname, int checkSum );
-
-	// ConsoleCommand will be called when a command has been issued
-	// that is not recognized as a builtin function.
-	// The game can issue gi.argc() / gi.argv() commands to get the command
-	// and parameters.  Return qfalse if the game doesn't recognize it as a command.
+	// Slot  8: G_ConsoleCommand
 	qboolean	(*ConsoleCommand)( void );
-
-	void		(*GameSpawnRMGEntity)(char *s);
-	//
-	// global variables shared between game and server
-	//
-
-	// The gentities array is allocated in the game dll so it
-	// can vary in size from one game to another.
-	//
-	// The size will be fixed when ge->Init() is called
-	// the server can't just use pointer arithmetic on gentities, because the
-	// server's sizeof(struct gentity_s) doesn't equal gentitySize
-	struct gentity_s	*gentities;
-	int			gentitySize;
-	int			num_entities;		// current number, <= MAX_GENTITIES
-} game_export_t;
+	// Slot  9: G_SpawnGEntityFromSpawnVars
+	void		(*SpawnEntitiesFromString)( void );
+	// Slot 10: NULL (reserved)
+	void		*reserved0;
+	// Slot 11: ClientCommand_Arioche (RMG mode only)
+	void		(*ClientCommand_Arioche)( int clientNum );
+	// Slot 12: G_InitIcarus
+	void		(*InitIcarus)( void );
+	// Slot 13: G_ConnectNavs
+	void		(*ConnectNavs)( void );
+	// Slot 14: G_UpdateSavesLeft
+	void		(*UpdateSavesLeft)( void );
+	// Slot 15: NULL (reserved)
+	void		*reserved1;
+	// Slot 16: G_PostLoadInit
+	void		(*PostLoadInit)( void );
+	// Slot 17: G_SaveGame
+	void		(*SaveGame)( void );
+	// Slot 18: G_GameAllowedToSaveHere
+	qboolean	(*GameAllowedToSaveHere)( void );
+	// Slot 19: G_GetSavedGameJustLoaded
+	void		(*GetSavedGameJustLoaded)( void );
+	// Slot 20: G_WriteLevel
+	void		(*WriteLevel)( void );
+	// Slot 21: G_ReadLevel
+	void		(*ReadLevel)( const char *mapname );
+	// Slot 22: G_GameSpawnRMGEntity
+	void		(*GameSpawnRMGEntity)( char *entityString );
+	// Slot 23: G_InitNavigation
+	void		(*InitNavigation)( void );
+	// Slot 24: G_InitSquads
+	void		(*InitSquads)( void );
+	// Slot 25: CWpnSysManager_InitGlobalInstance
+	void		(*InitWeaponSystem)( void );
+} game_export_t;  // 26 slots = 0x68 bytes, no apiversion, no gentity fields
 
 game_export_t *GetGameApi (game_import_t *import);
 

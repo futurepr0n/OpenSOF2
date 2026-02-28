@@ -843,7 +843,9 @@ void AS_ParseSets( void )
 
 	if (iErrorsOccured)
 	{
-		Com_Error( ERR_DROP, "....%d missing sound sets! (see above)\n", iErrorsOccured);
+		// SOF2's sound/sound.txt doesn't define all the same ambient sets as JKA.
+		// Downgrade from ERR_DROP to a warning — missing ambient sets are non-fatal.
+		Com_Printf( S_COLOR_YELLOW "WARNING: %d missing sound set(s) — continuing anyway\n", iErrorsOccured );
 	}
 
 //	//Done with the precache info, it will be rebuilt on a restart

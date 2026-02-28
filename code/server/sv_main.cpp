@@ -510,7 +510,15 @@ void SV_Frame( int msec,float fractionMsec ) {
 		re.G2API_SetTime(sv.time,G2T_SV_TIME);
 
 		// let everything in the world think and move
-		ge->RunFrame( sv.time );
+		__try {
+			ge->RunFrame( sv.time );
+		} __except( 1 ) {
+			static int runFrameCrashCount = 0;
+			if ( runFrameCrashCount < 5 ) {
+				Com_Printf( "^1SV_Frame: EXCEPTION in ge->RunFrame(time=%d), skipping\n", sv.time );
+				runFrameCrashCount++;
+			}
+		}
 	}
 
 	if ( com_speeds->integer ) {

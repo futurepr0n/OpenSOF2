@@ -88,7 +88,14 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID )
 					GetExceptionInformation()->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
 					(unsigned int)GetExceptionInformation()->ExceptionRecord->ExceptionInformation[1] ),
 				EXCEPTION_EXECUTE_HANDLER ) {
-				Com_Printf( "UI_SetActiveMenu: handler caught, continuing\n" );
+				Com_Printf( "UI_SetActiveMenu: handler caught — marking UI as crashed\n" );
+				// Mark UI as not started and NULL out the export table so no
+				// further calls are made to the corrupted DLL.
+				cls.uiStarted = qfalse;
+				uie = NULL;
+				// Clear KEYCATCH_UI so the engine doesn't think a fullscreen
+				// menu is covering the screen after the UI DLL has crashed.
+				trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
 			}
 			s_ui_in_setactivemenu = 0;
 			Com_Printf( "UI_SetActiveMenu: DLL returned\n" );
@@ -96,10 +103,13 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID )
 		// The DLL path bypasses the static UI key-catcher setup; manage it here.
 		// Mirrors what the static path does: set KEYCATCH_UI when showing a menu,
 		// clear it when hiding (menuname == NULL).
-		if ( menuname )
-			trap_Key_SetCatcher( KEYCATCH_UI );   // Force UI-only; clears any KEYCATCH_CONSOLE
-		else
-			trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
+		// Guard: only touch keyCatchers if the DLL is still alive (not crashed above).
+		if ( uie ) {
+			if ( menuname )
+				trap_Key_SetCatcher( KEYCATCH_UI );   // Force UI-only; clears any KEYCATCH_CONSOLE
+			else
+				trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
+		}
 		return;
 	}
 
@@ -432,7 +442,9 @@ UI_UpdateScreen
 */
 void UI_UpdateScreen( void )
 {
-	ui.UpdateScreen();
+	if ( ui.UpdateScreen ) {
+		ui.UpdateScreen();
+	}
 }
 
 

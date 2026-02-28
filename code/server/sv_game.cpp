@@ -28,6 +28,150 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../qcommon/cm_local.h"
 
 #include "server.h"
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+// VEH crash handler — fires before SEH, works even with corrupted SEH chain
+static LONG WINAPI SV_VectoredHandler(EXCEPTION_POINTERS *ep) {
+	// Only handle access violations and stack overflows
+	DWORD code = ep->ExceptionRecord->ExceptionCode;
+	if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_STACK_OVERFLOW &&
+		code != 0xC0000005 && code != 0xC00000FD)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	FILE *crashf = fopen("dbg_veh_crash.txt", "w");
+	if (crashf) {
+		CONTEXT *ctx = ep->ContextRecord;
+		fprintf(crashf, "VEH: code=0x%08lX addr=%p\n", (unsigned long)code,
+			ep->ExceptionRecord->ExceptionAddress);
+		fprintf(crashf, "EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX\n",
+			ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx);
+		fprintf(crashf, "ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX EIP=%08lX\n",
+			ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp, ctx->Eip);
+		// Stack dump
+		DWORD *esp = (DWORD *)ctx->Esp;
+		for (int s = 0; s < 32; s++) {
+			__try { fprintf(crashf, "ESP+%02X: %08lX\n", s*4, esp[s]); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { fprintf(crashf, "ESP+%02X: <BAD>\n", s*4); }
+		}
+		fflush(crashf);
+		fclose(crashf);
+	}
+	// Also write to stderr — full details for first 3 crashes
+	static int vehLogCount = 0;
+	if ( vehLogCount < 3 ) {
+		CONTEXT *ctx2 = ep->ContextRecord;
+		fprintf(stderr, "[VEH] CRASH #%d code=0x%08lX EIP=%08lX\n", vehLogCount+1,
+			(unsigned long)code, ctx2->Eip);
+		fprintf(stderr, "[VEH]   EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX\n",
+			ctx2->Eax, ctx2->Ebx, ctx2->Ecx, ctx2->Edx);
+		fprintf(stderr, "[VEH]   ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX\n",
+			ctx2->Esi, ctx2->Edi, ctx2->Ebp, ctx2->Esp);
+		if ( code == 0xC0000005 && ep->ExceptionRecord->NumberParameters >= 2 ) {
+			fprintf(stderr, "[VEH]   AV %s addr=%08lX\n",
+				ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
+				(unsigned long)ep->ExceptionRecord->ExceptionInformation[1]);
+		}
+		// Stack trace (return addresses)
+		DWORD *esp2 = (DWORD *)ctx2->Esp;
+		fprintf(stderr, "[VEH]   Stack:");
+		for (int s2 = 0; s2 < 12; s2++) {
+			__try { fprintf(stderr, " %08lX", esp2[s2]); }
+			__except(EXCEPTION_EXECUTE_HANDLER) { fprintf(stderr, " <BAD>"); }
+		}
+		fprintf(stderr, "\n");
+		fflush(stderr);
+		vehLogCount++;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// SEH crash handler for debugging DLL calls — resolves symbol from PDB
+static LONG WINAPI SV_CrashFilter(EXCEPTION_POINTERS *ep) {
+	HMODULE hExe = GetModuleHandleA(NULL);
+	DWORD_PTR crashAddr = (DWORD_PTR)ep->ExceptionRecord->ExceptionAddress;
+	DWORD_PTR crashRVA = crashAddr - (DWORD_PTR)hExe;
+	fprintf(stderr, "[CRASH] Unhandled exception! Code=0x%08lX Address=%p (RVA=0x%08lX) Base=%p\n",
+		(unsigned long)ep->ExceptionRecord->ExceptionCode,
+		(void*)crashAddr, (unsigned long)crashRVA, (void*)hExe);
+
+	// Dump registers for crash debugging
+	CONTEXT *ctx_ptr = ep->ContextRecord;
+	fprintf(stderr, "[CRASH] EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX\n",
+		ctx_ptr->Eax, ctx_ptr->Ebx, ctx_ptr->Ecx, ctx_ptr->Edx);
+	fprintf(stderr, "[CRASH] ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX\n",
+		ctx_ptr->Esi, ctx_ptr->Edi, ctx_ptr->Ebp, ctx_ptr->Esp);
+	fprintf(stderr, "[CRASH] EIP=%08lX\n", ctx_ptr->Eip);
+
+	// Dump top of stack to find return address (critical when EIP=0)
+	DWORD *esp = (DWORD *)ctx_ptr->Esp;
+	fprintf(stderr, "[CRASH] Stack dump (ESP=%p):\n", (void*)esp);
+	for (int s = 0; s < 16; s++) {
+		__try {
+			fprintf(stderr, "[CRASH]   ESP+%02X: %08lX", s*4, esp[s]);
+			// Check if it looks like a code address (in gamex86.dll range 0x20000000+ or exe range)
+			if ((esp[s] >= 0x20000000 && esp[s] < 0x20200000) ||
+				(esp[s] >= 0x00400000 && esp[s] < 0x00C00000))
+				fprintf(stderr, " <-- possible return addr");
+			fprintf(stderr, "\n");
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+			fprintf(stderr, "[CRASH]   ESP+%02X: <unreadable>\n", s*4);
+		}
+	}
+
+	// Try to resolve symbol name from PDB
+	HANDLE process = GetCurrentProcess();
+	SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+	if (SymInitialize(process, NULL, TRUE)) {
+		char symBuf[sizeof(SYMBOL_INFO) + 256];
+		SYMBOL_INFO *sym = (SYMBOL_INFO*)symBuf;
+		sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+		sym->MaxNameLen = 255;
+		DWORD64 displacement64 = 0;
+		if (SymFromAddr(process, (DWORD64)crashAddr, &displacement64, sym)) {
+			fprintf(stderr, "[CRASH] Symbol: %s+0x%llx\n", sym->Name, (unsigned long long)displacement64);
+		} else {
+			fprintf(stderr, "[CRASH] SymFromAddr failed: %lu\n", GetLastError());
+		}
+		// Also try to get source file + line number
+		IMAGEHLP_LINE64 line;
+		line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+		DWORD displacement32 = 0;
+		if (SymGetLineFromAddr64(process, (DWORD64)crashAddr, &displacement32, &line)) {
+			fprintf(stderr, "[CRASH] Source: %s:%lu\n", line.FileName, line.LineNumber);
+		}
+		// Walk the call stack
+		fprintf(stderr, "[CRASH] Call stack:\n");
+		CONTEXT ctx = *ep->ContextRecord;
+		STACKFRAME64 frame;
+		memset(&frame, 0, sizeof(frame));
+		frame.AddrPC.Offset = ctx.Eip;
+		frame.AddrPC.Mode = AddrModeFlat;
+		frame.AddrFrame.Offset = ctx.Ebp;
+		frame.AddrFrame.Mode = AddrModeFlat;
+		frame.AddrStack.Offset = ctx.Esp;
+		frame.AddrStack.Mode = AddrModeFlat;
+		for (int i = 0; i < 20; i++) {
+			if (!StackWalk64(IMAGE_FILE_MACHINE_I386, process, GetCurrentThread(),
+					&frame, &ctx, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+				break;
+			if (SymFromAddr(process, frame.AddrPC.Offset, &displacement64, sym)) {
+				fprintf(stderr, "[CRASH]   #%d: %s+0x%llx (0x%08llx)\n", i, sym->Name,
+					(unsigned long long)displacement64, (unsigned long long)frame.AddrPC.Offset);
+			} else {
+				fprintf(stderr, "[CRASH]   #%d: 0x%08llx (unknown)\n", i,
+					(unsigned long long)frame.AddrPC.Offset);
+			}
+		}
+		SymCleanup(process);
+	} else {
+		fprintf(stderr, "[CRASH] SymInitialize failed: %lu\n", GetLastError());
+	}
+	fflush(stderr);
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 #include "../client/vmachine.h"
 #include "../client/client.h"
 #include "qcommon/ojk_saved_game.h"
@@ -50,6 +194,413 @@ static void *gameLibrary;
 //prototypes
 extern void Com_WriteCam ( const char *text );
 extern void Com_FlushCamFile();
+
+// Forward declarations for tracing wrappers
+void SV_GetServerinfo( char *buffer, int bufferSize );
+qboolean SV_GetEntityToken( char *buffer, int bufferSize );
+extern char ** FS_ListFilteredFiles( const char *path, const char *extension, char *filter, int *numfiles );
+extern void FS_FreeFileList( char **fileList );
+
+// --- Tracing wrappers to identify which gi[] call crashes ---
+static int gi_call_count = 0;
+
+// Traced wrappers for ALL commonly-called slots
+
+static void QDECL SV_Traced_Printf( const char *fmt, ... ) {
+	gi_call_count++;
+	va_list args;
+	va_start( args, fmt );
+	char buf[4096];
+	Q_vsnprintf( buf, sizeof(buf), fmt, args );
+	va_end( args );
+	// Log first 200 chars of the actual message for crash debugging
+	char preview[201];
+	strncpy(preview, buf, 200);
+	preview[200] = '\0';
+	// Strip trailing newlines for cleaner log
+	for (int i = (int)strlen(preview)-1; i >= 0 && (preview[i]=='\n'||preview[i]=='\r'); i--)
+		preview[i] = '\0';
+	fprintf(stderr, "[GI] gi_Printf called (#%d) msg='%s'\n", gi_call_count, preview);
+	fflush(stderr);
+	Com_Printf( "%s", buf );
+}
+
+static void QDECL SV_Traced_DPrintf( const char *fmt, ... ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_DPrintf called (#%d)\n", gi_call_count);
+	va_list args;
+	va_start( args, fmt );
+	char buf[4096];
+	Q_vsnprintf( buf, sizeof(buf), fmt, args );
+	va_end( args );
+	Com_DPrintf( "%s", buf );
+}
+
+static int SV_Traced_EventLoop( void ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Com_EventLoop called (#%d)\n", gi_call_count);
+	return Com_EventLoop();
+}
+
+static void *SV_Traced_Cvar_Get( const char *name, const char *value, int flags ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_Get called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	return Cvar_Get( name, value, flags );
+}
+
+static void SV_Traced_Cvar_Set( const char *name, const char *value ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_Set called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	Cvar_Set( name, value );
+}
+
+static void *SV_Traced_ZMalloc( int size, int tag, qboolean zeroIt ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Z_Malloc called (#%d) size=%d tag=%d zero=%d\n", gi_call_count, size, tag, (int)zeroIt);
+	void *result = Z_Malloc( size, (memtag_t)tag, zeroIt );
+	fprintf(stderr, "[GI] gi_Z_Malloc returned %p\n", result);
+	return result;
+}
+
+static void SV_Traced_ZFree( void *ptr ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Z_Free called (#%d) ptr=%p\n", gi_call_count, ptr);
+	Z_Free( ptr );
+}
+
+// SV_Traced_LocateGameData is defined further below after SV_LocateGameData_SOF2
+static void SV_Traced_LocateGameData( void *ents, int numEnts, int entSize, void *clients, int clientSize );
+
+static int SV_Traced_FS_FOpenFile( const char *path, int *handle, int mode ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_FOpenFileByMode called (#%d) path='%s' mode=%d\n",
+		gi_call_count, path ? path : "(null)", mode);
+	return FS_FOpenFileByMode( path, (fileHandle_t*)handle, (fsMode_t)mode );
+}
+
+static void SV_Traced_SetConfigstring( int index, const char *val ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_SetConfigstring called (#%d) index=%d\n", gi_call_count, index);
+	SV_SetConfigstring( index, val );
+}
+
+static void SV_Traced_GetServerinfo( char *buf, int bufSize ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_GetServerinfo called (#%d)\n", gi_call_count);
+	SV_GetServerinfo( buf, bufSize );
+}
+
+static void SV_Traced_LinkEntity( gentity_t *ent ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_LinkEntity called (#%d) ent=%p\n", gi_call_count, (void*)ent);
+	SV_LinkEntity( ent );
+}
+
+// gi[3]: Com_sprintf traced
+static void SV_Traced_ComSprintf( char *dest, int size, const char *fmt, ... ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Com_sprintf called (#%d) fmt='%.60s'\n", gi_call_count, fmt ? fmt : "(null)");
+	va_list args;
+	va_start( args, fmt );
+	Q_vsnprintf( dest, size, fmt, args );
+	va_end( args );
+}
+
+// gi[6]: FS_Read traced
+static int SV_Traced_FS_Read( void *buffer, int len, fileHandle_t f ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_Read called (#%d) len=%d handle=%d\n", gi_call_count, len, (int)f);
+	return FS_Read( buffer, len, f );
+}
+
+// gi[8]: FS_FCloseFile traced
+static void SV_Traced_FS_FCloseFile( fileHandle_t f ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_FCloseFile called (#%d) handle=%d\n", gi_call_count, (int)f);
+	FS_FCloseFile( f );
+}
+
+// gi[9]: FS_ReadFile traced
+static int SV_Traced_FS_ReadFile( const char *path, void **buffer ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_ReadFile called (#%d) path='%s'\n", gi_call_count, path ? path : "(null)");
+	return FS_ReadFile( path, buffer );
+}
+
+// gi[10]: FS_FreeFile traced
+static void SV_Traced_FS_FreeFile( void *buffer ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_FreeFile called (#%d) buffer=%p\n", gi_call_count, buffer);
+	FS_FreeFile( buffer );
+}
+
+// gi[12]: FS_ListFiles — SOF2 format (4 params, returns 2-header + 3-dword-per-file entries)
+// SOF2 FS_ListFiles takes (path, ext, filter, &numfiles) — NOT Q3A's 3-param version.
+// Return format: int array where:
+//   [0] = file count (for our FreeFileList to know how many entries)
+//   [1] = reserved (0)
+//   [2+i*3+0] = filename string pointer (char*)
+//   [2+i*3+1] = 0 (unknown field, DLL doesn't read it)
+//   [2+i*3+2] = 0 (unknown field, DLL doesn't read it)
+// DLL reads: starts at retval+8 (offset 2 dwords), strides by 12 bytes (3 dwords).
+static void *SV_SOF2_FS_ListFiles( const char *path, const char *extension, char *filter, int *numfiles ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_ListFiles called (#%d) path='%s' ext='%s' filter=%p numfiles=%p\n",
+		gi_call_count, path ? path : "(null)", extension ? extension : "(null)",
+		(void*)filter, (void*)numfiles);
+
+	// Get Q3A-format file list
+	int count = 0;
+	char **q3list = FS_ListFilteredFiles( path, extension, filter, &count );
+
+	// Allocate SOF2-format list: 2 header dwords + 3 dwords per file
+	int totalDwords = 2 + count * 3;
+	int *sof2list = (int *)Z_Malloc( totalDwords * sizeof(int), TAG_FILESYS, qtrue );
+
+	sof2list[0] = count;  // header[0]: file count (used by our FreeFileList)
+	sof2list[1] = 0;      // header[1]: reserved
+
+	// Steal string pointers from Q3A list (avoid double-alloc)
+	for ( int i = 0; i < count; i++ ) {
+		sof2list[2 + i*3 + 0] = (int)q3list[i];  // filename pointer
+		sof2list[2 + i*3 + 1] = 0;                // unknown field
+		sof2list[2 + i*3 + 2] = 0;                // unknown field
+		q3list[i] = NULL;  // prevent FS_FreeFileList from freeing stolen strings
+	}
+
+	// Free Q3A array (strings already stolen, NULLed out)
+	FS_FreeFileList( q3list );
+
+	if ( numfiles ) {
+		*numfiles = count;
+	}
+
+	fprintf(stderr, "[GI] gi_FS_ListFiles returning %d files, sof2list=%p\n", count, (void*)sof2list);
+	return (void *)sof2list;
+}
+
+// gi[13]: FS_FreeFileList — SOF2 format (matches SV_SOF2_FS_ListFiles above)
+static void SV_SOF2_FS_FreeFileList( void *list ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_FS_FreeFileList called (#%d) list=%p\n", gi_call_count, (void*)list);
+	if ( !list ) return;
+
+	int *sof2list = (int *)list;
+	int count = sof2list[0];  // read count from header
+
+	// Free individual filename strings
+	for ( int i = 0; i < count; i++ ) {
+		char *filename = (char *)sof2list[2 + i*3];
+		if ( filename ) {
+			Z_Free( filename );
+		}
+	}
+
+	// Free the SOF2-format array itself
+	Z_Free( sof2list );
+}
+
+// gi[16]: Cmd_TokenizeString traced
+static void SV_Traced_Cmd_TokenizeString( const char *text ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cmd_TokenizeString called (#%d)\n", gi_call_count);
+	Cmd_TokenizeString( text );
+}
+
+// gi[24]: Cvar_Register traced
+static void SV_Traced_Cvar_Register( vmCvar_t *vmCvar, const char *name, const char *defVal, int flags ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_Register called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	Cvar_Register( vmCvar, name, defVal, flags );
+}
+
+// gi[25]: Cvar_Update traced
+static void SV_Traced_Cvar_Update( vmCvar_t *vmCvar ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_Update called (#%d)\n", gi_call_count);
+	Cvar_Update( vmCvar );
+}
+
+// gi[29]: Cvar_VariableIntegerValue traced
+static int SV_Traced_Cvar_VariableIntegerValue( const char *name ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_VariableIntegerValue called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	return Cvar_VariableIntegerValue( name );
+}
+
+// gi[31]: Cvar_VariableStringBuffer traced
+static void SV_Traced_Cvar_VariableStringBuffer( const char *name, char *buffer, int bufSize ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Cvar_VariableStringBuffer called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	Cvar_VariableStringBuffer( name, buffer, bufSize );
+}
+
+// gi[34]: Z_CheckHeap traced
+static void SV_Traced_Z_CheckHeap( void ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_Z_CheckHeap called (#%d)\n", gi_call_count);
+}
+
+// gi[85]: GetEntityToken traced
+static int SV_Traced_GetEntityToken( char *buf, int bufsize ) {
+	gi_call_count++;
+	// Show first 80 chars of entityParsePoint content for debugging
+	char entPreview[81] = {0};
+	if (sv.entityParsePoint) {
+		strncpy(entPreview, sv.entityParsePoint, 80);
+		entPreview[80] = '\0';
+		// Replace newlines with spaces for log readability
+		for (int i = 0; entPreview[i]; i++)
+			if (entPreview[i] == '\n' || entPreview[i] == '\r') entPreview[i] = ' ';
+	}
+	fprintf(stderr, "[GI] gi_GetEntityToken called (#%d) entityParsePoint=%p mLocalSubBSPIndex=%d content='%s'\n",
+		gi_call_count, (void*)sv.entityParsePoint, sv.mLocalSubBSPIndex, entPreview);
+	fflush(stderr);
+	int result = 0;
+	__try {
+		result = (int)SV_GetEntityToken( buf, bufsize );
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		fprintf(stderr, "[GI] gi_GetEntityToken EXCEPTION caught! code=0x%08lX\n", GetExceptionCode());
+		fflush(stderr);
+		return 0;
+	}
+	// Show first 100 chars of result
+	char preview[101];
+	if (buf) { strncpy(preview, buf, 100); preview[100] = '\0'; }
+	else { preview[0] = '\0'; }
+	fprintf(stderr, "[GI] gi_GetEntityToken result=%d token='%s'\n", result, preview);
+	fflush(stderr);
+	return result;
+}
+
+// gi[86]: RE_RegisterModel traced — use real renderer
+static qhandle_t SV_Traced_RE_RegisterModel( const char *name ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_RE_RegisterModel called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	return re.RegisterModel( name );
+}
+
+// gi[87]: RE_RegisterShader traced — use real renderer
+static qhandle_t SV_Traced_RE_RegisterShader( const char *name ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_RE_RegisterShader called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
+	return re.RegisterShader( name );
+}
+
+// gi[89]: ICARUS_Init traced
+static void SV_Traced_ICARUS_Init( void ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_ICARUS_Init called (#%d)\n", gi_call_count);
+}
+
+// gi[95]: SE_GetString traced
+static const char *SV_Traced_SE_GetString( const char *token ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_SE_GetString called (#%d) token='%s'\n", gi_call_count, token ? token : "(null)");
+	return SE_GetString( token );
+}
+
+static void QDECL SV_Traced_Error( int level, const char *fmt, ... ) {
+	gi_call_count++;
+	va_list args;
+	va_start( args, fmt );
+	char buf[4096];
+	Q_vsnprintf( buf, sizeof(buf), fmt, args );
+	va_end( args );
+	fprintf(stderr, "[GI] gi_Com_Error called (#%d) level=%d msg='%s'\n", gi_call_count, level, buf);
+	fflush(stderr);
+	Com_Error( level, "%s", buf );
+}
+
+// Traced Cbuf_AddText — logs console commands from game DLL
+static void SV_Traced_Cbuf_AddText( const char *text ) {
+	gi_call_count++;
+	// Log game DLL console commands (throttled to avoid spam)
+	static int cbufLogCount = 0;
+	if ( cbufLogCount < 20 ) {
+		// Safely print first 80 chars, checking for non-ASCII
+		char safe[82];
+		int i;
+		for (i = 0; i < 80 && text[i]; i++) {
+			safe[i] = (text[i] >= 32 && text[i] < 127) ? text[i] : '?';
+		}
+		safe[i] = '\0';
+		fprintf(stderr, "[GI] gi_Cbuf_AddText (#%d) cmd='%s'\n", gi_call_count, safe);
+		fflush(stderr);
+		cbufLogCount++;
+	}
+	// Block corrupted commands (text with non-ASCII bytes in first 4 chars)
+	if ( text && text[0] ) {
+		unsigned char c0 = (unsigned char)text[0];
+		if ( c0 > 127 ) {
+			// Corrupted command — skip it
+			static int corruptCount = 0;
+			if ( corruptCount < 5 ) {
+				fprintf(stderr, "[GI] BLOCKED corrupted Cbuf_AddText byte0=0x%02X\n", c0);
+				fflush(stderr);
+				corruptCount++;
+			}
+			return;
+		}
+	}
+	Cbuf_AddText( text );
+}
+
+// Traced Cbuf_ExecuteText — logs console command executions from game DLL
+static void SV_Traced_Cbuf_ExecuteText( int exec_when, const char *text ) {
+	gi_call_count++;
+	static int cbufExecLogCount = 0;
+	if ( cbufExecLogCount < 20 ) {
+		char safe[82];
+		int i;
+		for (i = 0; i < 80 && text && text[i]; i++) {
+			safe[i] = (text[i] >= 32 && text[i] < 127) ? text[i] : '?';
+		}
+		safe[i] = '\0';
+		fprintf(stderr, "[GI] gi_Cbuf_ExecuteText (#%d) when=%d cmd='%s'\n", gi_call_count, exec_when, safe);
+		fflush(stderr);
+		cbufExecLogCount++;
+	}
+	// Block corrupted commands — check ALL bytes for non-ASCII (0xCC = MSVC debug fill)
+	if ( text ) {
+		for ( int j = 0; text[j]; j++ ) {
+			unsigned char c = (unsigned char)text[j];
+			if ( c > 127 ) {
+				static int corruptCount2 = 0;
+				if ( corruptCount2 < 5 ) {
+					fprintf(stderr, "[GI] BLOCKED corrupted Cbuf_ExecuteText at byte[%d]=0x%02X cmd='%.40s'\n",
+						j, c, text);
+					fflush(stderr);
+					corruptCount2++;
+				}
+				return;
+			}
+		}
+	}
+	Cbuf_ExecuteText( exec_when, text );
+}
+
+// --- SV_AreaEntities wrapper: SOF2 game DLL expects entity INDICES, not pointers ---
+// OpenJK's SV_AreaEntities fills the output array with gentity_t* pointers, but
+// SOF2's gamex86.dll treats the output as int[] entity indices (used as array index
+// into g_entityLookupTable). This wrapper converts pointers to indices.
+static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *entityList, int maxcount ) {
+	// Temp array for pointers — cap at MAX_GENTITIES to avoid stack overflow
+	gentity_t *ptrBuf[MAX_GENTITIES];
+	if ( maxcount > MAX_GENTITIES ) maxcount = MAX_GENTITIES;
+	int count = SV_AreaEntities( mins, maxs, ptrBuf, maxcount );
+
+	// Convert each gentity_t* pointer to its entity number
+	for ( int i = 0; i < count; i++ ) {
+		if ( ptrBuf[i] ) {
+			entityList[i] = SOF2_ENT_NUMBER( ptrBuf[i] );
+		} else {
+			entityList[i] = -1;  // shouldn't happen, but be safe
+		}
+	}
+
+	return count;
+}
 
 // --- Signature-adapting wrappers for game_import_t slot type mismatches ---
 
@@ -85,23 +636,37 @@ int	SV_NumForGentity( gentity_t *ent ) {
 	return num;
 }
 */
-// SOF2: entity array and stride are stored here when game DLL calls gi.LocateGameData
-static void *sv_GEntities   = NULL;
-static int   sv_GEntitySize = 0;   // filled in once we know game DLL's gentity_t size
+// SOF2: the game DLL passes its CEntitySystem pointer table as the entity array.
+// Unlike Q3A/JKA (contiguous struct array with stride), SOF2 uses a POINTER TABLE:
+//   sv_GEntities[entityNum] is a 4-byte pointer to a CEntity* (or NULL for empty slots).
+// The engine accesses entities via pointer dereference, NOT stride-based arithmetic.
+static void *sv_GEntities    = NULL;   // CEntitySystem serverSlots[1024] pointer table
+static int   sv_GEntitySize  = 0;      // 0x560 = sizeof(CEntity), stored but NOT used for array access
+static int   sv_numGEntities = 0;      // MAX_GENTITIES (1024)
+static void *sv_GameClients  = NULL;   // game client array (stride-based, unlike entities)
+static int   sv_GameClientSize = 0;    // sizeof(gclient_t) = 0x24C
 
 gentity_t	*SV_GentityNum( int num ) {
-	assert(num >= 0);
-	if ( !sv_GEntities || sv_GEntitySize <= 0 ) {
+	if ( num < 0 || num >= MAX_GENTITIES || !sv_GEntities ) {
 		return NULL;
 	}
-	return (gentity_t *)((byte *)sv_GEntities + sv_GEntitySize * num);
+	// SOF2: pointer table access — each slot is a 4-byte CEntity* pointer
+	return ((gentity_t **)sv_GEntities)[num];
 }
 
 svEntity_t	*SV_SvEntityForGentity( gentity_t *gEnt ) {
-	if ( !gEnt || gEnt->s.number < 0 || gEnt->s.number >= MAX_GENTITIES ) {
-		Com_Error( ERR_DROP, "SV_SvEntityForGentity: bad gEnt" );
+	// SOF2: entity number is at CEntity offset 0x08 (after vtable+entityIndex)
+	int entNum = SOF2_ENT_NUMBER(gEnt);
+	if ( !gEnt || entNum < 0 || entNum >= MAX_GENTITIES ) {
+		static int badEntWarnCount = 0;
+		if ( badEntWarnCount < 5 ) {
+			Com_Printf( "^3SV_SvEntityForGentity: out-of-range gEnt=%p entNum=%d (MAX=%d), returning NULL\n",
+				(void*)gEnt, gEnt ? entNum : -1, MAX_GENTITIES);
+			badEntWarnCount++;
+		}
+		return NULL;
 	}
-	return &sv.svEntities[ gEnt->s.number ];
+	return &sv.svEntities[ entNum ];
 }
 
 gentity_t	*SV_GEntityForSvEntity( svEntity_t *svEnt ) {
@@ -109,6 +674,15 @@ gentity_t	*SV_GEntityForSvEntity( svEntity_t *svEnt ) {
 
 	num = svEnt - sv.svEntities;
 	return SV_GentityNum( num );
+}
+
+// SOF2: access client/playerState data from the separate game client array
+// (passed via LocateGameData arg4). gclient_t starts with playerState_t.
+playerState_t *SV_GameClientNum( int clientNum ) {
+	if ( !sv_GameClients || clientNum < 0 ) {
+		return NULL;
+	}
+	return (playerState_t *)((byte *)sv_GameClients + sv_GameClientSize * clientNum);
 }
 
 /*
@@ -165,19 +739,19 @@ void SV_SetBrushModel( gentity_t *ent, const char *name ) {
 
 	if (!name)
 	{
-		Com_Error( ERR_DROP, "SV_SetBrushModel: NULL model for ent number %d", ent->s.number );
+		Com_Error( ERR_DROP, "SV_SetBrushModel: NULL model for ent number %d", SOF2_ENT_NUMBER(ent) );
 	}
 
 	if (name[0] == '*')
 	{
-		ent->s.modelindex = atoi( name + 1 );
+		SOF2_ENT_MODELINDEX(ent) = atoi( name + 1 );
 
 		if (sv.mLocalSubBSPIndex != -1)
 		{
-			ent->s.modelindex += sv.mLocalSubBSPModelOffset;
+			SOF2_ENT_MODELINDEX(ent) += sv.mLocalSubBSPModelOffset;
 		}
 
-		h = CM_InlineModel( ent->s.modelindex );
+		h = CM_InlineModel( SOF2_ENT_MODELINDEX(ent) );
 
 		if (sv.mLocalSubBSPIndex != -1)
 		{
@@ -190,31 +764,31 @@ void SV_SetBrushModel( gentity_t *ent, const char *name ) {
 
 		//CM_ModelBounds( h, mins, maxs );
 
-		VectorCopy (mins, ent->mins);
-		VectorCopy (maxs, ent->maxs);
-		ent->bmodel = qtrue;
+		VectorCopy (mins, SOF2_ENT_MINS(ent));
+		VectorCopy (maxs, SOF2_ENT_MAXS(ent));
+		SOF2_ENT_BMODEL(ent) = 1;
 
-		ent->contents = CM_ModelContents( h, -1 );
+		SOF2_ENT_CONTENTS(ent) = CM_ModelContents( h, -1 );
 	}
 	else if (name[0] == '#')
 	{
-		ent->s.modelindex = CM_LoadSubBSP(va("maps/%s.bsp", name + 1), qfalse);
-		CM_ModelBounds( SubBSP[CM_FindSubBSP(ent->s.modelindex)], ent->s.modelindex, mins, maxs );
+		SOF2_ENT_MODELINDEX(ent) = CM_LoadSubBSP(va("maps/%s.bsp", name + 1), qfalse);
+		CM_ModelBounds( SubBSP[CM_FindSubBSP(SOF2_ENT_MODELINDEX(ent))], SOF2_ENT_MODELINDEX(ent), mins, maxs );
 
-		VectorCopy (mins, ent->mins);
-		VectorCopy (maxs, ent->maxs);
-		ent->bmodel = qtrue;
+		VectorCopy (mins, SOF2_ENT_MINS(ent));
+		VectorCopy (maxs, SOF2_ENT_MAXS(ent));
+		SOF2_ENT_BMODEL(ent) = 1;
 
 		//rwwNOTE: We don't ever want to set contents -1, it includes CONTENTS_LIGHTSABER.
 		//Lots of stuff will explode if there's a brush with CONTENTS_LIGHTSABER that isn't attached to a client owner.
-		//ent->contents = -1;		// we don't know exactly what is in the brushes
-		h = CM_InlineModel( ent->s.modelindex );
-		ent->contents = CM_ModelContents( h, CM_FindSubBSP(ent->s.modelindex) );
-	//	ent->contents = CONTENTS_SOLID;
+		//SOF2_ENT_CONTENTS(ent) = -1;		// we don't know exactly what is in the brushes
+		h = CM_InlineModel( SOF2_ENT_MODELINDEX(ent) );
+		SOF2_ENT_CONTENTS(ent) = CM_ModelContents( h, CM_FindSubBSP(SOF2_ENT_MODELINDEX(ent)) );
+	//	SOF2_ENT_CONTENTS(ent) = CONTENTS_SOLID;
 	}
 	else
 	{
-		Com_Error( ERR_DROP, "SV_SetBrushModel: %s isn't a brush model (ent %d)", name, ent->s.number );
+		Com_Error( ERR_DROP, "SV_SetBrushModel: %s isn't a brush model (ent %d)", name, SOF2_ENT_NUMBER(ent) );
 	}
 }
 
@@ -329,9 +903,9 @@ SV_AdjustAreaPortalState
 */
 void SV_AdjustAreaPortalState( gentity_t *ent, qboolean open ) {
 #ifndef JK2_MODE
-	if ( !(ent->contents & CONTENTS_OPAQUE) ) {
+	if ( !(SOF2_ENT_CONTENTS(ent) & CONTENTS_OPAQUE) ) {
 #ifndef FINAL_BUILD
-//		Com_Printf( "INFO: entity number %d not opaque: not affecting area portal!\n", ent->s.number );
+//		Com_Printf( "INFO: entity number %d not opaque: not affecting area portal!\n", SOF2_ENT_NUMBER(ent) );
 #endif
 		return;
 	}
@@ -340,7 +914,7 @@ void SV_AdjustAreaPortalState( gentity_t *ent, qboolean open ) {
 	svEntity_t	*svEnt;
 
 	svEnt = SV_SvEntityForGentity( ent );
-	if ( svEnt->areanum2 == -1 ) {
+	if ( !svEnt || svEnt->areanum2 == -1 ) {
 		return;
 	}
 	CM_AdjustAreaPortalState( svEnt->areanum, svEnt->areanum2, open );
@@ -358,14 +932,14 @@ qboolean	SV_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t
 	trace_t			trace;
 
 	// check for exact collision
-	origin = gEnt->currentOrigin;
-	angles = gEnt->currentAngles;
+	origin = SOF2_ENT_CURORIGIN(gEnt);
+	angles = SOF2_ENT_CURANGLES(gEnt);
 
 	ch = SV_ClipHandleForEntity( gEnt );
 	CM_TransformedBoxTrace ( &trace, vec3_origin, vec3_origin, mins, maxs,
 		ch, -1, origin, angles );
 
-	return trace.startsolid;
+	return (qboolean)trace.startsolid;
 }
 
 
@@ -386,9 +960,18 @@ qboolean SV_GetEntityToken( char *buffer, int bufferSize )
 {
 	char	*s;
 
+	fprintf(stderr, "[DBG] SV_GetEntityToken: buffer=%p bufferSize=%d mLocalSubBSPIndex=%d entityParsePoint=%p\n",
+		(void*)buffer, bufferSize, sv.mLocalSubBSPIndex, (void*)sv.entityParsePoint);
+	fflush(stderr);
+
 	if (sv.mLocalSubBSPIndex == -1)
 	{
+		fprintf(stderr, "[DBG] SV_GetEntityToken: calling COM_Parse(&entityParsePoint=%p)...\n", (void*)sv.entityParsePoint);
+		fflush(stderr);
 		s = COM_Parse( (const char **)&sv.entityParsePoint );
+		fprintf(stderr, "[DBG] SV_GetEntityToken: COM_Parse returned s=%p '%s', entityParsePoint now=%p\n",
+			(void*)s, s ? s : "(null)", (void*)sv.entityParsePoint);
+		fflush(stderr);
 		Q_strncpyz( buffer, s, bufferSize );
 		if ( !sv.entityParsePoint && !s[0] )
 		{
@@ -478,6 +1061,26 @@ static qboolean SV_G2API_AttachG2Model( CGhoul2Info *ghlInfo, CGhoul2Info *ghlIn
 static void SV_G2API_CleanGhoul2Models( CGhoul2Info_v &ghoul2 )
 {
 	return re.G2API_CleanGhoul2Models( ghoul2 );
+}
+
+// SOF2 game import gi[90]: CleanGhoul2Models — called from gamex86.dll with
+// a raw void* (entity+0x8).  The DLL's CEntity stores a CGhoul2Info_v-style
+// 4-byte handle at that address.  Validate the handle before passing to the
+// renderer's G2API_CleanGhoul2Models to avoid assertion failures on stale or
+// invalid handles (e.g. during entity destruction after renderer re-init).
+static void SV_G2API_CleanGhoul2Models_Safe( void *ghoul2ptr )
+{
+	if ( !ghoul2ptr ) return;
+	int handle = *(int *)ghoul2ptr;
+	if ( handle <= 0 ) return;
+	// Validate handle is still valid in the Ghoul2 info array
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	if ( !arr.IsValid( handle ) ) {
+		Com_DPrintf( "[G2] CleanGhoul2Models_Safe: invalid handle %d, clearing\n", handle );
+		*(int *)ghoul2ptr = 0;
+		return;
+	}
+	re.G2API_CleanGhoul2Models( *(CGhoul2Info_v *)ghoul2ptr );
 }
 
 static void SV_G2API_CollisionDetect(
@@ -905,148 +1508,656 @@ static bool SV_WE_SetTempGlobalFogColor( vec3_t color )
 // ============================================================
 // SOF2 game_import_t stub/wrapper functions
 // ============================================================
+// Definitive slot mapping from SoF2.exe SV_InitGameProgs @ 0x10014c60
+// (pseudocode at E:\SOF2\pseudocode\server.c lines 2626-2738)
 
-// SV_DPrintf removed — use Com_DPrintf directly (it checks com_developer internally)
+// Extern declarations for engine functions used in the import table
+extern int  Com_EventLoop( void );
+extern void Cmd_TokenizeString( const char *text_in );
+extern void Cbuf_ExecuteText( int exec_when, const char *text );
+extern void Cmd_ArgvBuffer( int arg, char *buffer, int bufferLength );
+extern void Cmd_ArgsBuffer( char *buffer, int bufferLength );
+extern void Cvar_Register( vmCvar_t *vmCvar, const char *varName, const char *defaultValue, int flags );
+extern void Cvar_Update( vmCvar_t *vmCvar );
+extern float Cvar_VariableValue( const char *var_name );
+extern qboolean FS_FileExists( const char *file );
+extern char ** FS_ListFiles( const char *path, const char *extension, int *numfiles );
+extern char ** FS_ListFilteredFiles( const char *path, const char *extension, char *filter, int *numfiles );
+extern void FS_FreeFileList( char **fileList );
 
-// slot 25: Cvar_SetValue(name, val, force) — SOF2 adds 'force' param; engine ignores it
+// gi[3]: Com_sprintf_void — uses the one defined near top of file
+// gi[14]: FS_CleanPath — SOF2-specific path normalization (stub)
+static void SV_FS_CleanPath_Stub( const char *prefix, const char *path, char *out, int outSize ) {
+	Com_sprintf( out, outSize, "%s/%s", prefix, path );
+}
+
+// gi[27]: Cvar_SetModified(name, default, flags, force) — 4-arg Cvar_Set variant
+static void SV_Cvar_SetModified( const char *name, const char *value, int flags, int /*force*/ ) {
+	Cvar_Get( name, value, flags );
+}
+
+// gi[28]: Cvar_SetValue(name, val, force) — SOF2 adds 'force' param; engine ignores it
 static void SV_Cvar_SetValue_Wrapper( const char *name, float val, int /*force*/ ) {
 	Cvar_SetValue( name, val );
 }
 
-// slot 36: CM_FreeTerrain — RMG terrain cleanup (no-op in SP retail)
-static void SV_CM_FreeTerrain( int /*terrainId*/ ) {}
+// gi[32]: G_ZMalloc_Wrapper — uses the one defined near top of file
+// gi[34]: Z_CheckHeap (no-op)
+static void SV_Z_CheckHeap( void ) {}
 
-// slot 38: RMG_Init
-static void SV_RMG_Init( int /*terrainId*/ ) {}
+// gi[35-49]: Terrain/RMG stubs
+static void SV_CM_RegisterTerrain_Stub( const char * /*config*/ ) {}
+static void SV_CM_Terrain_Release_Stub( int /*terrainId*/ ) {}
+static void SV_CM_Terrain_ForEachBrush_Stub( void ) {}
+static float SV_CM_Terrain_GetWorldHeight_Stub( const vec3_t /*pos*/ ) { return 0.0f; }
+static float SV_CM_Terrain_FlattenHeight_Stub( const vec3_t /*pos*/, float /*radius*/ ) { return 0.0f; }
+static int SV_RMG_EvaluatePath_Stub( void ) { return 0; }
+static int SV_RMG_CreatePathSegment_Stub( void ) { return 0; }
+static void SV_CM_Terrain_ApplyBezierPath_Stub( void ) {}
+static void SV_CTerrainInstanceList_Add_Stub( void ) {}
+static float SV_CM_Terrain_GetFlattenedAvgHeight_Stub( void ) { return 0.0f; }
+static int SV_CM_Terrain_CheckOverlap_Stub( void ) { return 0; }
+static void *SV_CTerrainInstanceList_GetFirst_Stub( void ) { return NULL; }
+static void *SV_CTerrainInstanceList_GetNext_Stub( void ) { return NULL; }
+static void SV_R_LoadDataImage_Stub( void ) {}
+static void SV_ResampleTexture_Stub( void ) {}
 
-// slot 40: RMG_GetSpawnPoint
-static void SV_RMG_GetSpawnPoint( int /*terrainId*/, float *pos ) {
-	if (pos) VectorClear( pos );
+// gi[50]: CM_PointContents — basic 2-arg version (point, passEntity)
+static int SV_CM_PointContents_Wrapper( const vec3_t point, int /*passEntity*/ ) {
+	return CM_PointContents( point, 0 );
 }
 
-// slot 41: RMG_GetCellInfo
-static int SV_RMG_GetCellInfo( int /*terrainId*/, int /*x*/, int /*y*/ ) { return 0; }
+// gi[51]: SV_PointContentsCached — 3-arg version (point, passEntity, flags)
+static int SV_PointContentsCached( const vec3_t point, int passEntityNum, int /*flags*/ ) {
+	return SV_PointContents( point, passEntityNum );
+}
 
-// slot 43: RMG_UpdateTerrain
-static void SV_RMG_UpdateTerrain( int /*terrainId*/ ) {}
-
-// slots 52-53: SaveGame chunk I/O — wraps ojk SavedGame helper
-static void SV_SaveGame_WriteChunk( int chunkId, void *data, int length ) {
+// gi[52-53]: SaveGame chunk I/O — wraps ojk SavedGame helper
+static void SV_SaveGame_WriteChunk( int chunkId, void *data, int length, int /*compress*/ ) {
 	ojk::SavedGameHelper( &ojk::SavedGame::get_instance() ).write_chunk(
 		chunkId, static_cast<const uint8_t *>(data), length );
 }
-static void SV_SaveGame_ReadChunk( int chunkId, void *data, int length ) {
-	ojk::SavedGameHelper( &ojk::SavedGame::get_instance() ).read_chunk(
-		chunkId, static_cast<uint8_t *>(data), length );
+static void SV_SaveGame_ReadChunk( int chunkId, int /*unk1*/, int /*unk2*/, void **outPtr, int /*unk3*/ ) {
+	// Stub: SOF2 save game read — not needed for initial map load
+	if (outPtr) *outPtr = NULL;
 }
 
-// slot 54: LocateGameData — SOF2 only passes entity array base pointer
-// Entity stride is communicated separately (or known at compile time in the game DLL).
-// We store the pointer here; sv_GEntitySize is set by SV_SetGameEntitySize() if available.
-static void SV_LocateGameData( void *gentities ) {
-	sv_GEntities = gentities;
+// gi[54]: LocateGameData — SOF2 passes 5 args
+// SOF2: gentities is the CEntitySystem pointer table (NOT a contiguous struct array).
+// Each entry is a 4-byte CEntity* pointer; entitySize (0x560) is stored but unused for access.
+static void SV_LocateGameData_SOF2( void *gentities, int numEntities, int entitySize, void *clients, int clientSize ) {
+	sv_GEntities      = gentities;
+	sv_GEntitySize    = entitySize;
+	sv_numGEntities   = numEntities;
+	sv_GameClients    = clients;
+	sv_GameClientSize = clientSize;
+	Com_Printf("[DBG] SV_LocateGameData: ents=%p num=%d size=0x%x clients=%p clientSize=0x%x\n",
+		gentities, numEntities, entitySize, clients, clientSize);
 }
 
-// slot 59: MulticastTempEntity
-static void SV_MulticastTempEntity( gentity_t * /*ent*/ ) {}
-
-// slot 60: InitTempEntFinalize
-static void SV_InitTempEntFinalize( gentity_t * /*ent*/ ) {}
-
-// slot 61: GetTempEntCount
-static int SV_GetTempEntCount( void ) { return 0; }
-
-// slot 63: ICARUS_PlaySound
-static void SV_ICARUS_PlaySound( int /*entID*/, const char * /*name*/, const char * /*channel*/ ) {}
-
-// slot 64: ICARUS_RunScript
-static int SV_ICARUS_RunScript( gentity_t * /*ent*/, const char * /*script*/ ) { return 0; }
-
-// slot 65: GetCurrentEntity
-static gentity_t *SV_GetCurrentEntity( void ) { return NULL; }
-
-// slot 67: GetLastErrorString
-static char *SV_GetLastErrorString( void ) {
-	static char buf[64];
-	buf[0] = '\0';
-	return buf;
+// Traced version of SV_LocateGameData
+static void SV_Traced_LocateGameData( void *ents, int numEnts, int entSize, void *clients, int clientSize ) {
+	gi_call_count++;
+	fprintf(stderr, "[GI] gi_SV_LocateGameData called (#%d) ents=%p numEnts=%d entSize=0x%x clients=%p clientSize=0x%x\n",
+		gi_call_count, ents, numEnts, entSize, clients, clientSize);
+	SV_LocateGameData_SOF2( ents, numEnts, entSize, clients, clientSize );
 }
 
-// slot 68: GetCurrentEntityIndirect
-static gentity_t *SV_GetCurrentEntityIndirect( void ) { return NULL; }
+// gi[55]: SV_GameDropClient (already defined above in the file)
 
-// slot 50: trace — 7-arg wrapper for SV_Trace (which has 2 extra defaulted G2 params)
-static void SV_Trace_7args( trace_t *results, const vec3_t start,
+// gi[56]: SV_GameSendServerCommand (already defined above)
+
+// gi[58]: SV_UnlinkEntityAll — same as SV_UnlinkEntity for our purposes
+static void SV_UnlinkEntityAll( gentity_t *ent ) {
+	SV_UnlinkEntity( ent );
+}
+
+// gi[59]: SV_AddTempEnt
+static void SV_AddTempEnt_Stub( void * /*ent*/ ) {}
+
+// gi[60]: CM_GetDebugEntryPrevCount
+static int SV_CM_GetDebugEntryPrevCount_Stub( void ) { return 0; }
+
+// gi[61]: SV_ClearTempEnts
+static void SV_ClearTempEnts_Stub( void ) {}
+
+// gi[62]: SV_GameStub_ReturnZero
+static int SV_GameStub_ReturnZero( void ) { return 0; }
+
+// gi[63]: CSkin_Noop
+static void SV_CSkin_Noop( void ) {}
+
+// gi[64-66]: SV_AddNextMap/RemoveNextMap/GetNextMap — ICARUS map sequencing stubs
+static void SV_AddNextMap_Stub( const char * /*map*/ ) {}
+static void SV_RemoveNextMap_Stub( void ) {}
+static const char *SV_GetNextMap_Stub( void ) { return ""; }
+
+// gi[67-68]: GenericParser2 stubs
+static void *SV_GP_GetBaseParseGroup_Stub( void ) { return NULL; }
+static void SV_GP_SetSubGroups_Stub( void ) {}
+
+// gi[71]: SV_Trace — 10-arg wrapper matching SOF2 gamex86.dll calling convention
+// SOF2 game DLL pushes 10 args: results, start, mins, maxs, end, passEnt, contentmask,
+//   eG2TraceType, useLod, traceFlags(always 0)
+static void SV_Trace_10args( trace_t *results, const vec3_t start,
 		const vec3_t mins, const vec3_t maxs, const vec3_t end,
-		int passEnt, int contentmask ) {
-	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask );
+		int passEnt, int contentmask,
+		int eG2TraceType, int useLod, int /*traceFlags*/ ) {
+	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask,
+		(EG2_Collision)eG2TraceType, useLod );
 }
 
-// slot 71: traceG2 — ignores extra G2 args, forwards to regular trace
-static void SV_TraceG2( trace_t *results, const vec3_t start,
-		const vec3_t mins, const vec3_t maxs, const vec3_t end,
-		int passEnt, int contentmask, int /*g2TraceType*/, int /*useLod*/ ) {
-	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask );
+// gi[72]: SV_R_LightForPoint — renderer function (stub)
+static int SV_R_LightForPoint_Stub( const vec3_t /*point*/, vec3_t /*ambientLight*/,
+		vec3_t /*directedLight*/, vec3_t /*lightDir*/ ) { return 0; }
+
+// gi[74]: CM_SelectSubBSP
+static const char *SV_CM_SelectSubBSP_Stub( int /*index*/ ) { return NULL; }
+
+// gi[76]: CM_FindOrCreateShader
+static int SV_CM_FindOrCreateShader_Stub( const char * /*name*/ ) { return 0; }
+
+// gi[81]: CM_GetModelBrushShaderNum
+static int SV_CM_GetModelBrushShaderNum_Stub( int /*modelIndex*/, int /*brushNum*/ ) { return 0; }
+
+// gi[82]: CM_GetShaderName
+static const char *SV_CM_GetShaderName_Stub( int /*shaderNum*/ ) { return ""; }
+
+// gi[83]: CM_DamageBrushSideHealth
+static void SV_CM_DamageBrushSideHealth_Stub( int /*brushSide*/, int /*damage*/ ) {}
+
+// gi[84]: SV_GetUsercmd
+static void SV_GetUsercmd_Stub( int /*clientNum*/, void * /*cmd*/ ) {}
+
+// gi[85]: SV_GetEntityToken — uses the one defined at top of file
+
+// gi[86]: RE_RegisterModel — forward to renderer
+static qhandle_t SV_RE_RegisterModel_Wrapper( const char *name ) { return re.RegisterModel( name ); }
+
+// gi[87]: RE_RegisterShader — forward to renderer
+static qhandle_t SV_RE_RegisterShader_Wrapper( const char *name ) { return re.RegisterShader( name ); }
+
+// gi[87]: G2_InitWraithSurfaceMap — provides a CWraith-like singleton to gamex86.dll
+// The DLL calls this with a pointer to its global g_theWraith (void**).
+// The DLL then calls virtual methods on the returned object (vtable dispatch).
+// SOF2 HandlePool stub — passed as 4th param to ge->Init.
+// The DLL stores this pointer at entitySystem+0x30C4, then calls through its vtable:
+//   vtable[0]: CEntitySystem_DispatchEvent — Dispatch(int arg1, int arg2), void return
+//   vtable[1]: G_SpawnEntityInWorld — Allocate(void *ent, int slotOverride), returns int slot index
+// MSVC thiscall: this in ECX, callee cleans stack args with RET 8.
+class CHandlePoolStub {
+	int nextSlot;
+public:
+	CHandlePoolStub() : nextSlot(0) {}
+
+	// vtable[0]: Entity handle dispatch — called during entity system events
+	virtual void Dispatch(int /*arg1*/, int /*arg2*/) {
+		// no-op — silently ignore entity handle dispatch
+	}
+
+	// vtable[1]: Allocate entity slot — called by G_SpawnEntityInWorld
+	// Returns the slot index to use for the entity in the entity system array.
+	virtual int Allocate(void * /*ent*/, int slotOverride) {
+		if (slotOverride >= 0) return slotOverride;
+		return nextSlot++;
+	}
+};
+static CHandlePoolStub g_handlePoolStub;
+
+// CWraith vtable layout — 78 slots verified from gamex86.dll xref analysis.
+// CRITICAL: All methods are __thiscall (callee-clean), so every stub MUST
+// declare the correct number of parameters to generate the proper RET N.
+// Wrong arg count = stack corruption on return.
+//
+// NOTE: No virtual destructor! The original SOF2 wraith uses slot[0] for
+// AddBoltToModel, not a destructor. We manage cleanup manually.
+
+class CWraithStub {
+public:
+	// Object layout — must place CGhoul2Info_v at offset +0xE4 from `this`:
+	// +0x00: vtable ptr (automatic, 4 bytes)
+	// +0x04: mPadding (4 bytes)
+	// +0x08: mTimeStart (4 bytes) — DLL writes g_levelTime here
+	// +0x0C: mTimeEnd (4 bytes) — DLL writes g_levelTime here
+	// +0x10: mFlags (1 byte) — DLL writes flags here
+	// +0x14 to +0xE3: model data padding (0xD0 bytes)
+	// +0xE4: CGhoul2Info_v (4 bytes — handle into global ghoul2 info array)
+	// +0xE8 to +0x13F: extra buffer for DLL reads past ghoul2
+	int mPadding;              // +0x04
+	int mTimeStart;            // +0x08
+	int mTimeEnd;              // +0x0C
+	char mFlags;               // +0x10
+	char mPad2[3];             // +0x11-0x13
+	char mModelPad[0xD0];      // +0x14 to +0xE3 — padding so mGhoul2 lands at +0xE4
+	CGhoul2Info_v mGhoul2;     // +0xE4 — properly constructed ghoul2 handle
+	char mExtraEnd[88];        // +0xE8 to +0x13F — buffer for any DLL reads past ghoul2
+
+	// Track the last entity ghoul2 used for context in bolt/surface operations
+	CGhoul2Info_v *mLastEntityGhoul2;
+
+	CWraithStub() : mPadding(0), mTimeStart(0), mTimeEnd(0), mFlags(0), mLastEntityGhoul2(NULL) {
+		memset(mPad2, 0, sizeof(mPad2));
+		memset(mModelPad, 0, sizeof(mModelPad));
+		memset(mExtraEnd, 0, sizeof(mExtraEnd));
+	}
+
+	void Destroy() {
+		// Manual cleanup since we have no virtual destructor
+		re.G2API_CleanGhoul2Models(mGhoul2);
+	}
+
+	// Helper: resolve model handle to CGhoul2Info* within the wraith's own ghoul2
+	CGhoul2Info *ResolveModel(int modelHandle) {
+		if (modelHandle <= 0) return NULL;
+		int idx = modelHandle - 1;
+		if (mGhoul2.IsValid() && idx < mGhoul2.size()) {
+			return &mGhoul2[idx];
+		}
+		// Try last entity ghoul2
+		if (mLastEntityGhoul2 && mLastEntityGhoul2->IsValid() && idx < mLastEntityGhoul2->size()) {
+			return &(*mLastEntityGhoul2)[idx];
+		}
+		return NULL;
+	}
+
+	// ===== vtable[0] (0x00): AddBoltToModel — 2 stack args =====
+	virtual int Slot00_AddBolt(int modelHandle, const char *boneName) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_AddBolt(ghl, boneName);
+		}
+		return -1;
+	}
+
+	// ===== vtable[1] (0x04): SetBoltInfo — 3 stack args =====
+	virtual int Slot01_SetBoltInfo(int a1, int a2, const char *a3) {
+		return 0;
+	}
+
+	// ===== vtable[2] (0x08): unknown — 2 stack args (safe default) =====
+	virtual int Slot02(int a1, int a2) { return 0; }
+
+	// ===== vtable[3] (0x0C): GetBoltIndex — 2 stack args =====
+	virtual int Slot03_GetBoltIndex(int a1, int a2) { return 0; }
+
+	// ===== vtable[4] (0x10): RegisterAnimCallback — 6 stack args =====
+	virtual int Slot04_RegisterAnimCallback(int a1, int a2, int a3, int a4, int a5, int a6) { return 0; }
+
+	// ===== vtable[5] (0x14): FindSurfaceByCollision — 8 stack args =====
+	virtual int Slot05_FindSurfaceByCollision(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8) { return 0; }
+
+	// ===== vtable[6] (0x18): CloneGhoul2 — 2 stack args =====
+	virtual int Slot06_CloneGhoul2(int a1, int a2) { return 0; }
+
+	// ===== vtable[7] (0x1C): unknown — 2 stack args (safe default) =====
+	virtual int Slot07(int a1, int a2) { return 0; }
+
+	// ===== vtable[8] (0x20): GetModelData — 0 stack args =====
+	virtual void* GetModelData() {
+		return (void*)this;
+	}
+
+	// ===== vtable[9] (0x24): DebugPrint — 2 stack args =====
+	virtual int DebugPrint(const char *msg, int level) {
+		fprintf(stderr, "[WRAITH] DebugPrint(level=%d): '%s'\n", level, msg ? msg : "(null)");
+		return 0;
+	}
+
+	// ===== vtable[10] (0x28): unknown — 2 stack args (safe default) =====
+	virtual int Slot10(int a1, int a2) { return 0; }
+
+	// ===== vtable[11] (0x2C): unknown — 2 stack args (safe default) =====
+	virtual int Slot11(int a1, int a2) { return 0; }
+
+	// ===== vtable[12] (0x30): RemoveAnimCallback — 2 stack args =====
+	virtual int Slot12_RemoveAnimCallback(int a1, int a2) { return 0; }
+
+	// ===== vtable[13] (0x34): GetBoltMatrix_Single — 2 stack args =====
+	virtual int Slot13_GetBoltMatrixSingle(int modelHandle, void *outMatrix) { return 0; }
+
+	// ===== vtable[14] (0x38): GetBoltMatrix — 7 stack args =====
+	virtual int Slot14_GetBoltMatrix(int modelHandle, int boltIndex, void *outMatrix,
+	                                  const float *angles, const float *origin, int axisBase, int flags) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl && outMatrix) {
+			// Use the wraith's ghoul2 vector for bolt matrix lookup
+			if (mGhoul2.IsValid() && (modelHandle - 1) < mGhoul2.size()) {
+				return re.G2API_GetBoltMatrix(mGhoul2, modelHandle - 1, boltIndex,
+					(mdxaBone_t*)outMatrix, angles, origin, 0, NULL, vec3_origin);
+			}
+			if (mLastEntityGhoul2 && mLastEntityGhoul2->IsValid() && (modelHandle - 1) < mLastEntityGhoul2->size()) {
+				return re.G2API_GetBoltMatrix(*mLastEntityGhoul2, modelHandle - 1, boltIndex,
+					(mdxaBone_t*)outMatrix, angles, origin, 0, NULL, vec3_origin);
+			}
+		}
+		return 0;
+	}
+
+	// ===== vtable[15] (0x3C): unknown — 2 stack args (safe default) =====
+	virtual int Slot15(int a1, int a2) { return 0; }
+
+	// ===== vtable[16] (0x40): GetModelName — 1 stack arg =====
+	virtual const char* Slot16_GetModelName(int modelHandle) { return ""; }
+
+	// ===== vtable[17]-[19]: unknown — 2 stack args each (safe default) =====
+	virtual int Slot17(int a1, int a2) { return 0; }
+	virtual int Slot18(int a1, int a2) { return 0; }
+	virtual int Slot19(int a1, int a2) { return 0; }
+
+	// ===== vtable[20] (0x50): GetSkinName — 2 stack args =====
+	virtual int Slot20_GetSkinName(int a1, int a2) { return 0; }
+
+	// ===== vtable[21] (0x54): GetSurfaceIndex — 2 stack args =====
+	virtual int GetSurfaceIndex(int modelHandle, const char *surfaceName) {
+		if (mGhoul2.IsValid() && mGhoul2.size() > 0) {
+			int g2idx = (modelHandle > 0) ? (modelHandle - 1) : 0;
+			if (g2idx < mGhoul2.size()) {
+				return re.G2API_GetSurfaceIndex(&mGhoul2[g2idx], surfaceName);
+			}
+		}
+		return 0;
+	}
+
+	// ===== vtable[22] (0x58): GetSurfaceName — 2 stack args =====
+	virtual const char* Slot22_GetSurfaceName(int modelHandle, int surfaceIndex) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_GetSurfaceName(ghl, surfaceIndex);
+		}
+		return "";
+	}
+
+	// ===== vtable[23] (0x5C): InitGhoul2Model — 6 stack args =====
+	virtual int InitGhoul2Model(CGhoul2Info_v *ghoul2, const char *fileName,
+	                            int modelIndex, int customSkin, int customShader, int modelFlags) {
+		fprintf(stderr, "[WRAITH] InitGhoul2Model(ghoul2=%p, '%s', idx=%d, skin=%d, shader=%d, flags=%d)\n",
+			(void*)ghoul2, fileName ? fileName : "(null)", modelIndex, customSkin, customShader, modelFlags);
+		if (!fileName || !fileName[0]) return 0;
+		// Track entity ghoul2 for subsequent bolt/surface operations
+		mLastEntityGhoul2 = ghoul2;
+		int result = re.G2API_InitGhoul2Model(*ghoul2, fileName, modelIndex,
+			(qhandle_t)customSkin, (qhandle_t)customShader, modelFlags, 0);
+		fprintf(stderr, "[WRAITH] InitGhoul2Model -> G2API result=%d, handle=%d\n", result, result + 1);
+		return result + 1;
+	}
+
+	// ===== vtable[24] (0x60): unknown — 2 stack args =====
+	virtual int Slot24(int a1, int a2) { return 0; }
+
+	// ===== vtable[25] (0x64): CheckSurfaceVisible — 2 stack args =====
+	virtual int Slot25_CheckSurfaceVisible(int a1, int a2) { return 1; }
+
+	// ===== vtable[26] (0x68): GetBoltInfo — 2 stack args =====
+	virtual int Slot26_GetBoltInfo(int a1, int a2) { return 0; }
+
+	// ===== vtable[27] (0x6C): unknown — 2 stack args =====
+	virtual int Slot27(int a1, int a2) { return 0; }
+
+	// ===== vtable[28] (0x70): AddBoltByName — 2 stack args =====
+	virtual int Slot28_AddBoltByName(int modelHandle, const char *boneName) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_AddBolt(ghl, boneName);
+		}
+		return -1;
+	}
+
+	// ===== vtable[29] (0x74): SetAnimIndex — 9 stack args =====
+	virtual int Slot29_SetAnimIndex(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return 0; }
+
+	// ===== vtable[30] (0x78): SetBoneAnim — 9 stack args =====
+	virtual int Slot30_SetBoneAnim(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return 0; }
+
+	// ===== vtable[31] (0x7C): PrecacheModel — 1 stack arg =====
+	virtual void PrecacheModel(const char *modelName) {
+		fprintf(stderr, "[WRAITH] PrecacheModel('%s')\n", modelName ? modelName : "(null)");
+		if (modelName && modelName[0]) {
+			re.RegisterModel(modelName);
+		}
+	}
+
+	// ===== vtable[32] (0x80): unknown — 2 stack args =====
+	virtual int Slot32(int a1, int a2) { return 0; }
+
+	// ===== vtable[33] (0x84): unknown — 2 stack args =====
+	virtual int Slot33(int a1, int a2) { return 0; }
+
+	// ===== vtable[34] (0x88): unknown — 2 stack args =====
+	virtual int Slot34(int a1, int a2) { return 0; }
+
+	// ===== vtable[35] (0x8C): RemoveBolt — 2 stack args =====
+	virtual int Slot35_RemoveBolt(int modelHandle, int boltIndex) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_RemoveBolt(ghl, boltIndex);
+		}
+		return 0;
+	}
+
+	// ===== vtable[36] (0x90): RemoveGhoul2Model — 1 stack arg =====
+	virtual int Slot36_RemoveGhoul2Model(int modelIndex) {
+		if (mGhoul2.IsValid() && modelIndex > 0 && (modelIndex - 1) < mGhoul2.size()) {
+			return re.G2API_RemoveGhoul2Model(mGhoul2, modelIndex - 1);
+		}
+		return 0;
+	}
+
+	// ===== vtable[37] (0x94): FinalizeEntity — 1 stack arg =====
+	virtual void FinalizeEntity(void *entityData) {
+	}
+
+	// ===== vtable[38] (0x98): SetupModel — 1 stack arg =====
+	virtual void SetupModel(int modelHandle) {
+	}
+
+	// ===== vtable[39] (0x9C): RemoveCallback — 2 stack args =====
+	virtual int Slot39_RemoveCallback(int a1, int a2) { return 0; }
+
+	// ===== vtable[40] (0xA0): GetCachedModel — 2 stack args =====
+	virtual int Slot40_GetCachedModel(int a1, int a2) { return 0; }
+
+	// ===== vtable[41] (0xA4): unknown — 2 stack args =====
+	virtual int Slot41(int a1, int a2) { return 0; }
+
+	// ===== vtable[42] (0xA8): SetSkin — 2 stack args =====
+	virtual int Slot42_SetSkin(int modelHandle, int skinHandle) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_SetSkin(ghl, (qhandle_t)skinHandle, (qhandle_t)skinHandle);
+		}
+		return 0;
+	}
+
+	// ===== vtable[43] (0xAC): SetSurfaceFlags — 3 stack args =====
+	virtual int Slot43_SetSurfaceFlags(int modelHandle, int surfaceIndex, int flags) {
+		// SOF2 wraith passes surface index, but G2API_SetSurfaceOnOff needs name
+		// For now, no-op — surface show/hide requires name lookup
+		return 0;
+	}
+
+	// ===== vtable[44] (0xB0): AttachModel — 3 stack args =====
+	virtual int Slot44_AttachModel(int parentBolt, int modelHandle, int attachType) {
+		return 0;
+	}
+
+	// ===== vtable[45] (0xB4): StopBoneAnim — 2 stack args =====
+	virtual int Slot45_StopBoneAnim(int modelHandle, const char *boneName) {
+		CGhoul2Info *ghl = ResolveModel(modelHandle);
+		if (ghl) {
+			return re.G2API_StopBoneAnim(ghl, boneName);
+		}
+		return 0;
+	}
+
+	// ===== vtable[46] (0xB8): StopBoneAnimByName — 2 stack args =====
+	virtual int Slot46_StopBoneAnimByName(int a1, int a2) { return 0; }
+
+	// ===== vtable[47] (0xBC): unknown — 2 stack args =====
+	virtual int Slot47(int a1, int a2) { return 0; }
+
+	// ===== vtable[48] (0xC0): InitWeaponData — 1 stack arg (WpnData singleton ptr) =====
+	virtual int Slot48_InitWeaponData(void *wpnDataSingleton) { return 0; }
+
+	// ===== vtable[49] (0xC4): InitNavigation — 1 stack arg (Navigator ptr) =====
+	virtual int Slot49_InitNavigation(void *navigatorPtr) { return 0; }
+
+	// ===== vtable[50] (0xC8): GetCollisionResult — 4 stack args =====
+	virtual int Slot50_GetCollisionResult(int a1, int a2, int a3, int a4) { return 0; }
+
+	// ===== vtable[51] (0xCC): CopyBoltToSurface — 3 stack args =====
+	virtual int Slot51_CopyBoltToSurface(int a1, int a2, int a3) { return 0; }
+
+	// ===== vtable[52] (0xD0): SetModelTransform — 3 stack args =====
+	virtual int Slot52_SetModelTransform(int a1, int a2, int a3) { return 0; }
+
+	// ===== vtable[53] (0xD4): AnimCallback — 2 stack args =====
+	virtual int Slot53_AnimCallback(int a1, int a2) { return 0; }
+
+	// ===== vtable[54] (0xD8): unknown — 2 stack args =====
+	virtual int Slot54(int a1, int a2) { return 0; }
+
+	// ===== vtable[55] (0xDC): GetBoltMatrixBlend — 4 stack args =====
+	virtual int Slot55_GetBoltMatrixBlend(int a1, int a2, int a3, int a4) { return 0; }
+
+	// ===== vtable[56] (0xE0): LoadAnimData — 2 stack args =====
+	virtual int Slot56_LoadAnimData(int a1, int a2) { return 0; }
+
+	// ===== vtable[57] (0xE4): Shutdown — 0 stack args =====
+	virtual int Slot57_Shutdown() { return 0; }
+
+	// ===== vtable[58]-[59]: unknown — 2 stack args each =====
+	virtual int Slot58(int a1, int a2) { return 0; }
+	virtual int Slot59(int a1, int a2) { return 0; }
+
+	// ===== vtable[60] (0xF0): GetAnimIndex — 2 stack args =====
+	virtual int Slot60_GetAnimIndex(int a1, int a2) { return 0; }
+
+	// ===== vtable[61] (0xF4): GetAnimEventString — 2 stack args =====
+	// MUST return "" not NULL — caller does strlen on result
+	virtual const char* Slot61_GetAnimEventString(int animHandle, const char *eventName) { return ""; }
+
+	// ===== vtable[62] (0xF8): GetAnimFrameIndex — 2 stack args =====
+	virtual int Slot62_GetAnimFrameIndex(int a1, int a2) { return 0; }
+
+	// ===== vtable[63] (0xFC): GetAnimFrameCount — 2 stack args =====
+	virtual int Slot63_GetAnimFrameCount(int a1, int a2) { return 0; }
+
+	// ===== vtable[64] (0x100): GetBonePosition — 3 stack args =====
+	virtual int Slot64_GetBonePosition(int a1, int a2, int a3) { return 0; }
+
+	// ===== vtable[65] (0x104): CopyGhoul2Instance — 2 stack args =====
+	virtual int Slot65_CopyGhoul2Instance(int a1, int a2) { return 0; }
+
+	// ===== vtable[66] (0x108): SetAnimBlend — 7 stack args =====
+	virtual int Slot66_SetAnimBlend(int a1, int a2, int a3, int a4, int a5, int a6, int a7) { return 0; }
+
+	// ===== vtable[67] (0x10C): SetBoneAnimByName — 9 stack args =====
+	virtual int Slot67_SetBoneAnimByName(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return 0; }
+
+	// ===== vtable[68] (0x110): SetBoneAnimByIndex — 10 stack args =====
+	virtual int Slot68_SetBoneAnimByIndex(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10) { return 0; }
+
+	// ===== vtable[69] (0x114): GetBoneName — 3 stack args =====
+	virtual int Slot69_GetBoneName(int a1, int a2, int a3) { return 0; }
+
+	// ===== vtable[70] (0x118): FindBoneByName — 2 stack args =====
+	virtual int Slot70_FindBoneByName(int a1, int a2) { return 0; }
+
+	// ===== vtable[71] (0x11C): GetNumAnimFrames — 1 stack arg =====
+	virtual int Slot71_GetNumAnimFrames(int a1) { return 0; }
+
+	// ===== vtable[72] (0x120): unknown — 2 stack args =====
+	virtual int Slot72(int a1, int a2) { return 0; }
+
+	// ===== vtable[73] (0x124): SetBoneIndex — 2 stack args =====
+	virtual int Slot73_SetBoneIndex(int a1, int a2) { return 0; }
+
+	// ===== vtable[74] (0x128): CopyBolt — 2 stack args =====
+	virtual int Slot74_CopyBolt(int a1, int a2) { return 0; }
+
+	// ===== vtable[75]-[76]: unknown — 2 stack args each =====
+	virtual int Slot75(int a1, int a2) { return 0; }
+	virtual int Slot76(int a1, int a2) { return 0; }
+
+	// ===== vtable[77] (0x134): ClearBoneAnimByIndex — 2 stack args =====
+	virtual int Slot77_ClearBoneAnimByIndex(int a1, int a2) { return 0; }
+};
+
+static CWraithStub *g_wraithStub = NULL;
+
+// Accessible from cl_cgame.cpp — cgame DLL needs the same CWraithStub
+void *SV_GetWraithStubPtr( void ) {
+	if ( !g_wraithStub ) {
+		g_wraithStub = new CWraithStub();
+	}
+	return g_wraithStub;
 }
 
-// slot 72: GetEntityBoundsSize
-static int SV_GetEntityBoundsSize( gentity_t * /*ent*/ ) { return 0; }
-
-// slot 83: GetSurfaceMaterial
-static int SV_GetSurfaceMaterial( int /*surfIndex*/, float * /*vel*/ ) { return 0; }
-
-// slot 84: ModelIndex — server-side model precaching (stub; Phase 2 will use CM_RegisterModel)
-static int SV_ModelIndex_Wrapper( const char * /*name*/ ) {
-	return 0;
+static qboolean SV_G2_InitWraithSurfaceMap( void **outPtr ) {
+	fprintf(stderr, "[GI] gi_G2_InitWraithSurfaceMap called outPtr=%p\n", (void*)outPtr);
+	if (!g_wraithStub) {
+		g_wraithStub = new CWraithStub();
+	}
+	if (outPtr) *outPtr = g_wraithStub;
+	fprintf(stderr, "[GI] gi_G2_InitWraithSurfaceMap: wraith=%p vtable=%p\n",
+		(void*)g_wraithStub, *(void**)g_wraithStub);
+	return g_wraithStub ? qtrue : qfalse;
 }
 
-// slot 90: G2API_GetGhoul2InfoV
-static CGhoul2Info_v *SV_G2API_GetGhoul2InfoV( int /*ghoul2handle*/ ) { return NULL; }
+// gi[89]: SV_ICARUS_Init — ICARUS scripting init
+static void SV_ICARUS_Init_Stub( void ) {}
 
-// slot 91: G2API_CleanGhoul2ModelsRef — via pointer rather than reference
-static void SV_G2API_CleanGhoul2ModelsRef( CGhoul2Info_v *ghoul2ref ) {
-	if ( ghoul2ref ) re.G2API_CleanGhoul2Models( *ghoul2ref );
+// gi[90]: Com_RegisterSkin — forward to renderer
+static qhandle_t SV_Com_RegisterSkin_Wrapper( const char *name ) { return re.RegisterSkin( name ); }
+
+// gi[91]: G2API_AnimateGhoul2Models (wrapper already exists as SV_G2API_AnimateG2Models)
+
+// gi[92]: G2API_CleanGhoul2Models (wrapper already exists as SV_G2API_CleanGhoul2Models)
+
+// gi[91]: G2_GetGhoul2InfoByHandle — returns std::vector<CGhoul2Info>* for the given handle
+// The gamex86.dll stores a Ghoul2 handle (int mItem) in each entity at +0xec.
+// CEntity_Destructor and many other functions call this to get the vector of G2 models
+// and iterate over them.  Returning NULL causes a crash (dereference of result+4).
+static void *SV_G2_GetGhoul2InfoByHandle( int handle ) {
+	if ( handle <= 0 ) return NULL;
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	if ( !arr.IsValid( handle ) ) return NULL;
+	return &arr.Get( handle );
 }
 
-// slot 93: SE_GetString wrapper — SOF2 has (token, flags); engine's SE_GetString takes (key)
-static char *SV_SE_GetString_Wrapper( const char *token, int /*flags*/ ) {
-	return (char *)SE_GetString( token );
+// gi[94]: SP_GetStringTextByIndex
+static const char *SV_SP_GetStringTextByIndex_Stub( int /*index*/ ) { return ""; }
+
+// gi[95]: SE_GetString
+static const char *SV_SE_GetString_Wrapper( const char *token ) {
+	return SE_GetString( token );
 }
 
-// slot 94: SoundIndex — server-side sound precaching (stub; Phase 2 will register with sound system)
-static int SV_SoundIndex_Wrapper( const char * /*name*/ ) {
-	return 0;
-}
+// gi[96]: SE_GetStringIndex
+static int SV_SE_GetStringIndex_Stub( const char * /*token*/ ) { return 0; }
 
-// slot 95: SE_SetStringSoundMap
-static void SV_SE_SetStringSoundMap( const char * /*token*/, int /*idx*/ ) {}
+// gi[97]: SE_SetString
+static void SV_SE_SetString_Stub( const char * /*token*/, const char * /*value*/ ) {}
 
-// slot 97: CM_RegisterDamageShader
-static int SV_CM_RegisterDamageShader( const char * /*name*/ ) { return 0; }
+// gi[98]: SV_GetEntityWavVol
+static int SV_GetEntityWavVol_Stub( int /*entNum*/ ) { return 0; }
 
-// slot 98: WE_GetWindVector — existing SV_WE_GetWindVector returns bool; need void wrapper
-static void SV_WE_GetWindVectorVoid( vec3_t windVector, vec3_t atPoint ) {
-	SV_WE_GetWindVector( windVector, atPoint );
-}
+// gi[99]: SV_SoundClearLooping
+static void SV_SoundClearLooping_Stub( void ) {}
 
-// slot 99: SV_UpdateEntitySoundIndex (leading underscore avoids collision with engine symbol)
-static void SV_UpdateEntitySoundIndex_( int /*entNum*/ ) {}
+// gi[100]: SV_GetSoundDuration
+static int SV_GetSoundDuration_Stub( int /*sfxHandle*/ ) { return 0; }
 
-// slot 100: SoundDuration
-static int SV_SoundDuration( const char * /*name*/ ) { return 0; }
+// gi[101]: SV_SoundStopAll
+static void SV_SoundStopAll_Stub( void ) {}
 
-// slot 101: SetMusicState
-static void SV_SetMusicState( int /*state*/ ) {}
+// gi[102-103]: Terrain init/shutdown
+static void SV_InitTerrain_Stub( void ) {}
+static void SV_ShutdownTerrain_Stub( void ) {}
 
-// slots 102-110: RMG automap drawing stubs
-static void SV_RMG_AddBreakpoint( int /*terrainId*/, void * /*data*/ ) {}
-static void SV_GameShutdown( void ) {}
-static void SV_RMG_AutomapDrawLine( int /*x1*/, int /*y1*/, int /*x2*/, int /*y2*/, int /*color*/ ) {}
-static void SV_RMG_AutomapDrawRegion( int /*x*/, int /*y*/, int /*w*/, int /*h*/, int /*color*/ ) {}
-static void SV_RMG_AutomapDrawCircle( int /*x*/, int /*y*/, int /*radius*/, int /*color*/ ) {}
-static void SV_RMG_AutomapDrawIcon( int /*x*/, int /*y*/, int /*icon*/, int /*color*/ ) {}
-static void SV_RMG_AutomapDrawSquare( int /*x*/, int /*y*/, int /*size*/, int /*color*/ ) {}
-static void SV_RMG_AutomapDrawSpecial( int /*x*/, int /*y*/, int /*type*/, int /*color*/ ) {}
+// gi[104-112]: RMG minimap drawing stubs
+static void SV_RMG_MinimapStub( void ) {}
+static void SV_RMG_MinimapStub2( void ) {}
 
 /*
 ===============
@@ -1056,8 +2167,12 @@ Init the game subsystem for a new map
 ===============
 */
 void SV_InitGameProgs (void) {
-	game_import_t	import = {};   // zero-initialize — unset slots remain NULL
-	int				i;
+	// SOF2 game_import_t is a flat array of 113 function pointers (0x71 dwords).
+	// The DLL's GetGameAPI copies these by position, NOT by named struct fields.
+	// Definitive mapping from SoF2.exe SV_InitGameProgs @ 0x10014c60.
+	void *gi[113];
+	int   i;
+	memset( gi, 0, sizeof(gi) );
 
 	// unload anything we have now
 	if ( ge ) {
@@ -1065,217 +2180,202 @@ void SV_InitGameProgs (void) {
 	}
 
 	//
-	// Populate SOF2 v8 game_import_t (113 entries, zero-initialized above).
-	// Slots not listed here remain NULL (reserved / unused by SP).
+	// Populate SOF2 v8 game_import_t (113 entries).
+	// Mapping from SoF2.exe pseudocode DECLARATION ORDER (server.c lines 2504-2616)
+	// NOT the assignment order (which Ghidra reordered). XRef-validated against gamex86.dll.
 	//
-
-	// [  0] Printf
-	import.Printf                  = Com_Printf;
-	// [  1] DPrintf — Com_DPrintf checks com_developer internally
-	import.DPrintf                 = Com_DPrintf;
-	// [  2] FlushCamFile
-	import.FlushCamFile            = Com_FlushCamFile;
-	// [  3] Error
-	import.Error                   = Com_Error;
-	// [  4] Milliseconds
-	import.Milliseconds            = Sys_Milliseconds2;
-	// [  5] cvar (Cvar_Get)
-	import.cvar                    = Cvar_Get;
-	// [  6] cvar_set (Cvar_Set)
-	import.cvar_set                = Cvar_Set;
-	// [  7] Cvar_VariableStringBuffer
-	import.Cvar_VariableStringBuffer = Cvar_VariableStringBuffer;
-	// [  8] FS_FCloseFile
-	import.FS_FCloseFile           = FS_FCloseFile;
-	// [  9] FS_ReadFile
-	import.FS_ReadFile             = FS_ReadFile;
-	// [ 10] FS_Read
-	import.FS_Read                 = FS_Read;
-	// [ 11] FS_Write
-	import.FS_Write                = FS_Write;
-	// [ 12] FS_FOpenFile
-	import.FS_FOpenFile            = FS_FOpenFileByMode;
-	// [ 13] FS_FreeFile
-	import.FS_FreeFile             = FS_FreeFile;
-	// [ 14] FS_GetFileList
-	import.FS_GetFileList          = FS_GetFileList;
-	// [ 15] saved_game — SOF2 uses WriteChunk/ReadChunk (slots 52-53), keep NULL
-	// [ 18] SendConsoleCommand
-	import.SendConsoleCommand      = Cbuf_AddText;
-	// [ 19] DropClient
-	import.DropClient              = SV_GameDropClient;
-	// [ 20] argc
-	import.argc                    = Cmd_Argc;
-	// [ 21] argv
-	import.argv                    = Cmd_Argv;
-	// [ 23] Com_sprintf — void wrapper (engine fn returns int)
-	import.Com_sprintf             = Com_sprintf_void;
-	// [ 24] Cvar_VariableIntegerValue
-	import.Cvar_VariableIntegerValue = Cvar_VariableIntegerValue;
-	// [ 25] Cvar_SetValue(name, val, force) — force param ignored
-	import.Cvar_SetValue           = SV_Cvar_SetValue_Wrapper;
-	// [ 26] SetConfigstring
-	import.SetConfigstring         = SV_SetConfigstring;
-	// [ 27] GetConfigstring
-	import.GetConfigstring         = SV_GetConfigstring;
-	// [ 28] SetUserinfo
-	import.SetUserinfo             = SV_SetUserinfo;
-	// [ 29] GetUserinfo
-	import.GetUserinfo             = SV_GetUserinfo;
-	// [ 30] SendServerCommand
-	import.SendServerCommand       = SV_GameSendServerCommand;
-	// [ 31] SetBrushModel
-	import.SetBrushModel           = SV_SetBrushModel;
-	// [ 32] Malloc — wrapper to cast memtag_t enum to int
-	import.Malloc                  = G_ZMalloc_Wrapper;
-	// [ 33] Free
-	import.Free                    = Z_Free;
-	// [ 35] GetEntityToken — int wrapper (SV_GetEntityToken returns qboolean)
-	import.GetEntityToken          = SV_GetEntityToken_int;
-	// [ 36] CM_FreeTerrain
-	import.CM_FreeTerrain          = SV_CM_FreeTerrain;
-	// [ 38] RMG_Init
-	import.RMG_Init                = SV_RMG_Init;
-	// [ 39] irand
-	import.irand                   = Q_irand;
-	// [ 40] RMG_GetSpawnPoint
-	import.RMG_GetSpawnPoint       = SV_RMG_GetSpawnPoint;
-	// [ 41] RMG_GetCellInfo
-	import.RMG_GetCellInfo         = SV_RMG_GetCellInfo;
-	// [ 43] RMG_UpdateTerrain
-	import.RMG_UpdateTerrain       = SV_RMG_UpdateTerrain;
-	// [ 50] trace — 7-arg wrapper (SV_Trace has 2 extra defaulted G2 params)
-	import.trace                   = SV_Trace_7args;
-	// [ 51] pointcontents
-	import.pointcontents           = SV_PointContents;
-	// [ 52] SaveGame_WriteChunk
-	import.SaveGame_WriteChunk     = SV_SaveGame_WriteChunk;
-	// [ 53] SaveGame_ReadChunk
-	import.SaveGame_ReadChunk      = SV_SaveGame_ReadChunk;
-	// [ 54] LocateGameData — SOF2 only passes entity array pointer
-	import.LocateGameData          = SV_LocateGameData;
-	// [ 56] GetUserinfoAlt (same function, duplicate slot)
-	import.GetUserinfoAlt          = SV_GetUserinfo;
-	// [ 57] linkentity
-	import.linkentity              = SV_LinkEntity;
-	// [ 58] unlinkentity
-	import.unlinkentity            = SV_UnlinkEntity;
-	// [ 59] MulticastTempEntity
-	import.MulticastTempEntity     = SV_MulticastTempEntity;
-	// [ 60] InitTempEntFinalize
-	import.InitTempEntFinalize     = SV_InitTempEntFinalize;
-	// [ 61] GetTempEntCount
-	import.GetTempEntCount         = SV_GetTempEntCount;
-	// [ 63] ICARUS_PlaySound
-	import.ICARUS_PlaySound        = SV_ICARUS_PlaySound;
-	// [ 64] ICARUS_RunScript
-	import.ICARUS_RunScript        = SV_ICARUS_RunScript;
-	// [ 65] GetCurrentEntity
-	import.GetCurrentEntity        = SV_GetCurrentEntity;
-	// [ 66] G2API_CleanGhoul2Models
-	import.G2API_CleanGhoul2Models = SV_G2API_CleanGhoul2Models;
-	// [ 67] GetLastErrorString
-	import.GetLastErrorString      = SV_GetLastErrorString;
-	// [ 68] GetCurrentEntityIndirect
-	import.GetCurrentEntityIndirect = SV_GetCurrentEntityIndirect;
-	// [ 69] EntitiesInBox
-	import.EntitiesInBox           = SV_AreaEntities;
-	// [ 70] EntityContact
-	import.EntityContact           = SV_EntityContact;
-	// [ 71] traceG2 — extra G2 args ignored for now
-	import.traceG2                 = SV_TraceG2;
-	// [ 72] GetEntityBoundsSize
-	import.GetEntityBoundsSize     = SV_GetEntityBoundsSize;
-	// [ 73] SetBrushModelAlt (duplicate)
-	import.SetBrushModelAlt        = SV_SetBrushModel;
-	// [ 74] inPVS
-	import.inPVS                   = SV_inPVS;
-	// [ 75] inPVSIgnorePortals
-	import.inPVSIgnorePortals      = SV_inPVSIgnorePortals;
-	// [ 77] SetConfigstringAlt (duplicate)
-	import.SetConfigstringAlt      = SV_SetConfigstring;
-	// [ 78] GetConfigstringAlt (duplicate)
-	import.GetConfigstringAlt      = SV_GetConfigstring;
-	// [ 79] GetServerinfo
-	import.GetServerinfo           = SV_GetServerinfo;
-	// [ 80] AdjustAreaPortalState
-	import.AdjustAreaPortalState   = SV_AdjustAreaPortalState;
-	// [ 81] totalMapContents
-	import.totalMapContents        = CM_TotalMapContents;
-	// [ 83] GetSurfaceMaterial
-	import.GetSurfaceMaterial      = SV_GetSurfaceMaterial;
-	// [ 84] ModelIndex
-	import.ModelIndex              = SV_ModelIndex_Wrapper;
-	// [ 87] TheGhoul2InfoArray
-	import.TheGhoul2InfoArray      = SV_TheGhoul2InfoArray;
-	// [ 88] RE_RegisterSkin
-	import.RE_RegisterSkin         = SV_RE_RegisterSkin;
-	// [ 89] RE_GetAnimationCFG
-	import.RE_GetAnimationCFG      = SV_RE_GetAnimationCFG;
-	// [ 90] G2API_GetGhoul2InfoV
-	import.G2API_GetGhoul2InfoV    = SV_G2API_GetGhoul2InfoV;
-	// [ 91] G2API_CleanGhoul2ModelsRef
-	import.G2API_CleanGhoul2ModelsRef = SV_G2API_CleanGhoul2ModelsRef;
-	// [ 93] SE_GetString
-	import.SE_GetString            = SV_SE_GetString_Wrapper;
-	// [ 94] SoundIndex
-	import.SoundIndex              = SV_SoundIndex_Wrapper;
-	// [ 95] SE_SetStringSoundMap
-	import.SE_SetStringSoundMap    = SV_SE_SetStringSoundMap;
-	// [ 96] GetEntityToken2 (alternate slot, same wrapper)
-	import.GetEntityToken2         = SV_GetEntityToken_int;
-	// [ 97] CM_RegisterDamageShader
-	import.CM_RegisterDamageShader = SV_CM_RegisterDamageShader;
-	// [ 98] WE_GetWindVector — void wrapper around bool-returning SV_WE_GetWindVector
-	import.WE_GetWindVector        = SV_WE_GetWindVectorVoid;
-	// [ 99] SV_UpdateEntitySoundIndex
-	import.SV_UpdateEntitySoundIndex = SV_UpdateEntitySoundIndex_;
-	// [100] SoundDuration
-	import.SoundDuration           = SV_SoundDuration;
-	// [101] SetMusicState
-	import.SetMusicState           = SV_SetMusicState;
-	// [102] RMG_AddBreakpoint
-	import.RMG_AddBreakpoint       = SV_RMG_AddBreakpoint;
-	// [103] GameShutdown
-	import.GameShutdown            = SV_GameShutdown;
-	// [104] RMG_AutomapDrawLine
-	import.RMG_AutomapDrawLine     = SV_RMG_AutomapDrawLine;
-	// [105] RMG_AutomapDrawRegion
-	import.RMG_AutomapDrawRegion   = SV_RMG_AutomapDrawRegion;
-	// [106] RMG_AutomapDrawCircle
-	import.RMG_AutomapDrawCircle   = SV_RMG_AutomapDrawCircle;
-	// [107] RMG_AutomapDrawIcon
-	import.RMG_AutomapDrawIcon     = SV_RMG_AutomapDrawIcon;
-	// [108] RMG_AutomapDrawSquare
-	import.RMG_AutomapDrawSquare   = SV_RMG_AutomapDrawSquare;
-	// [110] RMG_AutomapDrawSpecial
-	import.RMG_AutomapDrawSpecial  = SV_RMG_AutomapDrawSpecial;
+	gi[  0] = (void *)SV_Traced_Printf;              // Printf (traced)
+	gi[  1] = (void *)SV_Traced_DPrintf;             // DPrintf (traced)
+	gi[  2] = (void *)SV_Traced_DPrintf;             // DPrintf2 (traced)
+	gi[  3] = (void *)SV_Traced_ComSprintf;           // Com_sprintf (traced)
+	gi[  4] = (void *)SV_Traced_Error;               // Com_Error (traced)
+	gi[  5] = (void *)SV_Traced_FS_FOpenFile;        // FS_FOpenFileByMode (traced)
+	gi[  6] = (void *)SV_Traced_FS_Read;             // FS_Read (traced)
+	gi[  7] = (void *)FS_Write;                      // FS_Write
+	gi[  8] = (void *)SV_Traced_FS_FCloseFile;       // FS_FCloseFile (traced)
+	gi[  9] = (void *)SV_Traced_FS_ReadFile;         // FS_ReadFile (traced)
+	gi[ 10] = (void *)SV_Traced_FS_FreeFile;         // FS_FreeFile (traced)
+	gi[ 11] = (void *)FS_FileExists;                 // FS_FileExists
+	gi[ 12] = (void *)SV_SOF2_FS_ListFiles;          // FS_ListFiles (SOF2 4-param, SOF2-format return)
+	gi[ 13] = (void *)SV_SOF2_FS_FreeFileList;      // FS_FreeFileList (SOF2-format)
+	gi[ 14] = (void *)SV_FS_CleanPath_Stub;          // FS_CleanPath (SOF2-specific)
+	gi[ 15] = (void *)SV_Traced_EventLoop;           // Com_EventLoop (traced)
+	gi[ 16] = (void *)SV_Traced_Cmd_TokenizeString;  // Cmd_TokenizeString (traced)
+	gi[ 17] = (void *)COM_Parse;                     // COM_Parse
+	gi[ 18] = (void *)SV_Traced_Cbuf_AddText;         // Cbuf_AddText (traced, blocks corrupted cmds)
+	gi[ 19] = (void *)SV_Traced_Cbuf_ExecuteText;     // Cbuf_ExecuteText (traced)
+	gi[ 20] = (void *)Cmd_Argc;                      // Cmd_Argc
+	gi[ 21] = (void *)Cmd_ArgvBuffer;                // Cmd_ArgvBuffer
+	gi[ 22] = (void *)Cmd_ArgsBuffer;                // Cmd_ArgsBuffer
+	gi[ 23] = (void *)SV_Traced_Cvar_Get;            // Cvar_GetModified (traced)
+	gi[ 24] = (void *)SV_Traced_Cvar_Register;       // Cvar_Register (traced)
+	gi[ 25] = (void *)SV_Traced_Cvar_Update;         // Cvar_Update (traced)
+	gi[ 26] = (void *)SV_Traced_Cvar_Set;            // Cvar_Set (traced)
+	gi[ 27] = (void *)SV_Cvar_SetModified;           // Cvar_SetModified (4-arg variant)
+	gi[ 28] = (void *)SV_Cvar_SetValue_Wrapper;      // Cvar_SetValue (name, float, force)
+	gi[ 29] = (void *)SV_Traced_Cvar_VariableIntegerValue; // Cvar_VariableIntegerValue (traced)
+	gi[ 30] = (void *)Cvar_VariableValue;            // Cvar_VariableValue (returns float)
+	gi[ 31] = (void *)SV_Traced_Cvar_VariableStringBuffer; // Cvar_VariableStringBuffer (traced)
+	gi[ 32] = (void *)SV_Traced_ZMalloc;             // Z_Malloc (traced)
+	gi[ 33] = (void *)SV_Traced_ZFree;              // Z_Free (traced)
+	gi[ 34] = (void *)SV_Traced_Z_CheckHeap;         // Z_CheckHeap (traced)
+	gi[ 35] = (void *)SV_CM_RegisterTerrain_Stub;    // CM_RegisterTerrain
+	gi[ 36] = (void *)SV_CM_Terrain_Release_Stub;    // CM_Terrain_Release
+	gi[ 37] = (void *)SV_CM_Terrain_ForEachBrush_Stub; // CM_Terrain_ForEachBrush
+	gi[ 38] = (void *)SV_CM_Terrain_GetWorldHeight_Stub; // CM_Terrain_GetWorldHeight
+	gi[ 39] = (void *)SV_CM_Terrain_FlattenHeight_Stub;  // CM_Terrain_FlattenHeight
+	gi[ 40] = (void *)SV_RMG_EvaluatePath_Stub;      // RMG_EvaluatePath
+	gi[ 41] = (void *)SV_RMG_CreatePathSegment_Stub;  // RMG_CreatePathSegment
+	gi[ 42] = (void *)SV_CM_Terrain_ApplyBezierPath_Stub; // CM_Terrain_ApplyBezierPath
+	gi[ 43] = (void *)SV_CTerrainInstanceList_Add_Stub;   // CTerrainInstanceList_Add
+	gi[ 44] = (void *)SV_CM_Terrain_GetFlattenedAvgHeight_Stub; // CM_Terrain_GetFlattenedAvgHeight
+	gi[ 45] = (void *)SV_CM_Terrain_CheckOverlap_Stub; // CM_Terrain_CheckOverlap
+	gi[ 46] = (void *)SV_CTerrainInstanceList_GetFirst_Stub; // CTerrainInstanceList_GetFirst
+	gi[ 47] = (void *)SV_CTerrainInstanceList_GetNext_Stub;  // CTerrainInstanceList_GetNext
+	gi[ 48] = (void *)SV_R_LoadDataImage_Stub;        // R_LoadDataImage
+	gi[ 49] = (void *)SV_ResampleTexture_Stub;        // ResampleTexture
+	gi[ 50] = (void *)SV_CM_PointContents_Wrapper;    // CM_PointContents (2 args)
+	gi[ 51] = (void *)SV_PointContentsCached;          // SV_PointContentsCached (3 args)
+	gi[ 52] = (void *)SV_SaveGame_WriteChunk;          // SV_WriteChunk
+	gi[ 53] = (void *)SV_SaveGame_ReadChunk;           // SV_ReadChunk
+	gi[ 54] = (void *)SV_Traced_LocateGameData;       // SV_LocateGameData (traced, 5 args)
+	gi[ 55] = (void *)SV_GameDropClient;               // SV_GameDropClient
+	gi[ 56] = (void *)SV_GameSendServerCommand;        // SV_GameSendServerCommand
+	gi[ 57] = (void *)SV_Traced_LinkEntity;           // SV_LinkEntity (traced)
+	gi[ 58] = (void *)SV_UnlinkEntityAll;              // SV_UnlinkEntityAll
+	gi[ 59] = (void *)SV_AddTempEnt_Stub;              // SV_AddTempEnt
+	gi[ 60] = (void *)SV_ClearTempEnts_Stub;           // SV_ClearTempEnts (decl order fix)
+	gi[ 61] = (void *)SV_CM_GetDebugEntryPrevCount_Stub; // CM_GetDebugEntryPrevCount (decl order fix)
+	gi[ 62] = (void *)SV_AddNextMap_Stub;              // SV_AddNextMap (decl order fix)
+	gi[ 63] = (void *)SV_RemoveNextMap_Stub;           // SV_RemoveNextMap (decl order fix)
+	gi[ 64] = (void *)SV_GetNextMap_Stub;              // SV_GetNextMap (decl order fix)
+	gi[ 65] = (void *)SV_GP_GetBaseParseGroup_Stub;    // GP_GetBaseParseGroup (decl order fix)
+	gi[ 66] = (void *)SV_GP_SetSubGroups_Stub;         // GP_SetSubGroups (decl order fix)
+	gi[ 67] = (void *)SV_GameStub_ReturnZero;          // SV_GameStub_ReturnZero (decl order fix)
+	gi[ 68] = (void *)SV_CSkin_Noop;                   // CSkin_Noop (decl order fix)
+	gi[ 69] = (void *)SV_SOF2_AreaEntities;             // SV_AreaEntities (wrapper: returns entity indices, not pointers)
+	gi[ 70] = (void *)SV_EntityContact;                // SV_EntityContact
+	gi[ 71] = (void *)SV_Trace_10args;                 // SV_Trace (10 args: SOF2 adds eG2TraceType, useLod, traceFlags)
+	gi[ 72] = (void *)SV_R_LightForPoint_Stub;         // SV_R_LightForPoint
+	gi[ 73] = (void *)SV_SetBrushModel;                // SV_SetBrushModel
+	gi[ 74] = (void *)SV_CM_SelectSubBSP_Stub;         // CM_SelectSubBSP
+	gi[ 75] = (void *)SV_inPVS;                        // SV_inPVS
+	gi[ 76] = (void *)SV_CM_FindOrCreateShader_Stub;   // CM_FindOrCreateShader
+	gi[ 77] = (void *)SV_Traced_SetConfigstring;      // SV_SetConfigstring (traced)
+	gi[ 78] = (void *)SV_GetConfigstring;              // SV_GetConfigstring
+	gi[ 79] = (void *)SV_Traced_GetServerinfo;        // SV_GetServerinfo (traced)
+	gi[ 80] = (void *)SV_AdjustAreaPortalState;        // SV_AdjustAreaPortalState
+	gi[ 81] = (void *)SV_CM_GetModelBrushShaderNum_Stub; // CM_GetModelBrushShaderNum
+	gi[ 82] = (void *)SV_CM_GetShaderName_Stub;        // CM_GetShaderName
+	gi[ 83] = (void *)SV_CM_DamageBrushSideHealth_Stub; // CM_DamageBrushSideHealth
+	gi[ 84] = (void *)SV_GetUsercmd_Stub;              // SV_GetUsercmd
+	// Slots 85-97: CORRECTED per declaration order (pseudocode lines 2589-2601)
+	gi[ 85] = (void *)SV_Traced_RE_RegisterModel;      // RE_RegisterModel (traced)
+	gi[ 86] = (void *)SV_Traced_RE_RegisterShader;     // RE_RegisterShader (traced)
+	gi[ 87] = (void *)SV_G2_InitWraithSurfaceMap;      // G2_InitWraithSurfaceMap
+	gi[ 88] = (void *)SV_Com_RegisterSkin_Wrapper;     // Com_RegisterSkin
+	gi[ 89] = (void *)SV_G2API_AnimateG2Models;        // G2API_AnimateGhoul2Models
+	gi[ 90] = (void *)SV_G2API_CleanGhoul2Models_Safe;  // G2API_CleanGhoul2Models (validate handle)
+	gi[ 91] = (void *)SV_G2_GetGhoul2InfoByHandle; // G2_GetGhoul2InfoByHandle
+	gi[ 92] = (void *)SV_SP_GetStringTextByIndex_Stub;  // SP_GetStringTextByIndex
+	gi[ 93] = (void *)SV_Traced_SE_GetString;           // SE_GetString (traced)
+	gi[ 94] = (void *)SV_SE_GetStringIndex_Stub;        // SE_GetStringIndex
+	gi[ 95] = (void *)SV_SE_SetString_Stub;             // SE_SetString
+	gi[ 96] = (void *)SV_Traced_GetEntityToken;         // SV_GetEntityToken (traced, was at 85)
+	gi[ 97] = (void *)SV_Traced_ICARUS_Init;            // SV_ICARUS_Init (traced, was at 89)
+	gi[ 98] = (void *)SV_GetEntityWavVol_Stub;          // SV_GetEntityWavVol
+	gi[ 99] = (void *)SV_SoundClearLooping_Stub;        // SV_SoundClearLooping
+	gi[100] = (void *)SV_GetSoundDuration_Stub;         // SV_GetSoundDuration
+	gi[101] = (void *)SV_SoundStopAll_Stub;             // SV_SoundStopAll
+	gi[102] = (void *)SV_InitTerrain_Stub;              // SV_InitTerrain
+	gi[103] = (void *)SV_ShutdownTerrain_Stub;          // SV_ShutdownTerrain
+	gi[104] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapBuildingIcon
+	gi[105] = (void *)SV_RMG_MinimapStub;               // SV_RMG_DrawMinimapStartIcon
+	gi[106] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapEndIcon
+	gi[107] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapObjectiveIcon
+	gi[108] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapDot
+	gi[109] = (void *)SV_RMG_MinimapStub;               // Automap_DrawOverlay
+	gi[110] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapPlayerMarker
+	gi[111] = (void *)SV_RMG_MinimapStub2;              // RMG_RenderMinimap
+	gi[112] = (void *)SV_RMG_MinimapStub2;              // RMG_SaveMinimap
 
 	// SOF2 SP game DLL name
-	const char *gamename = "gamex86";
+	const char *gamename = "game";  // Sys_LoadSPGameDll appends ARCH_STRING("x86") + DLL_EXT → "gamex86.dll"
 
+	fprintf(stderr, "[DBG] SV_InitGameProgs: loading game DLL '%s'\n", gamename);
 	GetGameAPIProc *GetGameAPI;
 	gameLibrary = Sys_LoadSPGameDll( gamename, &GetGameAPI );
 	if ( !gameLibrary )
 		Com_Error( ERR_DROP, "Failed to load %s library", gamename );
+	fprintf(stderr, "[DBG] SV_InitGameProgs: DLL loaded, calling GetGameAPI(8, gi)\n");
 
-	ge = (game_export_t *)GetGameAPI( &import );
+	// SOF2 GetGameAPI(int apiVersion, void *imports) — pass version 8 and import table
+	ge = (game_export_t *)GetGameAPI( 8, gi );
 	if (!ge)
 	{
 		Sys_UnloadDll( gameLibrary );
-		Com_Error( ERR_DROP, "Failed to load %s library", gamename );
+		Com_Error( ERR_DROP, "Failed to load %s library (API version mismatch?)", gamename );
 	}
+	fprintf(stderr, "[DBG] SV_InitGameProgs: GetGameAPI returned ge=%p\n", (void*)ge);
 
 	// SOF2 game_export_t has NO apiversion field — skip the version check.
-
 	// SOF2 cgame is a SEPARATE DLL (cgamex86.dll) loaded later by CL_InitCGame().
-	// Do NOT call CL_InitCGameVM here.
 
 	sv.entityParsePoint = CM_EntityString();
 
-	// SOF2 Init(levelTime, randomSeed, restart) — 3 args, not JK2's 9
+	// Start a parse session for entity token parsing — COM_Parse requires this
+	COM_BeginParseSession();
+
+	// SOF2 Init(levelTime, randomSeed, restart, handlePool, savedGameJustLoaded) — 5 args
+	fprintf(stderr, "[DBG] SV_InitGameProgs: calling ge->Init(time=%d, seed=%d, restart=0, handlePool=%p, saved=%d)\n",
+		sv.time, Com_Milliseconds(), (void*)&g_handlePoolStub, (int)eSavedGameJustLoaded);
+	fprintf(stderr, "[DBG] SV_InitGameProgs: ge->Init func ptr = %p\n", (void*)ge->Init);
+	// Dump key gi[] slot addresses for crash correlation
+	fprintf(stderr, "[DBG] gi[0]  Com_Printf         = %p\n", gi[0]);
+	fprintf(stderr, "[DBG] gi[3]  Com_sprintf         = %p\n", gi[3]);
+	fprintf(stderr, "[DBG] gi[4]  Com_Error           = %p\n", gi[4]);
+	fprintf(stderr, "[DBG] gi[5]  FS_FOpenFileByMode  = %p\n", gi[5]);
+	fprintf(stderr, "[DBG] gi[15] Com_EventLoop       = %p\n", gi[15]);
+	fprintf(stderr, "[DBG] gi[23] Cvar_Get            = %p\n", gi[23]);
+	fprintf(stderr, "[DBG] gi[26] Cvar_Set            = %p\n", gi[26]);
+	fprintf(stderr, "[DBG] gi[31] Cvar_VarStrBuf      = %p\n", gi[31]);
+	fprintf(stderr, "[DBG] gi[32] Z_Malloc            = %p\n", gi[32]);
+	fprintf(stderr, "[DBG] gi[33] Z_Free              = %p\n", gi[33]);
+	fprintf(stderr, "[DBG] gi[54] LocateGameData      = %p\n", gi[54]);
+	fprintf(stderr, "[DBG] gi[57] LinkEntity          = %p\n", gi[57]);
+	fprintf(stderr, "[DBG] gi[69] AreaEntities        = %p\n", gi[69]);
+	fprintf(stderr, "[DBG] gi[71] SV_Trace            = %p\n", gi[71]);
+	fprintf(stderr, "[DBG] gi[77] SetConfigstring     = %p\n", gi[77]);
+	fprintf(stderr, "[DBG] gi[79] GetServerinfo       = %p\n", gi[79]);
+	fprintf(stderr, "[DBG] gi[85] GetEntityToken      = %p\n", gi[85]);
+	fprintf(stderr, "[DBG] SV_InitGameProgs: calling Z_TagFree(TAG_G_ALLOC)\n");
 	Z_TagFree(TAG_G_ALLOC);
-	ge->Init( sv.time, Com_Milliseconds(), (int)eSavedGameJustLoaded );
+	fprintf(stderr, "[DBG] SV_InitGameProgs: Z_TagFree done, calling ge->Init...\n");
+	fflush(stderr);
+	SetUnhandledExceptionFilter( SV_CrashFilter );
+	AddVectoredExceptionHandler(1, SV_VectoredHandler);  // VEH fires before SEH
+	{
+		// Use file markers that survive even if SEH chain is corrupted
+		FILE *dbgf = fopen("dbg_init_markers.txt", "w");
+		if (dbgf) { fputs("M1: before ge->Init\n", dbgf); fflush(dbgf); }
+
+		ge->Init( sv.time, Com_Milliseconds(), 0, (void*)&g_handlePoolStub, (int)eSavedGameJustLoaded );
+
+		if (dbgf) { fputs("M2: after ge->Init\n", dbgf); fflush(dbgf); }
+
+		ge->InitNavigation();
+		if (dbgf) { fputs("M3: after InitNavigation\n", dbgf); fflush(dbgf); }
+
+		ge->InitSquads();
+		if (dbgf) { fputs("M4: after InitSquads\n", dbgf); fflush(dbgf); }
+
+		ge->InitWeaponSystem();
+		if (dbgf) { fputs("M5: after InitWeaponSystem\n", dbgf); fflush(dbgf); }
+
+		if (dbgf) fclose(dbgf);
+	}
+	fprintf(stderr, "[DBG] SV_InitGameProgs: all post-Init calls done\n");
+	fflush(stderr);
 
 	// clear all gentity pointers that might still be set from
 	// a previous level

@@ -2133,7 +2133,9 @@ char **FS_ListFilteredFiles( const char *path, const char *extension, char *filt
 	}
 
 	// return a copy of the list
-	*numfiles = nfiles;
+	if ( numfiles ) {
+		*numfiles = nfiles;
+	}
 
 	if ( !nfiles ) {
 		return NULL;

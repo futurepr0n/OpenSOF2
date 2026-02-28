@@ -233,8 +233,9 @@ void CM_TraceThroughBrush( traceWork_t *tw, trace_t &trace, cbrush_t *brush, boo
 			{
 				trace.fraction = tw->enterFrac;
 				trace.plane = *tw->clipplane;
+				trace.shaderNum = tw->leadside->shaderNum;
+				trace.sideNum = (int)(tw->leadside - cmg.brushsides);
 				trace.surfaceFlags = cmg.shaders[tw->leadside->shaderNum].surfaceFlags;
-//				tw->trace.sideNum = tw->leadside - cmg.brushsides;
 				trace.contents = brush->contents;
 			}
 		}
@@ -495,6 +496,8 @@ void CM_TraceThroughBrush( traceWork_t *tw, cbrush_t *brush ) {
 			}
 			tw->trace.fraction = enterFrac;
 			tw->trace.plane = *clipplane;
+			tw->trace.shaderNum = leadside->shaderNum;
+			tw->trace.sideNum = (int)(leadside - cmg.brushsides);
 			tw->trace.surfaceFlags = cmg.shaders[leadside->shaderNum].surfaceFlags;
 			tw->trace.contents = brush->contents;
 		}
@@ -767,6 +770,7 @@ void CM_BoxTrace( trace_t *results, const vec3_t start, const vec3_t end,
 	// fill in a default trace
 	memset( &tw, 0, sizeof(tw) - sizeof(tw.trace.G2CollisionMap));
 	tw.trace.fraction = 1;	// assume it goes the entire distance until shown otherwise
+	tw.trace.sideNum = -1;	// SOF2: no brush side hit yet
 
 	if (!local->numNodes) {
 		*results = tw.trace;

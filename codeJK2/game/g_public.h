@@ -327,7 +327,8 @@ typedef struct {
 //
 typedef struct {
 	// --- Core game callbacks (slots 0-8) ---
-	void    (*Init)(int levelTime, int randomSeed, int restart); // +0x00 [0]  InitGame
+	void    (*Init)(int levelTime, int randomSeed, int restart,  // +0x00 [0]  InitGame
+				void *handlePool, int savedGameJustLoaded);
 	void    (*Shutdown)(int restart);                            // +0x04 [1]  G_ShutdownGame
 	char   *(*ClientConnect)(int clientNum, int firstTime,       // +0x08 [2]  ClientConnect
 				int isBot);

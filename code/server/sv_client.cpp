@@ -130,12 +130,19 @@ gotnewcl:
 	Q_strncpyz( newcl->userinfo, userinfo, sizeof(newcl->userinfo) );
 
 	// get the game a chance to reject this connection or modify the userinfo
-	denied = ge->ClientConnect( clientNum, qtrue, eSavedGameJustLoaded ); // firstTime = qtrue
+	Com_Printf( "SV_DirectConnect: calling ge->ClientConnect(%d, firstTime=1)\n", clientNum );
+	__try {
+		denied = ge->ClientConnect( clientNum, qtrue, eSavedGameJustLoaded ); // firstTime = qtrue
+	} __except( 1 ) {
+		Com_Printf( "^1SV_DirectConnect: EXCEPTION in ge->ClientConnect(%d)!\n", clientNum );
+		denied = NULL;  // treat as success so client can proceed
+	}
 	if ( denied ) {
 		NET_OutOfBandPrint( NS_SERVER, from, "print\n%s\n", denied );
 		Com_DPrintf ("Game rejected a connection: %s.\n", denied);
 		return;
 	}
+	Com_Printf( "SV_DirectConnect: ge->ClientConnect(%d) succeeded\n", clientNum );
 
 	SV_UserinfoChanged( newcl );
 
@@ -200,7 +207,7 @@ void SV_SendClientGameState( client_t *client ) {
 	msg_t		msg;
 	byte		msgBuffer[MAX_MSGLEN];
 
-	Com_DPrintf ("SV_SendGameState() for %s\n", client->name);
+	Com_Printf ("SV_SendClientGameState: client '%s' -> CS_PRIMED\n", client->name);
 	client->state = CS_PRIMED;
 
 	// when we receive the first packet from the client, we will
@@ -254,7 +261,7 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	// set up the entity for the client
 	clientNum = client - svs.clients;
 	ent = SV_GentityNum( clientNum );
-	ent->s.number = clientNum;
+	SOF2_ENT_NUMBER(ent) = clientNum;
 	client->gentity = ent;
 
 	// normally I check 'qbFromSavedGame' to avoid overwriting loaded client data, but this stuff I want
@@ -265,7 +272,14 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	client->cmdNum = 0;
 
 	// call the game begin function — SOF2 ClientBegin(clientNum) takes 1 arg only
-	ge->ClientBegin( client - svs.clients );
+	__try {
+		ge->ClientBegin( client - svs.clients );
+		Com_Printf( "SV_ClientEnterWorld: ge->ClientBegin(%d) succeeded, client is ACTIVE\n",
+					(int)(client - svs.clients) );
+	} __except( 1 ) {
+		Com_Printf( "^1SV_ClientEnterWorld: EXCEPTION in ge->ClientBegin(%d)\n",
+					(int)(client - svs.clients) );
+	}
 }
 
 /*
@@ -399,7 +413,16 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 		return;		// may have been kicked during the last usercmd
 	}
 
-	ge->ClientThink( cl - svs.clients );  // SOF2: ClientThink(int clientNum) — cmd not passed
+	__try {
+		ge->ClientThink( cl - svs.clients );  // SOF2: ClientThink(int clientNum) — cmd not passed
+	} __except( 1 ) {  // EXCEPTION_EXECUTE_HANDLER = 1
+		static int thinkCrashCount = 0;
+		if ( thinkCrashCount < 3 ) {
+			Com_Printf( "^1SV_ClientThink: EXCEPTION in game DLL (client %d), skipping\n",
+						(int)(cl - svs.clients) );
+			thinkCrashCount++;
+		}
+	}
 }
 
 /*

@@ -476,9 +476,8 @@ qboolean RE_GetLighting( const vec3_t origin, vec3_t ambientLight, vec3_t direct
 	trRefEntity_t tr_ent;
 
 	if ( !tr.world || !tr.world->lightGridData) {
-		ambientLight[0] = ambientLight[1] = ambientLight[2] = 255.0;
-		directedLight[0] = directedLight[1] = directedLight[2] = 255.0;
-		VectorCopy( tr.sunDirection, lightDir );
+		// Don't write to output pointers — they may be invalid during
+		// early init when cgame calls GetLighting before the world is loaded.
 		return qfalse;
 	}
 	memset (&tr_ent, 0, sizeof(tr_ent) );

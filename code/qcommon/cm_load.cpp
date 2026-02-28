@@ -655,7 +655,7 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 	cm_noCurves = Cvar_Get ("cm_noCurves", "0", CVAR_CHEAT);
 	cm_playerCurveClip = Cvar_Get ("cm_playerCurveClip", "1", CVAR_ARCHIVE_ND|CVAR_CHEAT );
 #endif
-	Com_DPrintf( "CM_LoadMap( %s, %i )\n", name, clientload );
+	Com_Printf( "[DBG] CM_LoadMap_Actual( %s, %i ) enter\n", name, clientload );
 
 	if ( !strcmp( cm.name, name ) && clientload ) {
 		*checksum = last_checksum;
@@ -754,6 +754,7 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 
 		// carry on as before...
 
+		Com_Printf( "[DBG] CM_LoadMap: file read %d bytes, computing checksum\n", iBSPLen );
 		last_checksum = LittleLong (Com_BlockChecksum (buf, iBSPLen));
 
 		header = *(dheader_t *)buf;
@@ -781,19 +782,34 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 
 		cmod_base = (byte *)buf;
 
+		Com_Printf( "[DBG] CM_LoadMap: BSP ident=0x%x version=%d, loading lumps\n", header.ident, header.version );
+
 		// load into heap
+		Com_Printf( "[DBG] CMod_LoadShaders\n" );
 		CMod_LoadShaders( &header.lumps[LUMP_SHADERS], cm );
+		Com_Printf( "[DBG] CMod_LoadLeafs\n" );
 		CMod_LoadLeafs (&header.lumps[LUMP_LEAFS], cm);
+		Com_Printf( "[DBG] CMod_LoadLeafBrushes\n" );
 		CMod_LoadLeafBrushes (&header.lumps[LUMP_LEAFBRUSHES], cm);
+		Com_Printf( "[DBG] CMod_LoadLeafSurfaces\n" );
 		CMod_LoadLeafSurfaces (&header.lumps[LUMP_LEAFSURFACES], cm);
+		Com_Printf( "[DBG] CMod_LoadPlanes\n" );
 		CMod_LoadPlanes (&header.lumps[LUMP_PLANES], cm);
+		Com_Printf( "[DBG] CMod_LoadBrushSides\n" );
 		CMod_LoadBrushSides (&header.lumps[LUMP_BRUSHSIDES], cm);
+		Com_Printf( "[DBG] CMod_LoadBrushes\n" );
 		CMod_LoadBrushes (&header.lumps[LUMP_BRUSHES], cm);
+		Com_Printf( "[DBG] CMod_LoadSubmodels\n" );
 		CMod_LoadSubmodels (&header.lumps[LUMP_MODELS], cm);
+		Com_Printf( "[DBG] CMod_LoadNodes\n" );
 		CMod_LoadNodes (&header.lumps[LUMP_NODES], cm);
+		Com_Printf( "[DBG] CMod_LoadEntityString\n" );
 		CMod_LoadEntityString (&header.lumps[LUMP_ENTITIES], cm, name );
+		Com_Printf( "[DBG] CMod_LoadVisibility\n" );
 		CMod_LoadVisibility( &header.lumps[LUMP_VISIBILITY], cm );
+		Com_Printf( "[DBG] CMod_LoadPatches\n" );
 		CMod_LoadPatches( &header.lumps[LUMP_SURFACES], &header.lumps[LUMP_DRAWVERTS], cm );
+		Com_Printf( "[DBG] CM_LoadMap: all lumps loaded, numSubModels=%d\n", cm.numSubModels );
 
 		TotalSubModels += cm.numSubModels;
 
@@ -821,6 +837,7 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 
 		if (&cm == &cmg)
 		{
+			Com_Printf( "[DBG] CM_InitBoxHull\n" );
 			CM_InitBoxHull ();
 
 			Q_strncpyz( gsCachedMapDiskImage, name, sizeof(gsCachedMapDiskImage) );	// so the renderer can check it
@@ -831,13 +848,16 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 
 	// do this whether or not the map was cached from last load...
 	//
+	Com_Printf( "[DBG] CM_FloodAreaConnections\n" );
 	CM_FloodAreaConnections (cm);
 
 	// allow this to be cached if it is loaded by the server
 	if ( !clientload ) {
 		Q_strncpyz( cm.name, name, sizeof( cm.name ) );
 	}
+	Com_Printf( "[DBG] CM_CleanLeafCache\n" );
 	CM_CleanLeafCache();
+	Com_Printf( "[DBG] CM_LoadMap_Actual done\n" );
 }
 
 // need a wrapper function around this because of multiple returns, need to ensure bool is correct...

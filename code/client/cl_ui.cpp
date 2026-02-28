@@ -1361,6 +1361,70 @@ void CL_InitUI( void ) {
 			Com_Printf( "CL_InitUI: UI_Init is NULL — skipping\n" );
 		}
 
+		// -----------------------------------------------------------------
+		// Populate the engine-side ui global (ui_atoms.cpp) so engine UI
+		// helpers like UI_DrawConnect, UI_DrawHandlePic, UI_FillRect etc.
+		// can call renderer functions.  Without this the ui struct is all
+		// zeros and SCR_DrawScreenField → UI_DrawConnect → ui.R_DrawStretchPic
+		// would call NULL (EIP=0 crash).
+		// -----------------------------------------------------------------
+		{
+			extern uiimport_t ui;
+			memset( &ui, 0, sizeof(ui) );
+
+			ui.Printf                = Com_Printf;
+			ui.Error                  = Com_Error;
+			ui.Cvar_Set               = Cvar_Set;
+			ui.Cvar_VariableValue     = Cvar_VariableValue;
+			ui.Cvar_VariableStringBuffer = Cvar_VariableStringBuffer;
+			ui.Cvar_Create            = UI_Cvar_Create;
+			ui.Argc                   = Cmd_Argc;
+			ui.Argv                   = Cmd_ArgvBuffer;
+			ui.Cmd_ExecuteText        = Cbuf_ExecuteText;
+
+			ui.R_RegisterShaderNoMip  = re.RegisterShaderNoMip;
+			ui.R_RegisterShader       = re.RegisterShader;
+			ui.R_RegisterModel        = re.RegisterModel;
+			ui.R_RegisterSkin         = re.RegisterSkin;
+			ui.R_RegisterFont         = re.RegisterFont;
+			ui.R_Font_StrLenPixels    = re.Font_StrLenPixels;
+			ui.R_Font_HeightPixels    = re.Font_HeightPixels;
+			ui.R_Font_DrawString      = re.Font_DrawString;
+			ui.R_Font_StrLenChars     = re.Font_StrLenChars;
+			ui.R_SetColor             = re.SetColor;
+			ui.R_DrawStretchPic       = re.DrawStretchPic;
+
+			ui.R_ClearScene           = re.ClearScene;
+			ui.R_AddRefEntityToScene  = re.AddRefEntityToScene;
+			ui.R_RenderScene          = re.RenderScene;
+			ui.R_ModelBounds          = re.ModelBounds;
+
+			ui.UpdateScreen           = SCR_UpdateScreen;
+
+			ui.S_StartLocalSound      = S_StartLocalSound;
+			ui.S_RegisterSound        = S_RegisterSound;
+
+			ui.Key_KeynumToStringBuf  = Key_KeynumToStringBuf;
+			ui.Key_GetBindingBuf      = Key_GetBindingBuf;
+			ui.Key_SetBinding         = Key_SetBinding;
+			ui.Key_IsDown             = Key_IsDown;
+			ui.Key_GetOverstrikeMode  = Key_GetOverstrikeMode;
+			ui.Key_SetOverstrikeMode  = Key_SetOverstrikeMode;
+			ui.Key_ClearStates        = Key_ClearStates;
+			ui.Key_GetCatcher         = Key_GetCatcher;
+			ui.Key_SetCatcher         = Key_SetCatcher;
+
+			ui.GetClipboardData       = GetClipboardData;
+			ui.GetClientState         = GetClientState;
+			ui.GetGlconfig            = UI_GetGlconfig;
+			ui.GetConfigString        = (void (*)(int, char *, int))GetConfigString;
+			ui.Milliseconds           = Sys_Milliseconds2;
+
+			ui.SG_GameAllowedToSaveHere = SG_GameAllowedToSaveHere;
+			ui.SG_GetSaveGameComment  = SG_GetSaveGameComment;
+			ui.SG_StoreSaveGameComment = SG_StoreSaveGameComment;
+		}
+
 		return;
 	}
 

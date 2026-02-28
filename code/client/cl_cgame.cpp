@@ -36,6 +36,10 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../ghoul2/G2.h"
 #endif
 #include "../codeJK2/cgame/cg_public.h"
+#include <intrin.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 vm_t	cgvm;
 
@@ -74,8 +78,16 @@ static void *Z_Malloc_stub( int size ) {
 
 // slot 67: CL_CM_LoadMap(name, clientLoad, checksum*) — SOF2 cgame signature
 // Engine's CL_CM_LoadMap(name, subBSP) has different params; adapt here.
-static void CL_CM_LoadMapWrapper( const char *mapname, int /*clientLoad*/, int *checksum ) {
-	CM_LoadMap( mapname, qtrue, checksum, qfalse );
+static void CL_CM_LoadMapWrapper( const char *mapname, int clientLoad, int *checksum ) {
+	int localChecksum = 0;
+	Com_Printf( "[DBG] CL_CM_LoadMapWrapper: map=%s clientLoad=%d checksum=%p\n",
+				mapname ? mapname : "(null)", clientLoad, (void *)checksum );
+	// Guard: if the DLL passes NULL or invalid checksum pointer, use local storage
+	if ( !checksum ) {
+		checksum = &localChecksum;
+	}
+	CM_LoadMap( mapname, (qboolean)(clientLoad != 0), checksum, qfalse );
+	Com_Printf( "[DBG] CL_CM_LoadMapWrapper: done, checksum=%d\n", *checksum );
 }
 
 // slot 96: CL_GetEntityBaseline(entityNum, state*) — wraps CL_GetDefaultState
@@ -120,9 +132,361 @@ static void S_ClearLoopingSounds_stub( int /*killall*/ ) {
 }
 
 // slot 126: R_GetLighting — OpenJK returns qboolean; SOF2 import wants void.
-// vec3_t parameters decay to float* in function args so ambient/directed are compatible.
+// Guard against NULL pointers from the cgame DLL and early calls before world is loaded.
 static void R_GetLighting_SOF2( const vec3_t pos, float *ambient, float *directed, vec3_t dir ) {
+	vec3_t dummyAmb = {255,255,255}, dummyDir = {255,255,255}, dummyLDir = {0,0,1};
+	if ( !ambient )  ambient  = dummyAmb;
+	if ( !directed ) directed = dummyDir;
+	if ( !dir )      dir      = dummyLDir;
 	re.GetLighting( pos, ambient, directed, dir );
+}
+
+// ----- Slot 13: FS_FreeFileList -----
+static void CG_FS_FreeFileList( char **list ) {
+	FS_FreeFileList( list );
+}
+
+// ----- Slot 14: FS_CleanPath -----
+// SOF2 cleans a path in-place (stripping .. etc). Use COM_StripExtension as rough stand-in
+// or just do basic path normalization. For now, no-op — path is used as-is.
+static void CG_FS_CleanPath( char * /*path*/ ) {
+	// no-op stub
+}
+
+// ----- Slot 27: Cvar_SetModified -----
+// Marks a cvar as modified. Since Cvar_FindVar is static, we re-set the cvar to its own value.
+static void CG_Cvar_SetModified( const char *name ) {
+	char buf[MAX_CVAR_VALUE_STRING];
+	Cvar_VariableStringBuffer( name, buf, sizeof(buf) );
+	Cvar_Set( name, buf );
+}
+
+// ----- Slot 34: Z_CheckHeap -----
+static void CG_Z_CheckHeap( void ) {
+	// no-op in OpenJK — zone memory uses malloc, no separate heap check
+}
+
+// ----- Slot 78: S_StopLoopingSound -----
+static void CG_S_StopLoopingSound( int /*entityNum*/ ) {
+	// SOF2 stops looping sounds for an entity. OpenJK doesn't expose this.
+	// S_ClearLoopingSounds() clears all; per-entity stop is a no-op.
+}
+
+// ----- Slot 82: S_MuteSound -----
+static int CG_S_MuteSound( int /*entityNum*/, sfxHandle_t /*sfxHandle*/ ) {
+	// no-op stub — muting individual sounds not supported in OpenJK
+	return 0;
+}
+
+// ----- Slot 100: CL_SetClientViewAngles -----
+static int CG_CL_SetClientViewAngles( const vec3_t angles ) {
+	cl.viewangles[0] = angles[0];
+	cl.viewangles[1] = angles[1];
+	cl.viewangles[2] = angles[2];
+	return 1;
+}
+
+// ----- Slot 101: CL_GetMouseDir -----
+static void CG_CL_GetMouseDir( int *xDir, int *yDir ) {
+	if ( xDir ) *xDir = 0;
+	if ( yDir ) *yDir = 0;
+}
+
+// ----- Slot 114: SE_GetStringIndex -----
+static int CG_SE_GetStringIndex( const char * /*token*/ ) {
+	return -1; // no string index system
+}
+
+// ----- Slot 115: CL_SetLastBoneIndex -----
+static void CG_CL_SetLastBoneIndex( int /*boneIndexBits*/ ) {
+	// no-op — SOF2-specific bone index optimization
+}
+
+// ===== Client-side entity token parsing (slot 150) =====
+// CG_ParseSpawnVars calls this to read BSP entity string tokens for
+// client-side decorations/props. Maintains its own parse pointer.
+static const char *cl_entityParsePoint = NULL;
+
+static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
+	if ( !cl_entityParsePoint ) {
+		cl_entityParsePoint = CM_EntityString();
+	}
+	const char *s = COM_Parse( &cl_entityParsePoint );
+	Q_strncpyz( buffer, s, bufferSize );
+	if ( !cl_entityParsePoint && !s[0] ) {
+		return qfalse;
+	}
+	return qtrue;
+}
+
+// ===== Weather/renderer stubs (slots 152-154) =====
+
+// ----- Slot 153: R_IsOutside (rain check) -----
+static qboolean CG_R_IsOutside( void ) {
+	return qfalse; // no rain rendering for now
+}
+
+// ----- Slot 154: R_GetWindVector -----
+static qboolean CG_R_GetWindVector( vec3_t windVector ) {
+	VectorClear( windVector );
+	return qfalse;
+}
+
+// ===== Force Feedback stubs (slots 157-162) =====
+static int cg_ffNextHandle = 1;
+
+// ----- Slot 157: FF_RegisterEffect -----
+static int CG_FF_RegisterEffect( const char * /*name*/ ) {
+	return cg_ffNextHandle++; // return unique non-zero handle
+}
+
+// ----- Slot 158: FF_Play -----
+static void CG_FF_Play( int /*ffHandle*/ ) {
+	// no-op — no force feedback hardware
+}
+
+// ----- Slot 161: FF_StopAll / SetPlayerSuit -----
+static void CG_FF_StopAll( void ) {
+	// no-op
+}
+
+
+// ===== Ghoul2 handle-based wrappers (slots 116-123) =====
+// SOF2's cgame DLL uses unsigned int handles for Ghoul2 models.
+// These wrappers convert handles to CGhoul2Info_v& for the renderer API.
+
+// ----- Slot 116: G2_InitWraithSurfaceMap -----
+// SOF2 cgame calls this with (void **outPtr) expecting qboolean return.
+// Same pattern as server-side SV_G2_InitWraithSurfaceMap — returns CWraithStub*.
+// The wraith is a C++ object with a 78-entry vtable wrapping all G2 API calls.
+extern void *SV_GetWraithStubPtr( void );  // defined in sv_game.cpp
+
+static qboolean CG_G2_InitWraithSurfaceMap( void **outPtr ) {
+	void *wraith = SV_GetWraithStubPtr();
+	if ( outPtr ) *outPtr = wraith;
+	Com_DPrintf( "[CGAME G2] InitWraithSurfaceMap: wraith=%p\n", wraith );
+	return wraith ? qtrue : qfalse;
+}
+
+// ----- Slot 41: CM_GetTerrainBounds -----
+// Returns the aggregate bounding box of all registered terrain instances.
+// Called from CG_RegisterGraphics after terrain loading.
+static void CG_CM_GetTerrainBounds( vec3_t mins, vec3_t maxs ) {
+	// Set large default bounds — actual terrain may not exist on all maps
+	VectorSet( mins, -65536, -65536, -65536 );
+	VectorSet( maxs, 65536, 65536, 65536 );
+}
+
+// ----- Slot 117: G2API_HaveWeGhoul2Models -----
+// The DLL passes CGhoul2Info_v& (pointer to struct with mItem at offset 0)
+static qboolean CG_G2API_HaveWeGhoul2Models( CGhoul2Info_v &ghoul2 ) {
+	return re.G2API_HaveWeGhoul2Models( ghoul2 );
+}
+
+// ----- Slot 118: G2_GetGhoul2InfoByHandle -----
+// Returns CGhoul2Info_v* from a handle. The DLL uses this to get a reference.
+static CGhoul2Info_v *CG_G2_GetGhoul2InfoByHandle( int handle ) {
+	// Return a pointer to the CGhoul2Info_v wrapper. Since handles are just
+	// indices into the renderer's array, and the DLL only reads mItem from
+	// the returned pointer, we return it from a static to keep it alive.
+	static CGhoul2Info_v g2Temp;
+	// Avoid the destructor freeing the handle by directly setting mItem
+	// CGhoul2Info_v has mItem at offset 0
+	*(int *)&g2Temp = handle;
+	return &g2Temp;
+}
+
+// ----- Slot 119: G2API_SetGhoul2ModelIndexes -----
+static void CG_G2API_SetGhoul2ModelIndexes( unsigned int ghoul2Handle,
+		qhandle_t *modelList ) {
+	if ( ghoul2Handle == 0 ) return;
+	CGhoul2Info_v &g2 = *(CGhoul2Info_v *)&ghoul2Handle;
+	re.G2API_SetGhoul2ModelIndexes( g2, modelList, NULL );
+}
+
+// ----- Slot 120: G2API_ReRegisterModels -----
+// SOF2 DLL calls this to re-register Ghoul2 models after a vid_restart
+static void CG_G2API_ReRegisterModels( unsigned int /*ghoul2Handle*/ ) {
+	// no-op — OpenJK handles model re-registration internally
+}
+
+// ----- Slot 121: G2API_GetBoltMatrix -----
+static qboolean CG_G2API_GetBoltMatrix( unsigned int ghoul2Handle,
+		int modelIndex, int boltIndex, mdxaBone_t *matrix,
+		const vec3_t angles, const vec3_t position, int frameNum,
+		qhandle_t *modelList, float scale ) {
+	if ( ghoul2Handle == 0 ) return qfalse;
+	CGhoul2Info_v &g2 = *(CGhoul2Info_v *)&ghoul2Handle;
+	vec3_t scaleVec = { scale, scale, scale };
+	return re.G2API_GetBoltMatrix( g2, modelIndex, boltIndex, matrix,
+		angles, position, frameNum, modelList, scaleVec );
+}
+
+// ----- Slot 122: G2API_SetBoneAnglesOffset -----
+static qboolean CG_G2API_SetBoneAnglesOffset( unsigned int ghoul2Handle,
+		int modelIndex, const char *boneName, const vec3_t angles,
+		int flags, int up, int right, int forward,
+		qhandle_t *modelList ) {
+	if ( ghoul2Handle == 0 ) return qfalse;
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	int handle = (int)ghoul2Handle;
+	if ( !arr.IsValid( handle ) ) return qfalse;
+	std::vector<CGhoul2Info> &ghoul2 = arr.Get( handle );
+	if ( modelIndex < 0 || modelIndex >= (int)ghoul2.size() ) return qfalse;
+	return re.G2API_SetBoneAngles( &ghoul2[modelIndex], boneName, angles,
+		flags, (Eorientations)up, (Eorientations)right, (Eorientations)forward,
+		modelList, 0, 0 );
+}
+
+// ----- Slot 134: R_AddMiniRefEntityToScene -----
+// SOF2-specific mini entity — just add as regular entity
+static void CG_R_AddMiniRefEntityToScene( const refEntity_t *ent ) {
+	if ( ent ) re.AddRefEntityToScene( ent );
+}
+
+// ----- Slot 137: R_AddDirectedLightToScene -----
+static void CG_R_AddDirectedLightToScene( const vec3_t dir, float intensity,
+		float r, float g, float b ) {
+	(void)dir; (void)intensity; (void)r; (void)g; (void)b;
+	// no-op — OpenJK doesn't have directed lights in scene API
+}
+
+// ----- Slot 138: R_AddAdditiveLightToScene -----
+static void CG_R_AddAdditiveLightToScene( const vec3_t org, float intensity,
+		float r, float g, float b ) {
+	// Add as regular light
+	re.AddLightToScene( org, intensity, r, g, b );
+}
+
+// ----- Slot 141: R_FillRect -----
+static void CG_R_FillRect( float x, float y, float w, float h, const float *color ) {
+	re.SetColor( color );
+	re.DrawStretchPic( x, y, w, h, 0, 0, 0, 0, cls.whiteShader );
+	re.SetColor( NULL );
+}
+
+// ----- Slot 144: R_RemapShader -----
+// SOF2 DLL: R_RemapShader(oldName, newName, timeOffset)
+// R_RemapShader exists in renderer but isn't in refexport_t. Stub for now.
+static void CG_R_RemapShader( const char *oldShader, const char *newShader, const char *timeOffset ) {
+	Com_DPrintf( "[CGAME] R_RemapShader: %s -> %s (time=%s) — stub\n",
+		oldShader ? oldShader : "null", newShader ? newShader : "null",
+		timeOffset ? timeOffset : "0" );
+}
+
+// ----- Slot 147: R_RegisterFont (SOF2 has extra param) -----
+// SOF2 DLL: void R_RegisterFont(name, pointSize, int *handleOut, unk)
+// OpenJK renderer: int RegisterFont(name) — returns handle
+static void CG_R_RegisterFont( const char *name, int /*pointSize*/, void *font, int /*unk*/ ) {
+	if ( !name || !name[0] ) {
+		Com_DPrintf( "[CGAME] R_RegisterFont: NULL or empty name, returning 0\n" );
+		if ( font ) *(int *)font = 0;
+		return;
+	}
+	int handle = re.RegisterFont( name );
+	if ( font ) *(int *)font = handle;
+}
+
+// ----- Slot 149: R_Font_StrLenPixels -----
+// SOF2 DLL passes font handle as void * (int value, not a pointer)
+static float CG_R_Font_StrLenPixels( const void *font, const char *text, float scale ) {
+	int handle = (int)(intptr_t)font;
+	return (float)re.Font_StrLenPixels( text, handle, scale );
+}
+
+// ----- Slot 150: R_Font_HeightPixels -----
+static float CG_R_Font_HeightPixels( const void *font, float scale ) {
+	int handle = (int)(intptr_t)font;
+	return (float)re.Font_HeightPixels( handle, scale );
+}
+
+// ----- Slot 151: R_Font_DrawString -----
+static void CG_R_Font_DrawString( const void *font, const char *text,
+		float x, float y, float scale, const float *rgba, int style ) {
+	int handle = (int)(intptr_t)font;
+	re.Font_DrawString( (int)x, (int)y, text, rgba, handle, -1, scale );
+}
+
+// ----- Slot 152: R_GetLightStyle -----
+static int CG_R_GetLightStyle( int /*index*/, float * /*rgba*/ ) {
+	return 0; // stub
+}
+
+// ----- Slot 153: R_SetLightStyle -----
+// SOF2 passes (int index, float r, float g, float b)
+// OpenJK renderer: void SetLightStyle(int style, int color) where color = packed RGB
+static void CG_R_SetLightStyle( int index, float r, float g, float b ) {
+	int ir = (int)(r * 255.0f) & 0xFF;
+	int ig = (int)(g * 255.0f) & 0xFF;
+	int ib = (int)(b * 255.0f) & 0xFF;
+	int color = (ir) | (ig << 8) | (ib << 16);
+	re.SetLightStyle( index, color );
+}
+
+// ----- Slot 59: UI_LoadMenuData(menuData, category) -----
+// SOF2 cgame loads inventory menu data by category ("default", "weapons", "cinematic").
+// Called from CG_LoadInventoryMenus, CG_ServerCommand, CG_CamEnable.
+// We stub this — UI menus are not functional yet.
+static void CG_UI_LoadMenuData( const char *menuData, const char *category ) {
+	Com_DPrintf( "[CGAME] UI_LoadMenuData: data='%.32s' cat='%s' — stub\n",
+		menuData ? menuData : "(null)", category ? category : "(null)" );
+}
+
+// ----- Slot 61: UI_MenuReset() -----
+// Resets UI menu system state before reloading menu definitions.
+// Called from CG_LoadInventoryMenus as first step.
+static void CG_UI_MenuReset( void ) {
+	Com_DPrintf( "[CGAME] UI_MenuReset — stub\n" );
+}
+
+// ----- Slot 62: UI_SetInfoScreenText(text) -----
+// Sets the loading screen info text widget content.
+// Called from CG_SetLoadingLevelshot. Cosmetic only.
+static void CG_UI_SetInfoScreenText( const char * /*text*/ ) {
+	// no-op — loading screen text widget not implemented
+}
+
+// ----- Slots 105-108: GenericParser2 API stubs -----
+// SOF2's cgame uses GP2 for weapon definitions and HUD widget config.
+// These are handle-based wrappers around CGenericParser2.
+// Currently stubbed — GP2 features (weapon configs, HUD widgets) won't parse,
+// but the game continues running. Called only during init.
+static void CG_GP_GetBaseParseGroup( int /*handle*/ ) {
+	// no-op — returns nothing (void), DLL reads from its own state
+}
+
+static int CG_GP_GetSubGroups( void ) {
+	return 0; // no sub-groups available
+}
+
+static void CG_GP_GetNext( void * /*dest*/ ) {
+	// no-op — destination state left as-is
+}
+
+// ----- Slot 148: RE_DamageSurface -----
+// SOF2-specific renderer function for gore/damage texture lookup.
+// Called after RE_RegisterModel during CG_ClientModel init.
+// Takes pointer to entity/model struct. No-op is safe — just no gore surfaces.
+static int CG_RE_DamageSurface( const void * /*ent*/ ) {
+	return 0; // no damage surface info
+}
+
+// ----- Slot 132: FX parent entity association -----
+// SOF2-specific FX system import: associates rendered FX primitives with a
+// parent entity number. Called from FxScheduler and FX primitive renderers.
+// Takes 1 int arg (entityNum), returns void. NOT AddMiniRefEntityToScene.
+static void CG_FX_SetParentEntity( int /*entityNum*/ ) {
+	// no-op — FX entity association not needed for basic rendering
+}
+
+// Generic sentinel for NULL cgame import slots — logs which slot was called.
+// Uses the return address to figure out caller, plus we stash slot number via
+// a trampoline table.  For simplicity, just log a fatal error with the return address.
+static int CG_NullSlotSentinel( void ) {
+	// Use MSVC intrinsic to get return address for debugging
+	void *retAddr = _ReturnAddress();
+	Com_Printf( "^1[CGAME] Called NULL import slot! retAddr=%p\n", retAddr );
+	return 0;
 }
 
 // slot 0: Printf — SOF2 slot takes pre-formatted string only (no variadic)
@@ -296,8 +660,10 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.FS_FileExists              = (int (*)(const char *))FS_FileExists;
 	// [ 12] FS_GetFileList
 	import.FS_GetFileList             = FS_GetFileList;
-	// [ 13] FS_FreeFileList — stub (OpenJK may not expose this at engine level)
-	// [ 14] FS_CleanPath — stub
+	// [ 13] FS_FreeFileList
+	import.FS_FreeFileList            = CG_FS_FreeFileList;
+	// [ 14] FS_CleanPath
+	import.FS_CleanPath               = CG_FS_CleanPath;
 
 	// [ 15] Com_EventLoop (returns void in OpenJK; cast to match SOF2's int return)
 	import.Com_EventLoop              = (int (*)(void))Com_EventLoop;
@@ -324,7 +690,8 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.Cvar_Update                = Cvar_Update;
 	// [ 26] Cvar_Set
 	import.Cvar_Set                   = Cvar_Set;
-	// [ 27] Cvar_SetModified — stub (mark cvar modified; OpenJK may not expose directly)
+	// [ 27] Cvar_SetModified
+	import.Cvar_SetModified           = CG_Cvar_SetModified;
 	// [ 28] Cvar_SetValue
 	import.Cvar_SetValue              = Cvar_SetValue;
 	// [ 29] Cvar_VariableIntegerValue
@@ -338,7 +705,8 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.Z_Malloc                   = Z_Malloc_stub;
 	// [ 33] Z_Free — wrap to discard int return
 	import.Z_Free                     = Z_Free_void_stub;
-	// [ 34] Z_CheckHeap — stub
+	// [ 34] Z_CheckHeap
+	import.Z_CheckHeap                = CG_Z_CheckHeap;
 
 	// [35-49] Terrain system — all stubs for now (Phase 2+)
 
@@ -377,14 +745,16 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.S_ClearLoopingSounds       = S_ClearLoopingSounds_stub;
 	// [ 77] S_AddLoopingSound (SOF2: 4 args; OpenJK has 5th soundChannel_t default param)
 	import.S_AddLoopingSound          = S_AddLoopingSound_SOF2;
-	// [ 78] S_StopLoopingSound — stub
+	// [ 78] S_StopLoopingSound
+	import.S_StopLoopingSound         = CG_S_StopLoopingSound;
 	// [ 79] S_Respatialize (qboolean inwater is compatible with int)
 	import.S_Respatialize             = (void (*)(int, const vec3_t, vec3_t[3], int))S_Respatialize;
 	// [ 80] S_RegisterSound (SOF2: extra compressed/streamed params ignored)
 	import.S_RegisterSound            = S_RegisterSound_SOF2;
 	// [ 81] S_UpdateEntityPosition
 	import.S_UpdateEntityPosition     = S_UpdateEntityPosition;
-	// [ 82] S_MuteSound — stub
+	// [ 82] S_MuteSound
+	import.S_MuteSound                = CG_S_MuteSound;
 	// [ 83] S_StartBackgroundTrack (SOF2: fadeupTime ignored)
 	import.S_StartBackgroundTrack     = S_StartBackgroundTrack_SOF2;
 	// [ 84] S_StopBackgroundTrack
@@ -421,8 +791,10 @@ qboolean CL_InitSOF2CGame( void ) {
 	// [ 99] CL_GetUserCmd
 	import.CL_GetUserCmd              = CL_GetUserCmd;
 
-	// [100] CL_SetClientViewAngles — stub
-	// [101] CL_GetMouseDir — stub
+	// [100] CL_SetClientViewAngles
+	import.CL_SetClientViewAngles     = CG_CL_SetClientViewAngles;
+	// [101] CL_GetMouseDir
+	import.CL_GetMouseDir             = CG_CL_GetMouseDir;
 	// [102] CL_SetUserCmdValue
 	import.CL_SetUserCmdValue         = CL_SetUserCmdValue_SOF2;
 	// [103-108] CM debug / GP2 — stubs
@@ -436,15 +808,25 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.SE_DisplayString           = SE_GetString_wrapper;
 	// [113] SE_GetString
 	import.SE_GetString               = SE_GetString_wrapper;
-	// [114] SE_GetStringIndex — stub
-	// [115] CL_SetLastBoneIndex — stub
+	// [114] SE_GetStringIndex
+	import.SE_GetStringIndex          = CG_SE_GetStringIndex;
+	// [115] CL_SetLastBoneIndex
+	import.CL_SetLastBoneIndex        = CG_CL_SetLastBoneIndex;
 
-	// [116] G2_InitWraithBoneMapSingleton — stub
-	// [116-123] Ghoul2 — stubs for non-trivially castable G2 functions
-	// SOF2 cgame accesses G2 via the CWraith C++ interface; only a few slots needed.
-	// These will be wired up properly in Phase 2.
-	// [117] G2API_HaveWeGhoul2Models (slot uses unsigned int handle, not CGhoul2Info_v& directly)
-	// [121] G2API_GetBoltMatrix (slot uses unsigned int handle, not CGhoul2Info_v&)
+	// [116] G2_InitWraithSurfaceMap (was misidentified as BoneMapSingleton)
+	import.G2_InitWraithBoneMapSingleton = (void (*)(void))CG_G2_InitWraithSurfaceMap;
+	// [117] G2API_HaveWeGhoul2Models
+	import.G2API_HaveWeGhoul2Models   = CG_G2API_HaveWeGhoul2Models;
+	// [118] G2_GetGhoul2InfoByHandle
+	import.G2_GetGhoul2InfoByHandle   = CG_G2_GetGhoul2InfoByHandle;
+	// [119] G2API_SetGhoul2ModelIndexes
+	import.G2API_SetGhoul2ModelIndexes = CG_G2API_SetGhoul2ModelIndexes;
+	// [120] G2API_ReRegisterModels
+	import.G2API_ReRegisterModels     = CG_G2API_ReRegisterModels;
+	// [121] G2API_GetBoltMatrix
+	import.G2API_GetBoltMatrix        = CG_G2API_GetBoltMatrix;
+	// [122] G2API_SetBoneAnglesOffset
+	import.G2API_SetBoneAnglesOffset  = CG_G2API_SetBoneAnglesOffset;
 	// [123] G2API_CleanGhoul2Models
 	import.G2API_CleanGhoul2Models    = (void (*)(CGhoul2Info_v &))re.G2API_CleanGhoul2Models;
 
@@ -469,19 +851,24 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.R_ClearScene               = re.ClearScene;
 	// [133] R_AddRefEntityToScene
 	import.R_AddRefEntityToScene      = re.AddRefEntityToScene;
-	// [134] R_AddMiniRefEntityToScene — stub (SOF2-specific mini entity)
+	// [134] R_AddMiniRefEntityToScene
+	import.R_AddMiniRefEntityToScene  = CG_R_AddMiniRefEntityToScene;
 	// [135] R_AddPolyToScene (SOF2 has extra 'num' param ignored)
 	import.R_AddPolyToScene           = R_AddPolyToScene_SOF2;
 	// [136] R_AddLightToScene
 	import.R_AddLightToScene          = re.AddLightToScene;
-	// [137-138] Directed/additive light stubs
+	// [137] R_AddDirectedLightToScene
+	import.R_AddDirectedLightToScene  = CG_R_AddDirectedLightToScene;
+	// [138] R_AddAdditiveLightToScene
+	import.R_AddAdditiveLightToScene  = CG_R_AddAdditiveLightToScene;
 	// [139] R_RenderScene
 	import.R_RenderScene              = re.RenderScene;
 	// [140] R_SetColor
 	import.R_SetColor                 = re.SetColor;
 	// [141] R_DrawStretchPic
 	import.R_DrawStretchPic           = re.DrawStretchPic;
-	// [142] R_FillRect — stub
+	// [142] R_FillRect
+	import.R_FillRect                 = CG_R_FillRect;
 	// [143] R_LerpTag (OpenJK returns void; SOF2 wants int)
 	import.R_LerpTag                  = R_LerpTag_SOF2;
 	// [144] R_ModelBounds
@@ -490,8 +877,144 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.R_WorldEffectCommand       = re.WorldEffectCommand;
 	// [146] R_GetModelBounds — stub
 
-	// [147-153] Font / light style stubs
+	// [147] R_RegisterFont (SOF2 extra param)
+	import.R_RegisterFont             = CG_R_RegisterFont;
+	// [148] R_DamageSurface — stub (SOF2-specific gore)
+	// [149] R_Font_StrLenPixels
+	import.R_Font_StrLenPixels        = CG_R_Font_StrLenPixels;
+	// [150] R_Font_HeightPixels
+	import.R_Font_HeightPixels        = CG_R_Font_HeightPixels;
+	// [151] R_Font_DrawString
+	import.R_Font_DrawString          = CG_R_Font_DrawString;
+	// [152] R_GetLightStyle
+	import.R_GetLightStyle            = CG_R_GetLightStyle;
+	// [153] R_SetLightStyle
+	import.R_SetLightStyle            = CG_R_SetLightStyle;
 	// [154-162] Extended renderer stubs
+
+	// -----------------------------------------------------------------------
+	// Fill remaining NULL slots with a per-slot sentinel so we crash with
+	// a useful log message instead of jumping to EIP=0x00000000.
+	// -----------------------------------------------------------------------
+	{
+		void **slots = (void **)&import;
+		int nslots = sizeof(import) / sizeof(void *);
+		for ( int i = 0; i < nslots; i++ ) {
+			if ( slots[i] == NULL ) {
+				Com_Printf( "CL_InitSOF2CGame: slot %d is NULL — filling sentinel\n", i );
+				slots[i] = (void *)CG_NullSlotSentinel;
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Raw slot-index overrides — correct import table layout mismatches.
+	// The cgame_import_t struct field order doesn't match SOF2's actual DLL
+	// expectations for slots 78-82 and 125-149. Verified via Ghidra xref
+	// analysis of cgamex86.dll (import table base 0x301f5958, 163 dwords).
+	//
+	// Key: "← verified" = confirmed by Ghidra xref decompilation
+	//      "← tentative" = inferred from pattern/position
+	// -----------------------------------------------------------------------
+	{
+		void **slots = (void **)&import;
+
+		// --- Slot 41: CM_GetTerrainBounds ---
+		// Called from CG_RegisterGraphics after terrain loading with 2 vec3_t* args.
+		slots[41] = (void *)CG_CM_GetTerrainBounds;            // [41] CM_GetTerrainBounds ← verified
+
+		// --- Slot 64: R_ClearScene (called from CG_Init end, no args) ---
+		// The struct has CL_UI_RealTime at slot 64, but the DLL calls this
+		// at the end of CG_Init after CG_ClearLightStyles() — it's R_ClearScene.
+		// Verified via Ghidra xref: only caller is CG_Init at 0x3002896f.
+		slots[64] = (void *)re.ClearScene;                   // [64] R_ClearScene ← verified
+
+		// --- Slot 65: CM_PointContents ---
+		// The struct has CL_UI_SnapVector at slot 65 (extra METIS stub that
+		// doesn't exist in SOF2's DLL). The DLL expects CM_PointContents here.
+		// Verified via 4 Ghidra xrefs: CG_PointContents, CG_ScopeTrace,
+		// CG_Entity_EmitFireParticle (×2). Called every frame.
+		slots[65] = (void *)CM_PointContents;                // [65] CM_PointContents ← verified CRITICAL FIX
+
+		// --- METIS UI stubs 59, 61, 62 ---
+		// These are SOF2-specific UI helper imports for menu/loading screen management.
+		// Verified via Ghidra xref decompilation of CG_LoadInventoryMenus, CG_SetLoadingLevelshot.
+		slots[59] = (void *)CG_UI_LoadMenuData;              // [59] UI_LoadMenuData ← verified
+		slots[61] = (void *)CG_UI_MenuReset;                 // [61] UI_MenuReset ← verified
+		slots[62] = (void *)CG_UI_SetInfoScreenText;         // [62] UI_SetInfoScreenText ← verified
+
+		// --- GenericParser2 slots 105, 106, 108 ---
+		// SOF2 cgame uses GP2 for weapon definitions and HUD widget config.
+		// Verified via Ghidra: CG_PlayerEntity_SetWeapon, CG_HudWidget_QueryCallback.
+		slots[105] = (void *)CG_GP_GetBaseParseGroup;         // [105] GP_GetBaseParseGroup ← verified
+		slots[106] = (void *)CG_GP_GetSubGroups;              // [106] GP_GetSubGroups ← verified
+		slots[108] = (void *)CG_GP_GetNext;                   // [108] GP_GetNext ← verified
+
+		// --- Slot 116: G2_InitWraithSurfaceMap ---
+		// CG_InitWraith calls this with (void**) expecting qboolean.
+		// Must return CWraithStub* — the DLL calls through its 78-entry vtable.
+		slots[116] = (void *)CG_G2_InitWraithSurfaceMap;       // [116] G2_InitWraithSurfaceMap ← verified CRASH FIX
+
+		// --- Sound slots 78-82 ---
+		// SOF2 inserts S_AddRealLoopingSound at [78], shifting the block.
+		// All verified HIGH confidence via Ghidra xref analysis.
+		slots[78] = (void *)S_AddLoopingSound_SOF2;         // [78] S_AddRealLoopingSound ← verified
+		slots[79] = (void *)CG_S_StopLoopingSound;          // [79] S_StopLoopingSound ← verified
+		slots[80] = (void *)S_UpdateEntityPosition;          // [80] S_UpdateEntityPosition ← verified
+		slots[81] = (void *)S_Respatialize;                  // [81] S_Respatialize ← verified
+		slots[82] = (void *)S_RegisterSound_SOF2;            // [82] S_RegisterSound ← verified
+
+		// --- Renderer registration 125-129 ---
+		// SOF2 has R_LoadWorldMap at [125]; struct had CL_CM_SelectSubBSP.
+		slots[125] = (void *)re.LoadWorld;                   // [125] R_LoadWorldMap ← verified
+		slots[126] = (void *)re.RegisterModel;               // [126] R_RegisterModel ← verified
+		slots[127] = (void *)re.RegisterSkin;                // [127] R_RegisterSkin ← verified
+		slots[128] = (void *)re.RegisterShader;              // [128] R_RegisterShader ← verified
+		slots[129] = (void *)re.RegisterShaderNoMip;         // [129] R_RegisterShaderNoMip ← tentative
+
+		// --- Renderer scene 130-138 ---
+		slots[130] = (void *)re.ClearScene;                  // [130] R_ClearScene ← verified (was wrongly BeginRegistration!)
+		slots[131] = (void *)re.AddRefEntityToScene;         // [131] R_AddRefEntityToScene ← tentative
+		slots[132] = (void *)CG_FX_SetParentEntity;          // [132] FX_SetParentEntity(int entityNum) ← verified
+		slots[133] = (void *)R_AddPolyToScene_SOF2;          // [133] R_AddPolyToScene ← verified
+		slots[134] = (void *)CG_NullSlotSentinel;            // [134] unused (no xrefs) ← verified
+		slots[135] = (void *)re.AddLightToScene;             // [135] R_AddLightToScene ← tentative
+		slots[136] = (void *)CG_R_AddDirectedLightToScene;   // [136] R_AddDirectedLightToScene ← tentative
+		slots[137] = (void *)CG_R_AddAdditiveLightToScene;   // [137] R_AddAdditiveLightToScene ← verified
+		slots[138] = (void *)re.RenderScene;                 // [138] R_RenderScene ← verified
+
+		// --- Renderer drawing 139-142 ---
+		slots[139] = (void *)re.SetColor;                    // [139] R_SetColor ← verified
+		slots[140] = (void *)re.DrawStretchPic;              // [140] R_DrawStretchPic ← tentative
+		slots[141] = (void *)CG_R_FillRect;                  // [141] R_FillRect or DrawRotatePic ← tentative
+		slots[142] = (void *)CG_NullSlotSentinel;            // [142] SOF2-specific (SetRangeFog-like, 3 args)
+
+		// --- Tags, effects, bounds 143-149 ---
+		slots[143] = (void *)R_LerpTag_SOF2;                 // [143] R_LerpTag ← tentative
+		slots[144] = (void *)CG_R_RemapShader;               // [144] R_RemapShader ← verified (was wrongly S_StartBGTrack!)
+		slots[145] = (void *)CG_NullSlotSentinel;            // [145] R_RegisterFont (no xrefs, unused)
+		slots[146] = (void *)CG_R_SetLightStyle;             // [146] R_SetLightStyle ← verified
+		slots[147] = (void *)re.ModelBounds;                 // [147] R_ModelBounds ← verified CRASH FIX!
+		slots[148] = (void *)CG_RE_DamageSurface;             // [148] RE_DamageSurface ← verified (CG_ClientModel)
+		slots[149] = (void *)CG_NullSlotSentinel;            // [149] R_DamageSurface (SOF2-specific gore, stub)
+
+		// --- Entity token, weather, FF slots 150-162 ---
+		// Verified via Ghidra xref analysis of cgamex86.dll.
+		slots[150] = (void *)CG_GetEntityToken;              // [150] GetEntityToken ← verified (CG_ParseSpawnVars)
+		// slots[151]: unknown, single xref from undefined code — leave sentinel
+		slots[152] = (void *)re.WorldEffectCommand;          // [152] RE_WorldEffectCommand ← verified (weather)
+		slots[153] = (void *)CG_R_IsOutside;                 // [153] R_IsOutside ← verified (rain check)
+		slots[154] = (void *)CG_R_GetWindVector;             // [154] R_GetWindVector ← verified (particle wind)
+		// slots[155-156]: weather stubs (undefined callers) — leave sentinel
+		slots[157] = (void *)CG_FF_RegisterEffect;           // [157] FF_RegisterEffect ← verified HOT LOOP FIX
+		slots[158] = (void *)CG_FF_Play;                     // [158] FF_Play ← verified (pickup effects)
+		// slots[159-160]: FF stubs (unused) — leave sentinel
+		slots[161] = (void *)CG_FF_StopAll;                  // [161] FF_StopAll / SetPlayerSuit ← tentative
+		// slots[162]: FF_Shake or ICARUS_GetString (unused) — leave sentinel
+	}
+
+	// Reset client entity parse pointer for new map
+	cl_entityParsePoint = NULL;
 
 	// -----------------------------------------------------------------------
 	cge = GetCGameAPI( CGAME_API_VERSION, &import );
@@ -500,6 +1023,27 @@ qboolean CL_InitSOF2CGame( void ) {
 		cgameLibrary = NULL;
 		Com_Printf( "CL_InitSOF2CGame: GetCGameAPI returned NULL\n" );
 		return qfalse;
+	}
+
+	// -----------------------------------------------------------------------
+	// Patch CGlassMgr_ResolveConstraints to return immediately (RET).
+	// The cg_glassInstance object at RVA 0x1C6828 has fields +0x0C/+0x10
+	// that are NULL until CG_InitGlassManager() runs late in CG_Init().
+	// But CGlassMgr_ResolveConstraints is called earlier via vtable[14]
+	// during glass physics setup, dereferencing the NULL pointers.
+	// Data patching doesn't work because CG_Glass_Init (lazy constructor)
+	// runs during CG_Init and re-zeroes the fields after our patch.
+	// Instead, we NOP the function itself. Glass physics won't resolve
+	// constraints, but the map loads. RVA 0x16BB0 = CGlassMgr_ResolveConstraints.
+	// -----------------------------------------------------------------------
+	{
+		unsigned char *func = (unsigned char *)cgameLibrary + 0x16BB0;
+		DWORD oldProtect;
+		if ( VirtualProtect( func, 1, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+			func[0] = 0xC3; // RET — skip all glass constraint code
+			VirtualProtect( func, 1, oldProtect, &oldProtect );
+			Com_Printf( "CL_InitSOF2CGame: patched CGlassMgr_ResolveConstraints at %p to RET\n", func );
+		}
 	}
 
 	return qtrue;

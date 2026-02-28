@@ -4229,6 +4229,15 @@ void _UI_KeyEvent( int key, qboolean down )
 				menuKey = (sof2Key > 126 || sof2Key == 9 || sof2Key == 13 || sof2Key == 27) ? 1 : 0;
 			}
 
+			// CRITICAL: Sync shadow keys array NOW, before calling the DLL.
+			// CL_KeyDownEvent already set kg.keys[key].down = qtrue, but the
+			// shadow array (indexed by SOF2 keycodes) hasn't been updated yet.
+			// The DLL checks import.keys_array[sof2Key].down during UI_KeyEvent
+			// to verify the key is actually pressed. Without this sync, the DLL
+			// finds .down=qfalse (stale from last frame) and ignores the click.
+			extern void SyncSOF2ShadowKeys(void);
+			SyncSOF2ShadowKeys();
+
 			// Diagnostic logging (temporary)
 			static int keyLogCount = 0;
 			if ( ++keyLogCount <= 30 ) {

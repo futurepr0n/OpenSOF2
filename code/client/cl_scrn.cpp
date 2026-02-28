@@ -415,58 +415,133 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 
 	re.BeginFrame( stereoFrame );
 
-	qboolean uiFullscreen = _UI_IsFullscreen();
+	// =====================================================================
+	// GHOUL2 SKINNED PLAYER MODEL TEST
+	// =====================================================================
+	{
+		static CGhoul2Info_v testGhoul2;
+		static qhandle_t     testG2Model = 0;
+		static qhandle_t     testSkinHandle = 0;
+		static qboolean      testInit = qfalse;
+		static qboolean      testG2Valid = qfalse;
+		static int           testLogCount = 0;
 
-	// if the menu is going to cover the entire screen, we
-	// don't need to render anything under it
-	if ( !uiFullscreen ) {
-		switch( cls.state ) {
-		default:
-			Com_Error( ERR_FATAL, "SCR_DrawScreenField: bad cls.state" );
-			break;
-		case CA_CINEMATIC:
-			SCR_DrawCinematic();
-			break;
-		case CA_DISCONNECTED:
-			// force menu up — SOF2 main menu is "main" (menus/main.rmf)
-			UI_SetActiveMenu( "main", NULL );
-			break;
-		case CA_CONNECTING:
-		case CA_CHALLENGING:
-		case CA_CONNECTED:
-			// connecting clients will only show the connection dialog
-			UI_DrawConnect( clc.servername, cls.updateInfoString );
-			break;
-		case CA_LOADING:
-		case CA_PRIMED:
-			// draw the game information screen and loading progress
-			CL_CGameRendering( stereoFrame );
-			break;
-		case CA_ACTIVE:
-			if (CL_IsRunningInGameCinematic() || CL_InGameCinematicOnStandBy())
-			{
-				SCR_DrawCinematic();
+		if ( !testInit ) {
+			testInit = qtrue;
+			Cvar_Set( "r_nocull", "1" );
+
+			// Register G2 model
+			const char *modelPath = "models/characters/average_sleeves/average_sleeves.glm";
+			testG2Model = re.RegisterModel( modelPath );
+			Com_Printf( "[G2TEST] RegisterModel('%s') = %d\n", modelPath, testG2Model );
+
+			if ( testG2Model ) {
+				int g2Result = re.G2API_InitGhoul2Model(
+					testGhoul2, modelPath, testG2Model, 0, 0, 0, 0 );
+				Com_Printf( "[G2TEST] InitGhoul2Model result=%d size=%d\n",
+					g2Result, testGhoul2.size() );
+
+				if ( g2Result >= 0 && testGhoul2.size() > 0 ) {
+					testG2Valid = qtrue;
+					re.G2API_SetBoneAnim(
+						&testGhoul2[0], "model_root",
+						0, 30, BONE_ANIM_OVERRIDE_LOOP,
+						1.0f, 0, -1, 150 );
+
+					// Register and apply a skin file
+					testSkinHandle = re.RegisterSkin(
+						"models/characters/average_sleeves/model_default.skin" );
+					Com_Printf( "[G2TEST] RegisterSkin result = %d\n", testSkinHandle );
+					if ( testSkinHandle ) {
+						re.G2API_SetSkin( &testGhoul2[0], testSkinHandle, testSkinHandle );
+						Com_Printf( "[G2TEST] SetSkin applied (handle=%d)\n", testSkinHandle );
+					}
+				}
 			}
-			else
-			{
-				CL_CGameRendering( stereoFrame );
-			}
-			break;
 		}
-	}
 
-	re.ProcessDissolve();
-	// draw downloading progress bar
+		// G2 time base
+		re.G2API_SetTime( cls.realtime, 0 );
 
-	// the menu draws next
-	_UI_Refresh( cls.realtime );
+		// Build refdef
+		refdef_t rd;
+		memset( &rd, 0, sizeof( rd ) );
+		rd.rdflags = RDF_NOWORLDMODEL;
+		rd.x = 0;  rd.y = 0;
+		rd.width = cls.glconfig.vidWidth;
+		rd.height = cls.glconfig.vidHeight;
+		rd.fov_x = 90;
+		rd.fov_y = 73.74f;
+		rd.time = cls.realtime;
+		AxisClear( rd.viewaxis );
 
-	// console draws next
-	Con_DrawConsole ();
+		re.ClearScene();
 
-	// debug graph can be drawn on top of anything
-	if ( cl_debuggraph->integer || cl_timegraph->integer ) {
-		SCR_DrawDebugGraph ();
+		// Black background
+		{
+			float black[4] = { 0, 0, 0, 1 };
+			re.SetColor( black );
+			re.DrawStretchPic( 0, 0, 640, 480, 0, 0, 0, 0, cls.whiteShader );
+			re.SetColor( NULL );
+		}
+
+		// Add bright lights around the model
+		{
+			vec3_t lightPos;
+			// Key light: front-left, above
+			lightPos[0] = 60; lightPos[1] = -50; lightPos[2] = 40;
+			re.AddLightToScene( lightPos, 500, 1.0f, 1.0f, 0.9f );
+			// Fill light: front-right
+			lightPos[0] = 60; lightPos[1] = 50; lightPos[2] = 10;
+			re.AddLightToScene( lightPos, 400, 0.6f, 0.6f, 0.7f );
+		}
+
+		// G2 player model (centered)
+		if ( testG2Valid ) {
+			refEntity_t ent;
+			memset( &ent, 0, sizeof( ent ) );
+			ent.reType = RT_MODEL;
+			ent.hModel = testG2Model;
+			ent.ghoul2 = &testGhoul2;
+
+			vec3_t angles;
+			VectorSet( angles, 0, (float)( cls.realtime / 15.0f ), 0 );
+			AnglesToAxis( angles, ent.axis );
+			VectorCopy( angles, ent.angles );
+
+			ent.origin[0] = 100;
+			ent.origin[1] = 0;
+			ent.origin[2] = -30;
+			VectorCopy( ent.origin, ent.oldorigin );
+
+			ent.modelScale[0] = 1.0f;
+			ent.modelScale[1] = 1.0f;
+			ent.modelScale[2] = 1.0f;
+
+			ent.renderfx = RF_NOSHADOW;
+			ent.customSkin = testSkinHandle;
+			VectorCopy( ent.origin, ent.lightingOrigin );
+
+			re.AddRefEntityToScene( &ent );
+		}
+
+		re.RenderScene( &rd );
+
+		if ( testLogCount < 5 ) {
+			Com_Printf( "[G2TEST] frame %d: g2=%d g2valid=%d time=%d\n",
+				testLogCount, testG2Model, testG2Valid, cls.realtime );
+			testLogCount++;
+		}
+
+		// Auto-screenshot at frame 60
+		{
+			static int frameCount = 0;
+			frameCount++;
+			if ( frameCount == 60 ) {
+				Cbuf_ExecuteText( EXEC_NOW, "screenshot\n" );
+				Com_Printf( "[G2TEST] Screenshot taken at frame %d\n", frameCount );
+			}
+		}
 	}
 }
 

@@ -142,17 +142,23 @@ Also called by Com_Error
 */
 void CL_FlushMemory( void ) {
 
+	Com_Printf("[DBG] CL_FlushMemory: enter\n");
+
 	// clear sounds (moved higher up within this func to avoid the odd sound stutter)
 	S_DisableSounds();
+	Com_Printf("[DBG] CL_FlushMemory: S_DisableSounds done\n");
 
 	// unload the old VM
 	CL_ShutdownCGame();
+	Com_Printf("[DBG] CL_FlushMemory: CL_ShutdownCGame done\n");
 
 	CL_ShutdownUI();
+	Com_Printf("[DBG] CL_FlushMemory: CL_ShutdownUI done\n");
 
 	if ( re.Shutdown ) {
 		re.Shutdown( qfalse, qfalse );		// don't destroy window or context
 	}
+	Com_Printf("[DBG] CL_FlushMemory: re.Shutdown done\n");
 
 	//rwwFIXMEFIXME: The game server appears to continue running, so clearing common bsp data causes crashing and other bad things
 	/*
@@ -161,6 +167,7 @@ void CL_FlushMemory( void ) {
 
 	cls.soundRegistered = qfalse;
 	cls.rendererStarted = qfalse;
+	Com_Printf("[DBG] CL_FlushMemory: exit\n");
 }
 
 /*
@@ -191,19 +198,34 @@ void CL_MapLoading( void ) {
 	} else {
 		// clear nextmap so the cinematic shutdown doesn't execute it
 		Cvar_Set( "nextmap", "" );
+		Com_Printf("[DBG] CL_MapLoading: calling CL_Disconnect\n");
 		CL_Disconnect();
+		Com_Printf("[DBG] CL_MapLoading: CL_Disconnect done\n");
 		Q_strncpyz( cls.servername, "localhost", sizeof(cls.servername) );
 		cls.state = CA_CHALLENGING;		// so the connect screen is drawn
 		Key_SetCatcher( 0 );
-		SCR_UpdateScreen();
+		Com_Printf("[DBG] CL_MapLoading: skipping SCR_UpdateScreen (SOF2 UI crash workaround)\n");
+		// SOF2 HACK: Skip SCR_UpdateScreen during map loading.
+		// The SOF2 Menusx86.dll crashes when UI_SetActiveMenu(hide) is called
+		// (null ptr at 0x40008963), leaving UI state corrupted. SCR_UpdateScreen
+		// then tries to draw via the corrupted UI and segfaults.
+		// Skipping this just means no "loading" screen is shown — the map still loads.
+		// SCR_UpdateScreen();
 		clc.connectTime = -RETRANSMIT_TIMEOUT;
+		Com_Printf("[DBG] CL_MapLoading: calling NET_StringToAdr\n");
 		NET_StringToAdr( cls.servername, &clc.serverAddress);
 		// we don't need a challenge on the localhost
 
-		CL_CheckForResend();
+		// SOF2 HACK: Skip CL_CheckForResend for localhost.
+		// CL_CheckForResend → UI_UpdateConnectionString → UI_UpdateScreen →
+		// SCR_UpdateScreen → draws through corrupted Menusx86.dll → crash.
+		// For localhost SP, the server is in-process and doesn't need packet resending.
+		fprintf(stderr, "[DBG] CL_MapLoading: skipping CL_CheckForResend (SOF2 localhost)\n");
 	}
 
+	fprintf(stderr, "[DBG] CL_MapLoading: calling CL_FlushMemory\n");
 	CL_FlushMemory();
+	fprintf(stderr, "[DBG] CL_MapLoading: done\n");
 }
 
 /*

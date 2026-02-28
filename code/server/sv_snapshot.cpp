@@ -271,7 +271,7 @@ static void SV_AddEntToSnapshot( svEntity_t *svEnt, gentity_t *gEnt, snapshotEnt
 		return;
 	}
 
-	eNums->snapshotEntities[ eNums->numSnapshotEntities ] = gEnt->s.number;
+	eNums->snapshotEntities[ eNums->numSnapshotEntities ] = SOF2_ENT_NUMBER(gEnt);
 	eNums->numSnapshotEntities++;
 }
 
@@ -303,10 +303,10 @@ qboolean SV_PlayerCanSeeEnt( gentity_t *ent, int sightLevel )
 			float dot = 0.25f;//1.0f;
 			float range = sv_sightRangeForLevel[sightLevel];
 
-			VectorSubtract( ent->currentOrigin, viewOrg, dir2Ent );
+			VectorSubtract( SOF2_ENT_CURORIGIN(ent), viewOrg, dir2Ent );
 			float entDist = VectorNormalize( dir2Ent );
 
-			if ( (ent->s.eFlags&EF_FORCE_VISIBLE) )
+			if ( (SOF2_ENT_EFLAGS(ent)&EF_FORCE_VISIBLE) )
 			{//no dist check on them?
 			}
 			else
@@ -382,31 +382,34 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 	for ( e = 0 ; e < MAX_GENTITIES ; e++ ) {
 		ent = SV_GentityNum(e);
 
-		if (!ent->inuse) {
-			continue;
+		if (!ent) {
+			continue;	// SOF2: empty pointer table slot
 		}
 
-		if (ent->s.eFlags & EF_PERMANENT)
+		if (SOF2_ENT_EFLAGS(ent) & EF_PERMANENT)
 		{	// he's permanent, so don't send him down!
 			continue;
 		}
 
-		if (ent->s.number != e) {
+		if (SOF2_ENT_NUMBER(ent) != e) {
 			Com_DPrintf ("FIXING ENT->S.NUMBER!!!\n");
-			ent->s.number = e;
+			SOF2_ENT_NUMBER(ent) = e;
 		}
 
 		// never send entities that aren't linked in
-		if ( !ent->linked ) {
+		if ( !SOF2_ENT_LINKED(ent) ) {
 			continue;
 		}
 
 		// entities can be flagged to explicitly not be sent to the client
-		if ( ent->svFlags & SVF_NOCLIENT ) {
+		if ( SOF2_ENT_SVFLAGS(ent) & SVF_NOCLIENT ) {
 			continue;
 		}
 
 		svEnt = SV_SvEntityForGentity( ent );
+		if ( !svEnt ) {
+			continue;
+		}
 
 		// don't double add an entity through portals
 		if ( svEnt->snapshotCounter == sv.snapshotCounter ) {
@@ -414,18 +417,18 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 		}
 
 		// broadcast entities are always sent, and so is the main player so we don't see noclip weirdness
-		if ( ent->svFlags & SVF_BROADCAST || !e) {
+		if ( SOF2_ENT_SVFLAGS(ent) & SVF_BROADCAST || !e) {
 			SV_AddEntToSnapshot( svEnt, ent, eNums );
 			continue;
 		}
 
-#ifndef JK2_MODE
+#if 0 // SOF2: isPortalEnt doesn't exist in SOF2's entityState_t
 		if (ent->s.isPortalEnt)
 		{ //rww - portal entities are always sent as well
 			SV_AddEntToSnapshot( svEnt, ent, eNums );
 			continue;
 		}
-#endif // !JK2_MODE
+#endif
 
 #ifndef JK2_MODE
 		if ( sightOn )
@@ -484,8 +487,8 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 		SV_AddEntToSnapshot( svEnt, ent, eNums );
 
 		// if its a portal entity, add everything visible from its camera position
-		if ( ent->svFlags & SVF_PORTAL ) {
-			SV_AddEntitiesVisibleFromPoint( ent->s.origin2, frame, eNums, qtrue );
+		if ( SOF2_ENT_SVFLAGS(ent) & SVF_PORTAL ) {
+			SV_AddEntitiesVisibleFromPoint( SOF2_ENT_S_ORIGIN2(ent), frame, eNums, qtrue );
 		}
 	}
 }
@@ -528,51 +531,52 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	}
 
 	// grab the current playerState_t
-	frame->ps = *clent->client;
-
-	// this stops the main client entity playerstate from being sent across, which has the effect of breaking
-	// looping sounds for the main client. So I took it out.
-/*	{
-		int							clientNum;
-		svEntity_t					*svEnt;
-		clientNum = frame->ps.clientNum;
-		if ( clientNum < 0 || clientNum >= MAX_GENTITIES ) {
-			Com_Error( ERR_DROP, "SV_SvEntityForGentity: bad gEnt" );
+	// SOF2: client data is in a separate array passed via LocateGameData (not embedded in CEntity)
+	{
+		int clientNum = client - svs.clients;
+		playerState_t *ps = SV_GameClientNum( clientNum );
+		if ( !ps ) {
+			return frame;
 		}
-		svEnt = &sv.svEntities[ clientNum ];
-		// never send client's own entity, because it can
-		// be regenerated from the playerstate
-		svEnt->snapshotCounter = sv.snapshotCounter;
+		frame->ps = *ps;
 	}
-*/
-	// find the client's viewpoint
 
+	// find the client's viewpoint
 	//if in camera mode use camera position instead
 	if ( VM_Call( CG_CAMERA_POS, org))
 	{
-		//org[2] += clent->client->viewheight;
+		// camera mode
 	}
 	else
 	{
-		VectorCopy( clent->client->origin, org );
-		org[2] += clent->client->viewheight;
+		int clientNum = client - svs.clients;
+		playerState_t *clPS = SV_GameClientNum( clientNum );
+		if ( clPS ) {
+			VectorCopy( clPS->origin, org );
+			org[2] += clPS->viewheight;
 
-//============
-		// need to account for lean, or areaportal doors don't draw properly... -slc
-		if (frame->ps.leanofs != 0)
-		{
-			vec3_t	right;
-			//add leaning offset
-			vec3_t v3ViewAngles;
-			VectorCopy(clent->client->viewangles, v3ViewAngles);
-			v3ViewAngles[2] += (float)frame->ps.leanofs/2;
-			AngleVectors(v3ViewAngles, NULL, right, NULL);
-			VectorMA(org, (float)frame->ps.leanofs, right, org);
+			// need to account for lean, or areaportal doors don't draw properly
+			if (frame->ps.leanofs != 0)
+			{
+				vec3_t	right;
+				vec3_t v3ViewAngles;
+				VectorCopy(clPS->viewangles, v3ViewAngles);
+				v3ViewAngles[2] += (float)frame->ps.leanofs/2;
+				AngleVectors(v3ViewAngles, NULL, right, NULL);
+				VectorMA(org, (float)frame->ps.leanofs, right, org);
+			}
+		} else {
+			VectorClear( org );
 		}
-//============
 	}
 	VectorCopy( org, frame->ps.serverViewOrg );
-	VectorCopy( org, clent->client->serverViewOrg );
+	{
+		int clientNum = client - svs.clients;
+		playerState_t *clPS = SV_GameClientNum( clientNum );
+		if ( clPS ) {
+			VectorCopy( org, clPS->serverViewOrg );
+		}
+	}
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints
@@ -615,8 +619,10 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	frame->first_entity = svs.nextSnapshotEntities;
 	for ( i = 0 ; i < entityNumbers.numSnapshotEntities ; i++ ) {
 		ent = SV_GentityNum(entityNumbers.snapshotEntities[i]);
+		if (!ent) continue;	// SOF2: empty pointer table slot
 		state = &svs.snapshotEntities[svs.nextSnapshotEntities % svs.numSnapshotEntities];
-		*state = ent->s;
+		// SOF2: entityState_t is 256 bytes at CEntity offset 8
+		memcpy( state, SOF2_ENT_S_PTR(ent), SOF2_ENTITYSTATE_SIZE );
 		svs.nextSnapshotEntities++;
 		frame->num_entities++;
 	}
@@ -672,7 +678,7 @@ void SV_SendClientSnapshot( client_t *client ) {
 
 	// bots need to have their snapshots build, but
 	// the query them directly without needing to be sent
-	if ( client->gentity && client->gentity->svFlags & SVF_BOT ) {
+	if ( client->gentity && SOF2_ENT_SVFLAGS(client->gentity) & SVF_BOT ) {
 		return;
 	}
 

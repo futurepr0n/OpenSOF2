@@ -519,19 +519,25 @@ Ghoul2 Insert End
 
 #define MAX_G2_COLLISIONS 16
 // a trace is returned when a box is swept through the world
+// SOF2 layout: 0x44 byte header + 0x400 G2CollisionMap = 0x444 total
 typedef struct {
-	qboolean	allsolid;	// if true, plane is not valid
-	qboolean	startsolid;	// if true, the initial point was in a solid area
-	float		fraction;	// time completed, 1.0 = didn't hit anything
-	vec3_t		endpos;		// final position
-	cplane_t	plane;		// surface normal at impact, transformed to world space
-	int			surfaceFlags;	// surface hit
-	int			contents;	// contents on other side of surface hit
-	int			entityNum;	// entity the contacted sirface is a part of
+	byte		allsolid;		// 0x00: if true, plane is not valid
+	byte		startsolid;		// 0x01: if true, the initial point was in a solid area
+	byte		_pad[2];		// 0x02: alignment padding
+	float		fraction;		// 0x04: time completed, 1.0 = didn't hit anything
+	int			shaderNum;		// 0x08: SOF2: shader index of hit brush surface
+	vec3_t		endpos;			// 0x0C: final position
+	cplane_t	plane;			// 0x18: surface normal at impact, transformed to world space
+	int			sideNum;		// 0x2C: SOF2: brush side index (-1 if none)
+	int			surfaceFlags;	// 0x30: surface hit
+	int			contents;		// 0x34: contents on other side of surface hit
+	int			entityNum;		// 0x38: entity the contacted surface is a part of
+	int			numG2Collisions;// 0x3C: SOF2: count of Ghoul2 collision records
+	int			_reserved;		// 0x40: SOF2: reserved/padding
 /*
 Ghoul2 Insert Start
 */
-	CCollisionRecord G2CollisionMap[MAX_G2_COLLISIONS];	// map that describes all of the parts of ghoul2 models that got hit
+	CCollisionRecord G2CollisionMap[MAX_G2_COLLISIONS];	// 0x44: map that describes all of the parts of ghoul2 models that got hit
 /*
 Ghoul2 Insert End
 */
@@ -543,11 +549,14 @@ Ghoul2 Insert End
 		saved_game.write<int8_t>(allsolid);
 		saved_game.write<int8_t>(startsolid);
 		saved_game.write<float>(fraction);
+		saved_game.write<int32_t>(shaderNum);
 		saved_game.write<float>(endpos);
 		saved_game.write<>(plane);
+		saved_game.write<int32_t>(sideNum);
 		saved_game.write<int8_t>(surfaceFlags);
 		saved_game.write<int8_t>(contents);
 		saved_game.write<int8_t>(entityNum);
+		saved_game.write<int32_t>(numG2Collisions);
 		saved_game.write<>(G2CollisionMap);
 	}
 
@@ -557,11 +566,14 @@ Ghoul2 Insert End
 		saved_game.read<int8_t>(allsolid);
 		saved_game.read<int8_t>(startsolid);
 		saved_game.read<float>(fraction);
+		saved_game.read<int32_t>(shaderNum);
 		saved_game.read<float>(endpos);
 		saved_game.read<>(plane);
+		saved_game.read<int32_t>(sideNum);
 		saved_game.read<int8_t>(surfaceFlags);
 		saved_game.read<int8_t>(contents);
 		saved_game.read<int8_t>(entityNum);
+		saved_game.read<int32_t>(numG2Collisions);
 		saved_game.read<>(G2CollisionMap);
 	}
 } trace_t;
@@ -660,7 +672,7 @@ Ghoul2 Insert End
 #ifdef JK2_MODE
 #define MAX_CONFIGSTRINGS (1024)
 #else
-#define	MAX_CONFIGSTRINGS	1300//1024 //rww - I had to up this for terrains
+#define	MAX_CONFIGSTRINGS	2048 // SOF2: original binary checks 0x7FF (2047 max index)
 #endif // JK2_MODE
 
 // these are the only configstrings that the system reserves, all the

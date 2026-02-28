@@ -286,6 +286,18 @@ void NORETURN QDECL Com_Error( int code, const char *fmt, ... ) {
 	static int	errorCount;
 	int			currentTime;
 
+	// DEBUG: Log ALL Com_Error calls to stderr
+	{
+		va_list dbg_args;
+		char dbg_msg[4096];
+		va_start(dbg_args, fmt);
+		Q_vsnprintf(dbg_msg, sizeof(dbg_msg), fmt, dbg_args);
+		va_end(dbg_args);
+		const char *codeStr = (code == 0) ? "ERR_FATAL" : (code == 1) ? "ERR_DROP" : (code == 2) ? "ERR_DISCONNECT" : "ERR_UNKNOWN";
+		fprintf(stderr, "[COM_ERROR] code=%d (%s) msg='%s'\n", code, codeStr, dbg_msg);
+		fflush(stderr);
+	}
+
 	if ( com_errorEntered ) {
 		Sys_Error( "recursive error after: %s", com_errorMessage );
 	}

@@ -146,18 +146,19 @@ void SV_CreateBaseline( void ) {
 
 	for ( entnum = 0; entnum < MAX_GENTITIES ; entnum++ ) {
 		svent = SV_GentityNum(entnum);
-		if (!svent->inuse) {
+		if (!svent) {
+			continue;	// SOF2: empty pointer table slot
+		}
+		if (!SOF2_ENT_LINKED(svent)) {
 			continue;
 		}
-		if (!svent->linked) {
-			continue;
-		}
-		svent->s.number = entnum;
+		SOF2_ENT_NUMBER(svent) = entnum;
 
 		//
 		// take current state as baseline
+		// SOF2: entityState_t is 256 bytes at offset 8, not JKA's 272-byte struct at offset 0
 		//
-		sv.svEntities[entnum].baseline = svent->s;
+		memcpy( &sv.svEntities[entnum].baseline, SOF2_ENT_S_PTR(svent), SOF2_ENTITYSTATE_SIZE );
 	}
 }
 
@@ -219,16 +220,21 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 	}
 
 	// don't let sound stutter and dump all stuff on the hunk
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling CL_MapLoading\n");
 	CL_MapLoading();
+	fprintf(stderr, "[DBG] SV_SpawnServer: CL_MapLoading done\n");
 
 	if (!CM_SameMap(server))
 	{ //rww - only clear if not loading the same map
+		fprintf(stderr, "[DBG] SV_SpawnServer: calling CM_ClearMap\n");
 		CM_ClearMap();
+		fprintf(stderr, "[DBG] SV_SpawnServer: CM_ClearMap done\n");
 	}
 
 	// Miniheap never changes sizes, so I just put it really early in mem.
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling G2VertSpaceServer->ResetHeap\n");
 	G2VertSpaceServer->ResetHeap();
-
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling Hunk_Clear\n");
 	Hunk_Clear();
 
 	// wipe the entire per-level structure
@@ -243,43 +249,28 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 	// Collect all the small allocations done by the cvar system
 	// This frees, then allocates. Make it the last thing before other
 	// allocations begin!
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling Cvar_Defrag\n");
 	Cvar_Defrag();
 
-/*
-		This is useful for debugging memory fragmentation.  Please don't
-	   remove it.
-*/
-
 	// init client structures and svs.numSnapshotEntities
-	// This is moved down quite a bit, but should be safe. And keeps
-	// svs.clients right at the beginning of memory
 	if ( !Cvar_VariableIntegerValue("sv_running") ) {
+		fprintf(stderr, "[DBG] SV_SpawnServer: calling SV_Startup\n");
 		SV_Startup();
 	}
 
- 	// clear out those shaders, images and Models
-	/*R_InitImages();
-	R_InitShaders();
-	R_ModelInit();*/
-
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling re.SVModelInit\n");
 	re.SVModelInit();
 
 	// allocate the snapshot entities
+	fprintf(stderr, "[DBG] SV_SpawnServer: allocating snapshot entities\n");
 	svs.snapshotEntities = (entityState_t *) Z_Malloc (sizeof(entityState_t)*svs.numSnapshotEntities, TAG_CLIENTS, qtrue );
 
 	Music_SetLevelName(server);
 
-	// toggle the server bit so clients can detect that a
-	// server has changed
-//!@	svs.snapFlagServerBit ^= SNAPFLAG_SERVERCOUNT;
-
-	// set nextmap to the same map, but it may be overriden
-	// by the game startup or another console command
 	Cvar_Set( "nextmap", va("map %s", server) );
 
-
 	memset (&sv, 0, sizeof(sv));
-
+	sv.mLocalSubBSPIndex = -1;	// SOF2: -1 = use main BSP entity string (not sub-BSP)
 
 	for ( i = 0 ; i < MAX_CONFIGSTRINGS ; i++ ) {
 		sv.configstrings[i] = CopyString("");
@@ -288,40 +279,44 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 	sv.time = 1000;
 	re.G2API_SetTime(sv.time,G2T_SV_TIME);
 
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling CM_LoadMap maps/%s.bsp\n", server);
 	CM_LoadMap( va("maps/%s.bsp", server), qfalse, &checksum, qfalse );
+	fprintf(stderr, "[DBG] SV_SpawnServer: CM_LoadMap done, checksum=%d\n", checksum);
 
-	// set serverinfo visible name
 	Cvar_Set( "mapname", server );
-
 	Cvar_Set( "sv_mapChecksum", va("%i",checksum) );
 
-	// serverid should be different each time
 	sv.serverId = com_frameTime;
 	Cvar_Set( "sv_serverid", va("%i", sv.serverId ) );
 
-	// clear physics interaction links
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling SV_ClearWorld\n");
 	SV_ClearWorld ();
+	fprintf(stderr, "[DBG] SV_SpawnServer: SV_ClearWorld done\n");
 
-	// media configstring setting should be done during
-	// the loading stage, so connected clients don't have
-	// to load during actual gameplay
 	sv.state = SS_LOADING;
 
-	// load and spawn all other entities
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling SV_InitGameProgs\n");
 	SV_InitGameProgs();
+	fprintf(stderr, "[DBG] SV_SpawnServer: SV_InitGameProgs done\n");
 
 	// run a few frames to allow everything to settle
 	for ( i = 0 ;i < 4 ; i++ ) {
+		fprintf(stderr, "[DBG] SV_SpawnServer: ge->RunFrame(%d) iteration %d\n", sv.time, i);
 		ge->RunFrame( sv.time );
 		sv.time += 100;
 		re.G2API_SetTime(sv.time,G2T_SV_TIME);
 	}
+	fprintf(stderr, "[DBG] SV_SpawnServer: RunFrame loop done\n");
 #ifndef JK2_MODE
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling ge->ConnectNavs\n");
 	ge->ConnectNavs();  // SOF2: ConnectNavs(void) — no args
+	fprintf(stderr, "[DBG] SV_SpawnServer: ConnectNavs done\n");
 #endif
 
 	// create a baseline for more efficient communications
+	fprintf(stderr, "[DBG] SV_SpawnServer: calling SV_CreateBaseline\n");
 	SV_CreateBaseline ();
+	fprintf(stderr, "[DBG] SV_SpawnServer: SV_CreateBaseline done\n");
 
 	for (i=0 ; i<1 ; i++) {
 		// clear all time counters, because we have reset sv.time

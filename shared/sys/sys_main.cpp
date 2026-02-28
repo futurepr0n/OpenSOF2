@@ -240,13 +240,19 @@ void NORETURN QDECL Sys_Error( const char *error, ... )
 	Q_vsnprintf (string, sizeof(string), error, argptr);
 	va_end (argptr);
 
+	fprintf(stderr, "[SYS_ERROR] '%s'\n", string);
+	fflush(stderr);
+
 	Sys_Print( string );
 
 	// Only print Sys_ErrorDialog for client binary. The dedicated
 	// server binary is meant to be a command line program so you would
 	// expect to see the error printed.
 #if !defined(DEDICATED)
-	Sys_ErrorDialog( string );
+	// TEMP: Skip error dialog during development to avoid blocking process
+	//Sys_ErrorDialog( string );
+	fprintf(stderr, "[SYS_ERROR] Skipping error dialog, exiting immediately\n");
+	fflush(stderr);
 #endif
 
 	Sys_Exit( 3 );
