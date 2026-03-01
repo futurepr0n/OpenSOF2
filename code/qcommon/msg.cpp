@@ -948,85 +948,56 @@ plyer_state_t communication
 // using the stringizing operator to save typing...
 #define	PSF(x) #x,offsetof(playerState_t, x)
 
+// SOF2 playerState field table — 45 entries, verified from SoF2.exe's
+// playerStateFields[] data at 0x100e9fe8 (field offsets and bit counts).
+// Field order matches the original binary exactly.
 static const netField_t	playerStateFields[] =
 {
-{ PSF(commandTime), 32 },
-{ PSF(pm_type), 8 },
-{ PSF(bobCycle), 8 },
-
-#ifdef JK2_MODE
-{ PSF(pm_flags), 17 },
-#else
-{ PSF(pm_flags), 32 },
-#endif // JK2_MODE
-
-{ PSF(pm_time), -16 },
-{ PSF(origin[0]), 0 },
-{ PSF(origin[1]), 0 },
-{ PSF(origin[2]), 0 },
-{ PSF(velocity[0]), 0 },
-{ PSF(velocity[1]), 0 },
-{ PSF(velocity[2]), 0 },
-{ PSF(weaponTime), -16 },
-{ PSF(weaponChargeTime), 32 }, //? really need 32 bits??
-{ PSF(gravity), 16 },
-{ PSF(leanofs), -8 },
-{ PSF(friction), 16 },
-{ PSF(speed), 16 },
-{ PSF(delta_angles[0]), 16 },
-{ PSF(delta_angles[1]), 16 },
-{ PSF(delta_angles[2]), 16 },
-{ PSF(groundEntityNum), GENTITYNUM_BITS },
-//{ PSF(animationTimer), 16 },
-{ PSF(legsAnim), 16 },
-{ PSF(torsoAnim), 16 },
-{ PSF(movementDir), 4 },
-{ PSF(eFlags), 32 },
-{ PSF(eventSequence), 16 },
-{ PSF(events[0]), 8 },
-{ PSF(events[1]), 8 },
-{ PSF(eventParms[0]), -9 },
-{ PSF(eventParms[1]), -9 },
-{ PSF(externalEvent), 8 },
-{ PSF(externalEventParm), 8 },
-{ PSF(clientNum), 32 },
-{ PSF(weapon), 5 },
-{ PSF(weaponstate),	  4 },
-{ PSF(batteryCharge),	16 },
-{ PSF(viewangles[0]), 0 },
-{ PSF(viewangles[1]), 0 },
-{ PSF(viewangles[2]), 0 },
-{ PSF(viewheight), -8 },
-{ PSF(damageEvent), 8 },
-{ PSF(damageYaw), 8 },
-{ PSF(damagePitch), -8 },
-{ PSF(damageCount), 8 },
-#ifdef JK2_MODE
-{ PSF(saberColor), 8 },
-{ PSF(saberActive), 8 },
-{ PSF(saberLength), 32 },
-{ PSF(saberLengthMax), 32 },
-#endif
-{ PSF(forcePowersActive), 32},
-{ PSF(saberInFlight), 8 },
-#ifdef JK2_MODE
-{ PSF(vehicleModel), 32 },
-#endif
-
-/*{ PSF(vehicleIndex), 32 },			// WOAH, what do we do with this stuff???
-{ PSF(vehicleArmor), 32 },
-{ PSF(vehicleAngles[0]), 0 },
-{ PSF(vehicleAngles[1]), 0 },
-{ PSF(vehicleAngles[2]), 0 },*/
-
-{ PSF(viewEntity), 32 },
-{ PSF(serverViewOrg[0]), 0 },
-{ PSF(serverViewOrg[1]), 0 },
-{ PSF(serverViewOrg[2]), 0 },
-
-#ifndef JK2_MODE
-{ PSF(forceRageRecoveryTime), 32 },
-#endif // !JK2_MODE
+{ PSF(commandTime), 32 },			// entry 0:  offset 0x000
+{ PSF(pm_type), 8 },				// entry 1:  offset 0x004
+{ PSF(bobCycle), 8 },				// entry 2:  offset 0x008
+{ PSF(pm_flags), 16 },				// entry 3:  offset 0x00C
+{ PSF(pm_time), -16 },				// entry 4:  offset 0x010
+{ PSF(origin[0]), 0 },				// entry 5:  offset 0x014
+{ PSF(origin[1]), 0 },				// entry 6:  offset 0x018
+{ PSF(origin[2]), 0 },				// entry 7:  offset 0x01C
+{ PSF(velocity[0]), 0 },			// entry 8:  offset 0x02C
+{ PSF(velocity[1]), 0 },			// entry 9:  offset 0x030
+{ PSF(velocity[2]), 0 },			// entry 10: offset 0x034
+{ PSF(weaponTime), -16 },			// entry 11: offset 0x03C
+{ PSF(gravity), 16 },				// entry 12: offset 0x040
+{ PSF(leanOffset), -6 },			// entry 13: offset 0x044 (SOF2-specific)
+{ PSF(pronePitch), 16 },			// entry 14: offset 0x048 (SOF2-specific)
+{ PSF(speed), 16 },					// entry 15: offset 0x04C
+{ PSF(delta_angles[0]), 16 },		// entry 16: offset 0x050
+{ PSF(delta_angles[1]), 16 },		// entry 17: offset 0x054
+{ PSF(delta_angles[2]), 16 },		// entry 18: offset 0x058
+{ PSF(groundEntityNum), GENTITYNUM_BITS },	// entry 19: offset 0x05C
+{ PSF(legsTimer), 8 },				// entry 20: offset 0x060
+{ PSF(torsoTimer), 12 },			// entry 21: offset 0x068
+{ PSF(legsAnim), 8 },				// entry 22: offset 0x064
+{ PSF(torsoAnim), 8 },				// entry 23: offset 0x06C
+{ PSF(movementDir), 4 },			// entry 24: offset 0x070
+{ PSF(eFlags), 24 },				// entry 25: offset 0x074 (24 bits, not 16!)
+{ PSF(eventSequence), 16 },			// entry 26: offset 0x078
+{ PSF(events[0]), 8 },				// entry 27: offset 0x07C
+{ PSF(events[1]), 8 },				// entry 28: offset 0x080
+{ PSF(eventParms[0]), 8 },			// entry 29: offset 0x08C
+{ PSF(eventParms[1]), 8 },			// entry 30: offset 0x090
+{ PSF(externalEvent), 10 },			// entry 31: offset 0x09C
+{ PSF(externalEventParm), -24 },	// entry 32: offset 0x0A0 (-24 bits, signed!)
+{ PSF(clientNum), 8 },				// entry 33: offset 0x0A8
+{ PSF(weapon), 5 },					// entry 34: offset 0x0AC
+{ PSF(viewangles[0]), 0 },			// entry 35: offset 0x0B0
+{ PSF(viewangles[1]), 0 },			// entry 36: offset 0x0B4
+{ PSF(viewangles[2]), 0 },			// entry 37: offset 0x0B8
+{ PSF(viewheight), -8 },			// entry 38: offset 0x0BC
+{ PSF(damageEvent), 8 },			// entry 39: offset 0x0C0
+{ PSF(damageYaw), 8 },				// entry 40: offset 0x0C4
+{ PSF(damagePitch), 8 },			// entry 41: offset 0x0C8
+{ PSF(damageCount), 8 },			// entry 42: offset 0x0CC
+{ PSF(loopSound), 16 },			// entry 43: offset 0x154
+{ PSF(generic1), 8 },				// entry 44: offset 0x150
 };
 
 /*
@@ -1035,13 +1006,94 @@ MSG_WriteDeltaPlayerstate
 
 =============
 */
+// -----------------------------------------------------------------------
+// G2 Bone delta encoding — SOF2 playerState_t includes 128 bytes of
+// Ghoul2 bone data at offset 0x158. This is delta-encoded as part of
+// the playerState message.
+//
+// Bone layout (128 bytes):
+//   +0x00: padding (4 bytes)
+//   +0x04: flags byte
+//   +0x08: boneIndex (int)
+//   +0x0C: bone matrix data (60 bytes)
+//   +0x48: short field
+//   +0x4C: int field
+//   +0x50: int field
+//   +0x54: arrayCount (int)
+//   +0x58: array data (up to remaining bytes)
+// -----------------------------------------------------------------------
+
+static int g2_boneEnabled = 1;
+
+void G2_InitBone( unsigned char *bone ) {
+	memset( bone, 0, 128 );
+	bone[4] = 0;                                    // flags
+	*(int *)(bone + 8) = -1;                        // boneIndex = 0xFFFFFFFF
+	*(short *)(bone + 0x48) = 0;
+	*(int *)(bone + 0x4C) = 0;
+	*(int *)(bone + 0x50) = -1;
+	*(int *)(bone + 0x54) = 0;                      // array count
+}
+
+static void G2_WriteBone( const unsigned char *bone, msg_t *msg, const unsigned char *prevBone ) {
+	int i;
+	if ( !g2_boneEnabled ) {
+		MSG_WriteBits( msg, 0, 1 ); // no bone data
+		return;
+	}
+
+	// Check if bone data changed
+	if ( memcmp( bone, prevBone, 128 ) == 0 ) {
+		MSG_WriteBits( msg, 0, 1 ); // no change
+		return;
+	}
+
+	MSG_WriteBits( msg, 1, 1 ); // bone data changed
+
+	// Write all 128 bytes as 32 ints (simple but functional delta encoding)
+	const int *src = (const int *)bone;
+	const int *prev = (const int *)prevBone;
+	for ( i = 0; i < 32; i++ ) {
+		if ( src[i] != prev[i] ) {
+			MSG_WriteBits( msg, 1, 1 );
+			MSG_WriteBits( msg, src[i], 32 );
+		} else {
+			MSG_WriteBits( msg, 0, 1 );
+		}
+	}
+}
+
+static void G2_ReadBone( unsigned char *bone, msg_t *msg, const unsigned char *prevBone ) {
+	int i;
+	if ( !g2_boneEnabled ) {
+		if ( MSG_ReadBits( msg, 1 ) ) {
+			// Shouldn't happen, but consume the bit
+		}
+		return;
+	}
+
+	if ( !MSG_ReadBits( msg, 1 ) ) {
+		// no change — bone already copied via *to = *from
+		return;
+	}
+
+	// Read 32 ints of bone data
+	int *dst = (int *)bone;
+	const int *prev = (const int *)prevBone;
+	for ( i = 0; i < 32; i++ ) {
+		if ( MSG_ReadBits( msg, 1 ) ) {
+			dst[i] = MSG_ReadBits( msg, 32 );
+		} else {
+			dst[i] = prev[i];
+		}
+	}
+}
+
 void MSG_WriteDeltaPlayerstate( msg_t *msg, playerState_t *from, playerState_t *to ) {
 	int				i;
 	playerState_t	dummy;
 	int				statsbits;
 	int				persistantbits;
-	int				ammobits;
-	int				powerupbits;
 	int				numFields;
 	int				c;
 	const netField_t	*field;
@@ -1069,10 +1121,11 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, playerState_t *from, playerState_t *
 	}
 	c = msg->cursize - c;
 
-
 	//
 	// send the arrays
 	//
+
+	// stats
 	statsbits = 0;
 	for (i=0 ; i<MAX_STATS ; i++) {
 		if (to->stats[i] != from->stats[i]) {
@@ -1084,12 +1137,12 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, playerState_t *from, playerState_t *
 		MSG_WriteShort( msg, statsbits );
 		for (i=0 ; i<MAX_STATS ; i++)
 			if (statsbits & (1<<i) )
-				MSG_WriteBits(msg, to->stats[i], 32);
+				MSG_WriteBits(msg, to->stats[i], -16); // signed 16-bit
 	} else {
 		MSG_WriteBits( msg, 0, 1 );	// no change
 	}
 
-
+	// persistant
 	persistantbits = 0;
 	for (i=0 ; i<MAX_PERSISTANT ; i++) {
 		if (to->persistant[i] != from->persistant[i]) {
@@ -1101,69 +1154,13 @@ void MSG_WriteDeltaPlayerstate( msg_t *msg, playerState_t *from, playerState_t *
 		MSG_WriteShort( msg, persistantbits );
 		for (i=0 ; i<MAX_PERSISTANT ; i++)
 			if (persistantbits & (1<<i) )
-				MSG_WriteSShort (msg, to->persistant[i]);
+				MSG_WriteBits(msg, to->persistant[i], 16); // unsigned 16-bit
 	} else {
 		MSG_WriteBits( msg, 0, 1 );	// no change
 	}
 
-
-	ammobits = 0;
-	for (i=0 ; i<MAX_AMMO ; i++) {
-		if (to->ammo[i] != from->ammo[i]) {
-			ammobits |= 1<<i;
-		}
-	}
-	if ( ammobits ) {
-		MSG_WriteBits( msg, 1, 1 );	// changed
-		MSG_WriteShort( msg, ammobits );
-		for (i=0 ; i<MAX_AMMO ; i++)
-			if (ammobits & (1<<i) )
-				MSG_WriteSShort (msg, to->ammo[i]);
-	} else {
-		MSG_WriteBits( msg, 0, 1 );	// no change
-	}
-
-	powerupbits = 0;
-	for (i=0 ; i<MAX_POWERUPS ; i++) {
-		if (to->powerups[i] != from->powerups[i]) {
-			powerupbits |= 1<<i;
-		}
-	}
-	if ( powerupbits ) {
-		MSG_WriteBits( msg, 1, 1 );	// changed
-		MSG_WriteShort( msg, powerupbits );
-		for (i=0 ; i<MAX_POWERUPS ; i++)
-			if (powerupbits & (1<<i) )
-				MSG_WriteLong( msg, to->powerups[i] );
-	} else {
-		MSG_WriteBits( msg, 0, 1 );	// no change
-	}
-
-
-	statsbits = 0;
-	for (i=0 ; i<MAX_INVENTORY ; i++)
-	{
-		if (to->inventory[i] != from->inventory[i])
-		{
-			statsbits |= 1<<i;
-		}
-	}
-	if ( statsbits )
-	{
-		MSG_WriteBits( msg, 1, 1 );	// changed
-		MSG_WriteShort( msg, statsbits );
-		for (i=0 ; i<MAX_INVENTORY ; i++)
-		{
-			if (statsbits & (1<<i) )
-			{
-				MSG_WriteShort (msg, to->inventory[i]);
-			}
-		}
-	}
-	else
-	{
-		MSG_WriteBits( msg, 0, 1 );	// no change
-	}
+	// G2 bone data
+	G2_WriteBone( to->boneData, msg, from->boneData );
 }
 
 
@@ -1224,7 +1221,7 @@ void MSG_ReadDeltaPlayerstate (msg_t *msg, playerState_t *from, playerState_t *t
 		bits = MSG_ReadShort (msg);
 		for (i=0 ; i<MAX_STATS ; i++) {
 			if (bits & (1<<i) ) {
-				to->stats[i] = MSG_ReadBits(msg,32);
+				to->stats[i] = MSG_ReadBits(msg, -16); // signed 16-bit
 			}
 		}
 	}
@@ -1235,43 +1232,13 @@ void MSG_ReadDeltaPlayerstate (msg_t *msg, playerState_t *from, playerState_t *t
 		bits = MSG_ReadShort (msg);
 		for (i=0 ; i<MAX_PERSISTANT ; i++) {
 			if (bits & (1<<i) ) {
-				to->persistant[i] = MSG_ReadSShort(msg);
+				to->persistant[i] = MSG_ReadBits(msg, 16); // unsigned 16-bit
 			}
 		}
 	}
 
-	// parse ammo
-	if ( MSG_ReadBits( msg, 1 ) ) {
-		LOG("PS_AMMO");
-		bits = MSG_ReadShort (msg);
-		for (i=0 ; i<MAX_AMMO ; i++) {
-			if (bits & (1<<i) ) {
-				to->ammo[i] = MSG_ReadSShort(msg);
-			}
-		}
-	}
-
-	// parse powerups
-	if ( MSG_ReadBits( msg, 1 ) ) {
-		LOG("PS_POWERUPS");
-		bits = MSG_ReadShort (msg);
-		for (i=0 ; i<MAX_POWERUPS ; i++) {
-			if (bits & (1<<i) ) {
-				to->powerups[i] = MSG_ReadLong(msg);
-			}
-		}
-	}
-
-	// parse inventory
-	if ( MSG_ReadBits( msg, 1 ) ) {
-		LOG("PS_INVENTORY");
-		bits = MSG_ReadShort (msg);
-		for (i=0 ; i<MAX_INVENTORY ; i++) {
-			if (bits & (1<<i) ) {
-				to->inventory[i] = MSG_ReadShort(msg);
-			}
-		}
-	}
+	// G2 bone data
+	G2_ReadBone( to->boneData, msg, from->boneData );
 
 	if ( print ) {
 		if ( msg->bit == 0 ) {

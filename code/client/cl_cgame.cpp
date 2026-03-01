@@ -80,14 +80,10 @@ static void *Z_Malloc_stub( int size ) {
 // Engine's CL_CM_LoadMap(name, subBSP) has different params; adapt here.
 static void CL_CM_LoadMapWrapper( const char *mapname, int clientLoad, int *checksum ) {
 	int localChecksum = 0;
-	Com_Printf( "[DBG] CL_CM_LoadMapWrapper: map=%s clientLoad=%d checksum=%p\n",
-				mapname ? mapname : "(null)", clientLoad, (void *)checksum );
-	// Guard: if the DLL passes NULL or invalid checksum pointer, use local storage
 	if ( !checksum ) {
 		checksum = &localChecksum;
 	}
 	CM_LoadMap( mapname, (qboolean)(clientLoad != 0), checksum, qfalse );
-	Com_Printf( "[DBG] CL_CM_LoadMapWrapper: done, checksum=%d\n", *checksum );
 }
 
 // slot 96: CL_GetEntityBaseline(entityNum, state*) — wraps CL_GetDefaultState
@@ -278,9 +274,11 @@ static void CG_CM_GetTerrainBounds( vec3_t mins, vec3_t maxs ) {
 }
 
 // ----- Slot 117: G2API_HaveWeGhoul2Models -----
-// The DLL passes CGhoul2Info_v& (pointer to struct with mItem at offset 0)
-static qboolean CG_G2API_HaveWeGhoul2Models( CGhoul2Info_v &ghoul2 ) {
-	return re.G2API_HaveWeGhoul2Models( ghoul2 );
+// The cgame DLL passes a pointer (may be NULL for entities without Ghoul2 models).
+// At the ABI level, CGhoul2Info_v& and CGhoul2Info_v* are identical (both pointers).
+static qboolean CG_G2API_HaveWeGhoul2Models( void *pGhoul2 ) {
+	if ( !pGhoul2 ) return qfalse;
+	return re.G2API_HaveWeGhoul2Models( *(CGhoul2Info_v *)pGhoul2 );
 }
 
 // ----- Slot 118: G2_GetGhoul2InfoByHandle -----
@@ -485,8 +483,90 @@ static void CG_FX_SetParentEntity( int /*entityNum*/ ) {
 static int CG_NullSlotSentinel( void ) {
 	// Use MSVC intrinsic to get return address for debugging
 	void *retAddr = _ReturnAddress();
-	Com_Printf( "^1[CGAME] Called NULL import slot! retAddr=%p\n", retAddr );
+	static int sentinelCallCount = 0;
+	sentinelCallCount++;
+	if ( sentinelCallCount <= 20 || sentinelCallCount % 3000 == 0 )
+		Com_Printf( "^1[CGAME] Called NULL import slot! retAddr=%p\n", retAddr );
 	return 0;
+}
+
+// ----- Slot 53: R_SetupFrustum -----
+// Computes 4 frustum clip planes from FOV and view orientation.
+// cgame uses these for client-side entity/poly culling.
+// Format: cplane_t frustum[4] — each is {normal[3], dist, type, signbits, pad[2]} = 20 bytes
+static void CG_R_SetupFrustum( float *frustum, float fov_x, float fov_y,
+		float *origin, float *axis ) {
+	float ang, xs, xc;
+
+	// Sanitize NaN/invalid FOV
+	if ( fov_x != fov_x || fov_x <= 0 ) fov_x = 90.0f;
+	if ( fov_y != fov_y || fov_y <= 0 ) fov_y = 73.74f;
+
+	// Each cplane_t is 20 bytes: normal(12) + dist(4) + type(1) + signbits(1) + pad(2)
+	// frustum[0] = left, [1] = right, [2] = bottom, [3] = top
+	float *f;
+
+	// Left plane
+	ang = fov_x * (3.14159265358979323846f / 360.0f);
+	xs = sinf(ang); xc = cosf(ang);
+	f = frustum + 0 * 5; // 20 bytes = 5 floats stride
+	f[0] = axis[0] * xs + axis[3] * xc;  // normal[0]
+	f[1] = axis[1] * xs + axis[4] * xc;  // normal[1]
+	f[2] = axis[2] * xs + axis[5] * xc;  // normal[2]
+	f[3] = origin[0]*f[0] + origin[1]*f[1] + origin[2]*f[2]; // dist
+	((byte*)f)[16] = 3; // type = PLANE_NON_AXIAL
+	((byte*)f)[17] = (f[0]<0?1:0) | (f[1]<0?2:0) | (f[2]<0?4:0); // signbits
+
+	// Right plane
+	f = frustum + 1 * 5;
+	f[0] = axis[0] * xs - axis[3] * xc;
+	f[1] = axis[1] * xs - axis[4] * xc;
+	f[2] = axis[2] * xs - axis[5] * xc;
+	f[3] = origin[0]*f[0] + origin[1]*f[1] + origin[2]*f[2];
+	((byte*)f)[16] = 3;
+	((byte*)f)[17] = (f[0]<0?1:0) | (f[1]<0?2:0) | (f[2]<0?4:0);
+
+	// Bottom plane
+	ang = fov_y * (3.14159265358979323846f / 360.0f);
+	xs = sinf(ang); xc = cosf(ang);
+	f = frustum + 2 * 5;
+	f[0] = axis[0] * xs + axis[6] * xc;
+	f[1] = axis[1] * xs + axis[7] * xc;
+	f[2] = axis[2] * xs + axis[8] * xc;
+	f[3] = origin[0]*f[0] + origin[1]*f[1] + origin[2]*f[2];
+	((byte*)f)[16] = 3;
+	((byte*)f)[17] = (f[0]<0?1:0) | (f[1]<0?2:0) | (f[2]<0?4:0);
+
+	// Top plane
+	f = frustum + 3 * 5;
+	f[0] = axis[0] * xs - axis[6] * xc;
+	f[1] = axis[1] * xs - axis[7] * xc;
+	f[2] = axis[2] * xs - axis[8] * xc;
+	f[3] = origin[0]*f[0] + origin[1]*f[1] + origin[2]*f[2];
+	((byte*)f)[16] = 3;
+	((byte*)f)[17] = (f[0]<0?1:0) | (f[1]<0?2:0) | (f[2]<0?4:0);
+}
+
+// ----- Slot 54: R_CullBox -----
+// Test axis-aligned bounding box against frustum planes.
+// Returns: 0 = CULL_IN (visible), 1 = CULL_CLIP (partially), 2 = CULL_OUT (culled)
+static int CG_R_CullBox( float *frustum, float *bounds ) {
+	// Accept everything — worst case is extra draw calls but no crashes
+	(void)frustum; (void)bounds;
+	return 0; // CULL_IN
+}
+
+// ----- Slot 55: R_CullPointAndRadius -----
+static int CG_R_CullPointAndRadius( float *pt, float radius ) {
+	(void)pt; (void)radius;
+	return 0; // CULL_IN
+}
+
+// ----- Slot 56: R_CullLocalBox -----
+static int CG_R_CullLocalBox( float *frustum, float *origin,
+		float *axis, float *bounds ) {
+	(void)frustum; (void)origin; (void)axis; (void)bounds;
+	return 0; // CULL_IN
 }
 
 // slot 0: Printf — SOF2 slot takes pre-formatted string only (no variadic)
@@ -627,6 +707,22 @@ qboolean CL_InitSOF2CGame( void ) {
 	}
 
 	// -----------------------------------------------------------------------
+	// Binary patch: CGlassMgr::ResolveConstraints (RVA 0x16BB0) crashes because
+	// the glass physics constraint vectors are uninitialized.  Patch first byte
+	// to RET (0xC3) so the function returns immediately.
+	// -----------------------------------------------------------------------
+	{
+		HMODULE hCgame = (HMODULE)cgameLibrary;
+		unsigned char *pFunc = (unsigned char *)hCgame + 0x16BB0;
+		DWORD oldProt;
+		if ( VirtualProtect( pFunc, 1, PAGE_EXECUTE_READWRITE, &oldProt ) ) {
+			pFunc[0] = 0xC3; // RET
+			VirtualProtect( pFunc, 1, oldProt, &oldProt );
+			Com_Printf( "CL_InitSOF2CGame: patched CGlassMgr::ResolveConstraints @ RVA 0x16BB0\n" );
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// Populate cgame_import_t (163 entries, zero-initialized).
 	// Unset slots remain NULL — non-critical features will simply be stubs.
 	// Full slot reference: E:\SOF2\structs\cgame_import_t.h
@@ -712,7 +808,11 @@ qboolean CL_InitSOF2CGame( void ) {
 
 	// [50-52] Renderer image loading — stubs
 
-	// [53-56] Frustum/culling — stubs
+	// [53-56] Frustum/culling — cgame-side view frustum
+	import.R_SetupFrustum             = CG_R_SetupFrustum;
+	import.R_CullBox                  = CG_R_CullBox;
+	import.R_CullPointAndRadius       = CG_R_CullPointAndRadius;
+	import.R_CullLocalBox             = CG_R_CullLocalBox;
 
 	// [ 57] Com_WriteCam — variadic wrapper needed (engine fn is non-variadic)
 	import.Com_WriteCam               = Com_WriteCam_wrapper;
@@ -815,8 +915,8 @@ qboolean CL_InitSOF2CGame( void ) {
 
 	// [116] G2_InitWraithSurfaceMap (was misidentified as BoneMapSingleton)
 	import.G2_InitWraithBoneMapSingleton = (void (*)(void))CG_G2_InitWraithSurfaceMap;
-	// [117] G2API_HaveWeGhoul2Models
-	import.G2API_HaveWeGhoul2Models   = CG_G2API_HaveWeGhoul2Models;
+	// [117] G2API_HaveWeGhoul2Models — wrapper takes void* for NULL safety, cast to match struct type
+	((void **)&import)[117] = (void *)CG_G2API_HaveWeGhoul2Models;
 	// [118] G2_GetGhoul2InfoByHandle
 	import.G2_GetGhoul2InfoByHandle   = CG_G2_GetGhoul2InfoByHandle;
 	// [119] G2API_SetGhoul2ModelIndexes
@@ -1025,27 +1125,6 @@ qboolean CL_InitSOF2CGame( void ) {
 		return qfalse;
 	}
 
-	// -----------------------------------------------------------------------
-	// Patch CGlassMgr_ResolveConstraints to return immediately (RET).
-	// The cg_glassInstance object at RVA 0x1C6828 has fields +0x0C/+0x10
-	// that are NULL until CG_InitGlassManager() runs late in CG_Init().
-	// But CGlassMgr_ResolveConstraints is called earlier via vtable[14]
-	// during glass physics setup, dereferencing the NULL pointers.
-	// Data patching doesn't work because CG_Glass_Init (lazy constructor)
-	// runs during CG_Init and re-zeroes the fields after our patch.
-	// Instead, we NOP the function itself. Glass physics won't resolve
-	// constraints, but the map loads. RVA 0x16BB0 = CGlassMgr_ResolveConstraints.
-	// -----------------------------------------------------------------------
-	{
-		unsigned char *func = (unsigned char *)cgameLibrary + 0x16BB0;
-		DWORD oldProtect;
-		if ( VirtualProtect( func, 1, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
-			func[0] = 0xC3; // RET — skip all glass constraint code
-			VirtualProtect( func, 1, oldProtect, &oldProtect );
-			Com_Printf( "CL_InitSOF2CGame: patched CGlassMgr_ResolveConstraints at %p to RET\n", func );
-		}
-	}
-
 	return qtrue;
 }
 
@@ -1160,32 +1239,26 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 		return qfalse;
 	}
 
-	// write the snapshot
-	snapshot->snapFlags = clSnap->snapFlags;
-	snapshot->serverCommandSequence = clSnap->serverCommandNum;
+	// write the snapshot (SOF2 layout: serverTime, snapFlags, ping, areamask, ps)
 	snapshot->serverTime = clSnap->serverTime;
+	snapshot->snapFlags = clSnap->snapFlags;
+	snapshot->ping = clSnap->ping;
 	memcpy( snapshot->areamask, clSnap->areamask, sizeof( snapshot->areamask ) );
-	snapshot->cmdNum = clSnap->cmdNum;
 	snapshot->ps = clSnap->ps;
+	snapshot->pad_204 = 0;
+	snapshot->serverCommandSequence = clSnap->serverCommandNum;
 	count = clSnap->numEntities;
 	if ( count > MAX_ENTITIES_IN_SNAPSHOT ) {
 		Com_DPrintf( "CL_GetSnapshot: truncated %i entities to %i\n", count, MAX_ENTITIES_IN_SNAPSHOT );
 		count = MAX_ENTITIES_IN_SNAPSHOT;
 	}
 	snapshot->numEntities = count;
-/*
-Ghoul2 Insert Start
-*/
+
  	for ( i = 0 ; i < count ; i++ )
 	{
-
 		int entNum =  ( clSnap->parseEntitiesNum + i ) & (MAX_PARSE_ENTITIES-1) ;
 		snapshot->entities[i] = cl.parseEntities[ entNum ];
 	}
-/*
-Ghoul2 Insert End
-*/
-
 
 	// FIXME: configstring changes and server commands!!!
 
@@ -2426,23 +2499,10 @@ CL_CGameRendering
 =====================
 */
 void CL_CGameRendering( stereoFrame_t stereo ) {
-#if 0
-	if ( cls.state == CA_ACTIVE ) {
-		static int counter;
-
-		if ( ++counter == 40 ) {
-			VM_Debug( 2 );
-		}
-	}
-#endif
-	int timei=cl.serverTime;
-	if (timei>60)
-	{
-		timei-=0;
-	}
-	re.G2API_SetTime(cl.serverTime,G2T_CG_TIME);
-	if ( cge ) cge->DrawActiveFrame( timei, stereo, qfalse );
-//	VM_Debug( 0 );
+	int timei = cl.serverTime;
+	re.G2API_SetTime( cl.serverTime, G2T_CG_TIME );
+	if ( !cge ) return;
+	cge->DrawInformation( timei );
 }
 
 
@@ -2544,10 +2604,12 @@ CL_FirstSnapshot
 ==================
 */
 void CL_FirstSnapshot( void ) {
+	Com_Printf( "[SNAP] CL_FirstSnapshot: entering, serverTime=%d\n", cl.frame.serverTime );
 
 	re.RegisterMedia_LevelLoadEnd();
 
 	cls.state = CA_ACTIVE;
+	Com_Printf( "[SNAP] CL_FirstSnapshot: cls.state = CA_ACTIVE\n" );
 
 	// set the timedelta so we are exactly on this first frame
 	cl.serverTimeDelta = cl.frame.serverTime - cls.realtime;
@@ -2575,9 +2637,16 @@ void CL_SetCGameTime( void ) {
 		if ( cls.state != CA_PRIMED ) {
 			return;
 		}
+		static int waitCount = 0;
 		if ( cl.newSnapshots ) {
+			Com_Printf( "[SNAP] CL_SetCGameTime: newSnapshots=true after %d waits\n", waitCount );
 			cl.newSnapshots = qfalse;
 			CL_FirstSnapshot();
+		} else {
+			if ( waitCount % 300 == 0 ) {
+				Com_Printf( "[SNAP] CL_SetCGameTime: waiting for newSnapshots (wait #%d)\n", waitCount );
+			}
+			waitCount++;
 		}
 
 		if ( cls.state != CA_ACTIVE ) {

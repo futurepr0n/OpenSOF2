@@ -690,7 +690,7 @@ class GClientBase
 {
 public:
 	// ps MUST be the first element, because the server expects it
-	PlayerStateBase<TSaberInfo>	ps;				// communicated by server to clients
+	playerState_t	ps;				// communicated by server to clients (SOF2: flat struct)
 
 	// private to game
 	clientPersistant_t	pers;

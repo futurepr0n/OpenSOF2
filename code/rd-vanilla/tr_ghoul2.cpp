@@ -2278,25 +2278,13 @@ void RenderSurfaces(CRenderSurface &RS)
 
 			// match the surface name to something in the skin file
 			shader = R_GetShaderByHandle( surfInfo->shaderIndex );	//tr.defaultShader;
-			qboolean skinMatch = qfalse;
 			for ( j = 0 ; j < RS.skin->numSurfaces ; j++ )
 			{
 				// the names have both been lowercased
 				if ( !strcmp( RS.skin->surfaces[j]->name, surfInfo->name ) )
 				{
 					shader = RS.skin->surfaces[j]->shader;
-					skinMatch = qtrue;
 					break;
-				}
-			}
-			{
-				static int skinLog = 0;
-				if ( skinLog < 80 ) {
-					ri.Printf( PRINT_ALL, "[SKINRT] surf='%s' match=%d shader='%s' defShader=%d\n",
-						surfInfo->name, (int)skinMatch,
-						shader ? shader->name : "NULL",
-						shader ? (int)shader->defaultShader : -1 );
-					skinLog++;
 				}
 			}
 		}
@@ -3761,14 +3749,6 @@ qboolean R_LoadMDXM( model_t *mod, void *buffer, const char *mod_name, qboolean 
 		}
 
 		// get the shader name
-		{
-			static int shaderLog = 0;
-			if ( shaderLog < 60 ) {
-				ri.Printf( PRINT_ALL, "[SKIN] GLM surf='%s' shader='%s'\n",
-					surfInfo->name, surfInfo->shader );
-				shaderLog++;
-			}
-		}
 		sh = R_FindShader( surfInfo->shader, lightmapsNone, stylesDefault, qtrue );
 		// insert it in the surface list
 

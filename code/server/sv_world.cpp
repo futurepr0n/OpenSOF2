@@ -782,22 +782,24 @@ Ghoul2 Insert Start
 				if (touch->client)
 				{
 					vec3_t world_angles;
+					static vec3_t unitScale = {1.0f, 1.0f, 1.0f};
 
 					world_angles[PITCH] =  0;
-					//legs do not *always* point toward the viewangles!
-					//world_angles[YAW] =  touch->client->viewangles[YAW];
-					world_angles[YAW] =  touch->client->legsYaw;
+					// SOF2: no legsYaw field — use viewangles yaw for G2 collision
+					world_angles[YAW] =  touch->client->viewangles[YAW];
 					world_angles[ROLL] =  0;
 
+					// SOF2: no modelScale in entityState_t — use unit scale
 					re.G2API_CollisionDetect(clip->trace.G2CollisionMap, touch->ghoul2,
-							world_angles, touch->client->origin, sv.time, SOF2_ENT_NUMBER(touch), clip->start, clip->end, touch->s.modelScale, G2VertSpaceServer, clip->eG2TraceType, clip->useLod,radius);
+							world_angles, touch->client->origin, sv.time, SOF2_ENT_NUMBER(touch), clip->start, clip->end, unitScale, G2VertSpaceServer, clip->eG2TraceType, clip->useLod,radius);
 				}
 				// no, so use the normal entity state
 				else
 				{
-					//use the correct origin and angles!  is this right now?
+					static vec3_t unitScale = {1.0f, 1.0f, 1.0f};
+					// SOF2: no modelScale in entityState_t — use unit scale
 					re.G2API_CollisionDetect(clip->trace.G2CollisionMap, touch->ghoul2,
-						touch->currentAngles, touch->currentOrigin, sv.time, SOF2_ENT_NUMBER(touch), clip->start, clip->end, touch->s.modelScale, G2VertSpaceServer, clip->eG2TraceType, clip->useLod,radius);
+						touch->currentAngles, touch->currentOrigin, sv.time, SOF2_ENT_NUMBER(touch), clip->start, clip->end, unitScale, G2VertSpaceServer, clip->eG2TraceType, clip->useLod,radius);
 				}
 
 				// set our new trace record size

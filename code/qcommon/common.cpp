@@ -335,7 +335,15 @@ void NORETURN QDECL Com_Error( int code, const char *fmt, ... ) {
 
 	SG_Shutdown();	// close any file pointers
 	if ( code == ERR_DISCONNECT || code == ERR_DROP ) {
-		throw code;
+		// SOF2: suppress ERR_DROP to keep running past non-fatal game errors
+		// (e.g., BG_EvaluateTrajectory unknown trType from game DLL scripted entities)
+		static int dropCount = 0;
+		dropCount++;
+		if ( dropCount <= 50 ) {
+			Com_Printf( "^3[ERR_DROP #%d] %s\n", dropCount, com_errorMessage );
+		}
+		com_errorEntered = qfalse;
+		return;
 	} else {
 		SV_Shutdown (va("Server fatal crashed: %s\n", com_errorMessage));
 		CL_Shutdown ();

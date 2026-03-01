@@ -509,6 +509,33 @@ void SV_Frame( int msec,float fractionMsec ) {
 		sv.time += frameMsec;
 		re.G2API_SetTime(sv.time,G2T_SV_TIME);
 
+		// Validate entity trajectory types before RunFrame (using correct SOF2 offsets)
+		{
+			static int trLogCount = 0;
+			if ( trLogCount < 3 ) {
+				trLogCount++;
+				Com_Printf( "[TRAJ-PRE] RunFrame #%d time=%d\n", trLogCount, sv.time );
+				int badCount = 0;
+				for ( int ei = 0; ei < MAX_GENTITIES && badCount < 10; ei++ ) {
+					gentity_t *gent = SV_GentityNum( ei );
+					if ( !gent ) continue;
+					// Read trajectory at SOF2 offsets: pos.trType at CEntity+0x14, pos.trTime at CEntity+0x18
+					int posType = *(int *)((byte *)gent + 0x014);  // entityState_t+0x0C = pos.trType
+					int posTime = *(int *)((byte *)gent + 0x018);  // entityState_t+0x10 = pos.trTime
+					int eType   = *(int *)((byte *)gent + 0x00C);  // entityState_t+0x04 = eType
+					int entNum  = *(int *)((byte *)gent + 0x008);  // entityState_t+0x00 = number
+					if ( posType < 0 || posType > 6 ) {
+						Com_Printf( "^1[TRAJ-PRE] ent %d (num=%d eType=%d): pos.trType=%d trTime=%d BAD!\n",
+							ei, entNum, eType, posType, posTime );
+						badCount++;
+					}
+				}
+				if ( badCount == 0 ) {
+					Com_Printf( "[TRAJ-PRE] All entities have valid trajectory types\n" );
+				}
+			}
+		}
+
 		// let everything in the world think and move
 		__try {
 			ge->RunFrame( sv.time );

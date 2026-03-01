@@ -1690,15 +1690,15 @@ static void UI_CalcForceStatus(void)
 
 	memset(value, 0, sizeof(value));
 
-	lightSide = pState->forcePowerLevel[FP_HEAL] +
-		pState->forcePowerLevel[FP_TELEPATHY] +
-		pState->forcePowerLevel[FP_PROTECT] +
-		pState->forcePowerLevel[FP_ABSORB];
+	lightSide = 0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */;
 
-	darkSide = pState->forcePowerLevel[FP_GRIP] +
-		pState->forcePowerLevel[FP_LIGHTNING] +
-		pState->forcePowerLevel[FP_RAGE] +
-		pState->forcePowerLevel[FP_DRAIN];
+	darkSide = 0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */ +
+		0 /* SOF2: no forcePowerLevel */;
 
 	total = lightSide + darkSide;
 
@@ -4603,10 +4603,10 @@ static void UI_UpdateFightingStyleChoices ( void )
 
 
 			// Knows Fast style?
-			if (pState->saberStylesKnown & (1<<SS_FAST))
+			if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_FAST))
 			{
 				// And Medium?
-				if (pState->saberStylesKnown & (1<<SS_MEDIUM))
+				if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_MEDIUM))
 				{
 					Cvar_Set ( "ui_fightingstylesallowed", "6" );	// Has FAST and MEDIUM, so can only choose STRONG
 					Cvar_Set ( "ui_newfightingstyle", "2" );		// STRONG
@@ -4618,10 +4618,10 @@ static void UI_UpdateFightingStyleChoices ( void )
 				}
 			}
 			// Knows Medium style?
-			else if (pState->saberStylesKnown & (1<<SS_MEDIUM))
+			else if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_MEDIUM))
 			{
 				// And Strong?
-				if (pState->saberStylesKnown & (1<<SS_STRONG))
+				if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_STRONG))
 				{
 					Cvar_Set ( "ui_fightingstylesallowed", "4" );	// Has MEDIUM and STRONG, so can only choose FAST
 					Cvar_Set ( "ui_newfightingstyle", "0" );		// FAST
@@ -4633,10 +4633,10 @@ static void UI_UpdateFightingStyleChoices ( void )
 				}
 			}
 			// Knows Strong style?
-			else if (pState->saberStylesKnown & (1<<SS_STRONG))
+			else if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_STRONG))
 			{
 				// And Fast
-				if (pState->saberStylesKnown & (1<<SS_FAST))
+				if (0 /* SOF2: no saberStylesKnown */ & (1<<SS_FAST))
 				{
 					Cvar_Set ( "ui_fightingstylesallowed", "5" );	// Has STRONG and FAST, so can only take MEDIUM
 					Cvar_Set ( "ui_newfightingstyle", "1" );		// MEDIUM
@@ -4655,11 +4655,11 @@ static void UI_UpdateFightingStyleChoices ( void )
 			}
 
 			// Determine current style
-			if (pState->saberAnimLevel == SS_FAST)
+			if (0) // SOF2: no saberAnimLevel
 			{
 				Cvar_Set ( "ui_currentfightingstyle", "0" );			// FAST
 			}
-			else if (pState->saberAnimLevel == SS_STRONG)
+			else if (0) // SOF2: no saberAnimLevel
 			{
 				Cvar_Set ( "ui_currentfightingstyle", "2" );			// STRONG
 			}
@@ -4773,7 +4773,7 @@ static void UI_InitAllocForcePowers ( const char *forceName )
 	if( cl )
 	{
 		playerState_t*		pState = cl->gentity->client;
-		forcelevel = pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum];
+		forcelevel = 0;
 	}
 	else
 	{
@@ -4860,14 +4860,14 @@ static int UI_CountForcePowers( void ) {
 
 	if ( cl && cl->gentity ) {
 		const playerState_t *ps = cl->gentity->client;
-		return		ps->forcePowerLevel[FP_HEAL] +
-					ps->forcePowerLevel[FP_TELEPATHY] +
-					ps->forcePowerLevel[FP_PROTECT] +
-					ps->forcePowerLevel[FP_ABSORB] +
-					ps->forcePowerLevel[FP_GRIP] +
-					ps->forcePowerLevel[FP_LIGHTNING] +
-					ps->forcePowerLevel[FP_RAGE] +
-					ps->forcePowerLevel[FP_DRAIN];
+		return		0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */ +
+					0 /* SOF2: no forcePowerLevel */;
 	}
 	else {
 		return		uiInfo.forcePowerLevel[FP_HEAL] +
@@ -5051,15 +5051,15 @@ static void	UI_DemoSetForceLevels( void )
 
 	if (pState)
 	{//i am carrying over from a previous level, so get the increased power! (non-core only)
-		uiInfo.forcePowerLevel[FP_HEAL] = Q_max(pState->forcePowerLevel[FP_HEAL], uiInfo.forcePowerLevel[FP_HEAL]);
-		uiInfo.forcePowerLevel[FP_TELEPATHY]=Q_max(pState->forcePowerLevel[FP_TELEPATHY], uiInfo.forcePowerLevel[FP_TELEPATHY]);
-		uiInfo.forcePowerLevel[FP_GRIP]=Q_max(pState->forcePowerLevel[FP_GRIP], uiInfo.forcePowerLevel[FP_GRIP]);
-		uiInfo.forcePowerLevel[FP_LIGHTNING]=Q_max(pState->forcePowerLevel[FP_LIGHTNING], uiInfo.forcePowerLevel[FP_LIGHTNING]);
-		uiInfo.forcePowerLevel[FP_PROTECT]=Q_max(pState->forcePowerLevel[FP_PROTECT], uiInfo.forcePowerLevel[FP_PROTECT]);
+		uiInfo.forcePowerLevel[FP_HEAL] = Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_HEAL]);
+		uiInfo.forcePowerLevel[FP_TELEPATHY]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_TELEPATHY]);
+		uiInfo.forcePowerLevel[FP_GRIP]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_GRIP]);
+		uiInfo.forcePowerLevel[FP_LIGHTNING]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_LIGHTNING]);
+		uiInfo.forcePowerLevel[FP_PROTECT]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_PROTECT]);
 
-		uiInfo.forcePowerLevel[FP_ABSORB]=Q_max(pState->forcePowerLevel[FP_ABSORB], uiInfo.forcePowerLevel[FP_ABSORB]);
-		uiInfo.forcePowerLevel[FP_DRAIN]=Q_max(pState->forcePowerLevel[FP_DRAIN], uiInfo.forcePowerLevel[FP_DRAIN]);
-		uiInfo.forcePowerLevel[FP_RAGE]=Q_max(pState->forcePowerLevel[FP_RAGE], uiInfo.forcePowerLevel[FP_RAGE]);
+		uiInfo.forcePowerLevel[FP_ABSORB]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_ABSORB]);
+		uiInfo.forcePowerLevel[FP_DRAIN]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_DRAIN]);
+		uiInfo.forcePowerLevel[FP_RAGE]=Q_max(0 /* SOF2: no forcePowerLevel */, uiInfo.forcePowerLevel[FP_RAGE]);
 	}
 }
 #endif // !JK2_MODE
@@ -5192,7 +5192,7 @@ static void UI_ShutdownForceHelp( void )
 			sizeof(itemName),
 			"%s_level%ddesc",
 			powerEnums[uiInfo.forcePowerUpdated].title,
-			pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum]
+			0
 			);
 
 		item = (itemDef_s *) Menu_FindItemByName(menu, itemName);
@@ -5247,7 +5247,7 @@ static void UI_DecrementCurrentForcePower ( void )
 	if( cl )
 	{
 		pState = cl->gentity->client;
-		forcelevel = pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum];
+		forcelevel = 0;
 	}
 	else
 	{
@@ -5265,12 +5265,12 @@ static void UI_DecrementCurrentForcePower ( void )
 	{
 		if( pState )
 		{
-			pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum]--;	// Decrement it
-			forcelevel = pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum];
+   // SOF2 stub: 0--;	// Decrement it
+			forcelevel = 0;
 			// Turn off power if level is 0
-			if (pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum]<1)
+			if (0<1)
 			{
-				pState->forcePowersKnown &= ~( 1 << powerEnums[uiInfo.forcePowerUpdated].powerEnum );
+    // SOF2: removed � 0 /* SOF2: no forcePowersKnown */ &= ~( 1 << powerEnums[uiInfo.forcePowerUpdated].powerEnum );
 			}
 		}
 		else
@@ -5351,7 +5351,7 @@ static void UI_AffectForcePowerLevel ( const char *forceName )
 	if( cl )
 	{
 		pState = cl->gentity->client;
-		forcelevel = pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum];
+		forcelevel = 0;
 	}
 	else
 	{
@@ -5371,9 +5371,9 @@ static void UI_AffectForcePowerLevel ( const char *forceName )
 
 	if( pState )
 	{
-		pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum]++;	// Increment it
-		pState->forcePowersKnown |= ( 1 << powerEnums[forcePowerI].powerEnum );
-		forcelevel = pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum];
+  // SOF2 stub: 0++;	// Increment it
+  // SOF2: removed � 0 /* SOF2: no forcePowersKnown */ |= ( 1 << powerEnums[forcePowerI].powerEnum );
+		forcelevel = 0;
 	}
 	else
 	{
@@ -5443,7 +5443,7 @@ static void UI_DecrementForcePowerLevel( void )
 
 	playerState_t*		pState = cl->gentity->client;
 
-	pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum]--;	// Decrement it
+ // SOF2 stub: 0--;	// Decrement it
 
 }
 
@@ -5483,7 +5483,7 @@ static void UI_ShowForceLevelDesc ( const char *forceName )
 		sizeof(itemName),
 		"%s_level%ddesc",
 		powerEnums[forcePowerI].title,
-		pState->forcePowerLevel[powerEnums[forcePowerI].powerEnum]
+		0
 		);
 
 	item = (itemDef_s *) Menu_FindItemByName(menu, itemName);
@@ -5511,7 +5511,7 @@ static void UI_ResetForceLevels ( void )
 		playerState_t*		pState = cl->gentity->client;
 
 		// Decrement that power
-		pState->forcePowerLevel[powerEnums[uiInfo.forcePowerUpdated].powerEnum]--;
+  // SOF2 stub: 0--;
 
 		menuDef_t	*menu;
 		itemDef_t	*item;
@@ -5592,7 +5592,7 @@ static void UI_UpdateFightingStyle ( void )
 	if (cl && cl->gentity && cl->gentity->client)
 	{
 		pState = cl->gentity->client;
-		pState->saberStylesKnown |= (1<<saberStyle);
+  // SOF2: removed � 0 /* SOF2: no saberStylesKnown */ |= (1<<saberStyle);
 	}
 	else	// Must be at the beginning of the game so the client hasn't been created, shove data in a cvar
 	{
@@ -5677,7 +5677,7 @@ static void UI_ClearInventory ( void )
 		int i;
 		for (i=0;i<MAX_INVENTORY;i++)
 		{
-			pState->inventory[i] = 0;
+   // SOF2: removed � 0 /* SOF2: no inventory */ = 0;
 		}
 	}
 }
@@ -5698,7 +5698,7 @@ static void UI_GiveInventory ( const int itemIndex, const int amount )
 
 		if (itemIndex < MAX_INVENTORY)
 		{
-			pState->inventory[itemIndex]=amount;
+   // SOF2: removed - 0 /* SOF2: no inventory */=amount;
 		}
 	}
 
@@ -5997,7 +5997,7 @@ static void	UI_AddWeaponSelection ( const int weaponIndex, const int ammoIndex, 
 			// Give them ammo too
 			if ((ammoIndex>0) && (ammoIndex<AMMO_MAX))
 			{
-				pState->ammo[ ammoIndex ] = ammoAmount;
+    // SOF2: removed � 0 /* SOF2: no ammo */ = ammoAmount;
 			}
 		}
 	}
@@ -6104,7 +6104,7 @@ static void UI_RemoveWeaponSelection ( const int weaponSelectionIndex )
 			{	// But don't take it away if the other weapon is using that ammo
 				if ( uiInfo.selectedWeapon1AmmoIndex != uiInfo.selectedWeapon2AmmoIndex )
 				{
-					pState->ammo[ ammoIndex ] = 0;
+     // SOF2: removed � 0 /* SOF2: no ammo */ = 0;
 				}
 			}
 		}
@@ -6288,7 +6288,7 @@ static void	UI_AddThrowWeaponSelection ( const int weaponIndex, const int ammoIn
 			// Give them ammo too
 			if ((ammoIndex>0) && (ammoIndex<AMMO_MAX))
 			{
-				pState->ammo[ ammoIndex ] = ammoAmount;
+    // SOF2: removed � 0 /* SOF2: no ammo */ = ammoAmount;
 			}
 		}
 	}
@@ -6367,7 +6367,7 @@ static void UI_RemoveThrowWeaponSelection ( void )
 			// Remove ammo too
 			if ((uiInfo.selectedThrowWeaponAmmoIndex>0) && (uiInfo.selectedThrowWeaponAmmoIndex<AMMO_MAX))
 			{
-				pState->ammo[ uiInfo.selectedThrowWeaponAmmoIndex ] = 0;
+    // SOF2: removed � 0 /* SOF2: no ammo */ = 0;
 			}
 
 		}

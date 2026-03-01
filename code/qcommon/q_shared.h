@@ -1582,676 +1582,74 @@ public:
 // playerState_t is a full superset of entityState_t as it is used by players,
 // so if a playerState_t is transmitted, the entityState_t can be fully derived
 // from it.
-// !!!!!!!!!! LOADSAVE-affecting structure !!!!!!!!!!
-template<typename TSaberInfo>
-class PlayerStateBase
-{
-public:
-	int			commandTime;		// cmd->serverTime of last executed command
-	int			pm_type;
-	int			bobCycle;			// for view bobbing and footstep generation
-	int			pm_flags;			// ducked, jump_held, etc
-	int			pm_time;
 
-	vec3_t		origin;
-	vec3_t		velocity;
-	int			weaponTime;
-	int			weaponChargeTime;
-	int			rechargeTime;		// for the phaser
-	int			gravity;
-	int			leanofs;
-	int			friction;
-	int			speed;
-	int			delta_angles[3];	// add to command angles to get view direction
-									// changed by spawns, rotating objects, and teleporters
+// -----------------------------------------------------------------------
+// SOF2-specific playerState_t — 472 bytes (0x1D8)
+// Field offsets verified from SoF2.exe's playerStateFields[] table dump
+// (45 entries at 0x100e9fe8) and MSG_WriteDeltaPlayerstate disassembly.
+// -----------------------------------------------------------------------
+typedef struct playerState_s {
+	int			commandTime;		// 0x00 - cmd->serverTime of last executed command
+	int			pm_type;			// 0x04
+	int			bobCycle;			// 0x08 - view bobbing and footstep generation
+	int			pm_flags;			// 0x0C - ducked, jump_held, etc
+	int			pm_time;			// 0x10
 
-	int			groundEntityNum;// ENTITYNUM_NONE = in air
-	int			legsAnim;		//
-	int			legsAnimTimer;	// don't change low priority animations on legs until this runs out
-	int			torsoAnim;		//
-	int			torsoAnimTimer;	// don't change low priority animations on torso until this runs out
-	int			movementDir;	// a number 0 to 7 that represents the relative angle
-								// of movement to the view angle (axial and diagonals)
-								// when at rest, the value will remain unchanged
-								// used to twist the legs during strafing
+	vec3_t		origin;				// 0x14 (12 bytes)
+	vec3_t		grapplePoint;		// 0x20 (12 bytes, gap between origin and velocity)
+	vec3_t		velocity;			// 0x2C (12 bytes)
+	int			weaponstate;		// 0x38 (gap between velocity and weaponTime)
+	int			weaponTime;			// 0x3C
+	int			gravity;			// 0x40
+	int			leanOffset;			// 0x44 - SOF2: lean angle offset (-6 bits in field table)
+	int			pronePitch;			// 0x48 - SOF2: prone pitch angle
+	int			speed;				// 0x4C
+	int			delta_angles[3];	// 0x50 (12 bytes)
 
-	int			eFlags;			// copied to entityState_t->eFlags
+	int			groundEntityNum;	// 0x5C - ENTITYNUM_NONE = in air
+	int			legsTimer;			// 0x60
+	int			legsAnim;			// 0x64
+	int			torsoTimer;			// 0x68
+	int			torsoAnim;			// 0x6C
+	int			movementDir;		// 0x70
 
-	int			eventSequence;	// pmove generated events
-	int			events[MAX_PS_EVENTS];
-	int			eventParms[MAX_PS_EVENTS];
+	int			eFlags;				// 0x74
+	int			eventSequence;		// 0x78
+	int			events[2];			// 0x7C (8 bytes, MAX_PS_EVENTS=2)
+	int			sof2_gap3[2];		// 0x84 (8 bytes, gap)
+	int			eventParms[2];		// 0x8C (8 bytes)
+	int			sof2_gap4[2];		// 0x94 (8 bytes, gap)
+	int			externalEvent;		// 0x9C
+	int			externalEventParm;	// 0xA0
+	int			externalEventTime;	// 0xA4 (gap, likely externalEventTime)
 
-	int			externalEvent;	// events set on player from another source
-	int			externalEventParm;
-	int			externalEventTime;
+	int			clientNum;			// 0xA8 - VERIFIED from cgame decompilation
+	int			weapon;				// 0xAC
 
-	int			clientNum;		// ranges from 0 to MAX_CLIENTS-1
-	int			weapon;			// copied to entityState_t->weapon
-	int			weaponstate;
-
-	int			batteryCharge;
-
-	vec3_t		viewangles;		// for fixed views
-	float		legsYaw;		// actual legs forward facing
-	int			viewheight;
+	vec3_t		viewangles;			// 0xB0 (12 bytes)
+	int			viewheight;			// 0xBC
 
 	// damage feedback
-	int			damageEvent;							// when it changes, latch the other parms
-	int			damageYaw;
-	int			damagePitch;
-	int			damageCount;
+	int			damageEvent;		// 0xC0
+	int			damageYaw;			// 0xC4
+	int			damagePitch;		// 0xC8
+	int			damageCount;		// 0xCC
 
-	int			stats[MAX_STATS];
-	int			persistant[MAX_PERSISTANT];				// stats that aren't cleared on death
-	int			powerups[MAX_POWERUPS];					// level.time that the powerup runs out
-	int			ammo[MAX_AMMO];
-	int			inventory[MAX_INVENTORY];							// Count of each inventory item.
-	char  		security_key_message[MAX_SECURITY_KEYS][MAX_SECURITY_KEY_MESSSAGE];	// Security key types
+	int			stats[MAX_STATS];			// 0xD0 (16 ints = 64 bytes) VERIFIED
+	int			persistant[MAX_PERSISTANT];	// 0x110 (16 ints = 64 bytes) VERIFIED
 
-	vec3_t		serverViewOrg;
+	int			generic1;			// 0x150 (8 bits in field table)
+	int			loopSound;			// 0x154 (16 bits in field table)
 
-	qboolean	saberInFlight;
-#ifdef JK2_MODE
-	qboolean	saberActive;	// -- JK2 --
+	unsigned char boneData[128];	// 0x158 (G2 bone angles, VERIFIED)
+} playerState_t;					// Total: 0x1D8 = 472 bytes
 
-	int			vehicleModel;	// -- JK2 --
-	int			viewEntity;		// For overriding player movement controls and vieworg
-	saber_colors_t	saberColor; // -- JK2 --
-	float		saberLength;	// -- JK2 --
-	float		saberLengthMax;	// -- JK2 --
-	int			forcePowersActive;	//prediction needs to know this
-#else
-	int			viewEntity;		// For overriding player movement controls and vieworg
-	int			forcePowersActive;	//prediction needs to know this
+static_assert(sizeof(playerState_t) == 472, "playerState_t must be exactly 472 bytes to match SOF2 binary");
 
-#endif
+// Old JKA PlayerStateBase fields removed — SOF2 uses flat struct above.
+// JK2/JKA fields (sabers, force powers, vehicles, etc.) are not part of SOF2's playerState.
 
-	//NEW vehicle stuff
-	// This has been localized to the vehicle stuff (NOTE: We can still use it later, I'm just commenting it to
-	// root out all the calls. We can store the data in vehicles and update by copying it here).
-	//int			vehicleIndex;	// Index into vehicleData table
-	//vec3_t		vehicleAngles;	// current angles of your vehicle
-	//int			vehicleArmor;	// current armor of your vehicle (explodes if drops to 0)
 
-	// !!
-	// not communicated over the net at all
-	// !!
-	//int			vehicleLastFXTime;				//timer for all cgame-FX...?
-	//int			vehicleExplodeTime;				//when it will go BOOM!
-
-	int			useTime;	//not sent
-	int			lastShotTime;//last time you shot your weapon
-	int			ping;			// server to game info for scoreboard
-	int			lastOnGround;	//last time you were on the ground
-	int			lastStationary;	//last time you were on the ground
-	int			weaponShotCount;
-
-#ifndef JK2_MODE
-	//FIXME: maybe allocate all these structures (saber, force powers, vehicles)
-	//			or descend them as classes - so not every client has all this info
-	TSaberInfo	saber[MAX_SABERS];
-	qboolean	dualSabers;
-	qboolean	SaberStaff( void ) { return (qboolean)( saber[0].type == SABER_STAFF || (dualSabers && saber[1].type == SABER_STAFF) ); };
-	qboolean	SaberActive() { return (qboolean)( saber[0].Active() || (dualSabers&&saber[1].Active()) ); };
-	void		SetSaberLength( float length )
-				{
-					saber[0].SetLength( length );
-					if ( dualSabers )
-					{
-						saber[1].SetLength( length );
-					}
-				}
-	float		SaberLength()
-				{//return largest length
-					float len1 = saber[0].Length();
-					if ( dualSabers && saber[1].Length() > len1 )
-					{
-						return saber[1].Length();
-					}
-					return len1;
-				};
-	float		SaberLengthMax()
-				{
-					if ( saber[0].LengthMax() > saber[1].LengthMax() )
-					{
-						return saber[0].LengthMax();
-					}
-					else if ( dualSabers )
-					{
-						return saber[1].LengthMax();
-					}
-					return 0.0f;
-				};
-
-	// Activate or deactivate a specific Blade of a Saber.
-	// Created: 10/03/02 by Aurelio Reis, Modified: 10/03/02 by Aurelio Reis.
-	//	[in]	int iSaber		Which Saber to modify.
-	//	[in]	int iBlade		Which blade to modify (0 - (NUM_BLADES - 1)).
-	//	[in]	bool bActive	Whether to make it active (default true) or inactive (false).
-	//	[return]	void
-	void		SaberBladeActivate( int iSaber, int iBlade, qboolean bActive = qtrue )
-	{
-		// Validate saber (if it's greater than or equal to zero, OR it above the first saber but we
-		// are not doing duel Sabers, leave, something is not right.
-		if ( iSaber < 0 || ( iSaber > 0  && !dualSabers ) )
-			return;
-
-		saber[iSaber].BladeActivate( iBlade, bActive );
-	}
-
-	void		SaberActivate( void )
-				{
-					saber[0].Activate();
-					if ( dualSabers )
-					{
-						saber[1].Activate();
-					}
-				}
-	void		SaberDeactivate( void )
-				{
-					saber[0].Deactivate();
-					saber[1].Deactivate();
-				};
-	void		SaberActivateTrail ( float duration )
-				{
-					saber[0].ActivateTrail( duration );
-					if ( dualSabers )
-					{
-						saber[1].ActivateTrail( duration );
-					}
-				};
-	void		SaberDeactivateTrail ( float duration )
-				{
-					saber[0].DeactivateTrail( duration );
-					if ( dualSabers )
-					{
-						saber[1].DeactivateTrail( duration );
-					}
-				};
-	int			SaberDisarmBonus( int bladeNum )
-				{
-					int disarmBonus = 0;
-					if ( saber[0].Active() )
-					{
-						if ( saber[0].bladeStyle2Start > 0
-							&& bladeNum >= saber[0].bladeStyle2Start )
-						{
-							disarmBonus += saber[0].disarmBonus2;
-						}
-						else
-						{
-							disarmBonus += saber[0].disarmBonus;
-						}
-					}
-					if ( dualSabers && saber[1].Active() )
-					{//bonus for having 2 sabers
-						if ( saber[1].bladeStyle2Start > 0
-							&& bladeNum >= saber[1].bladeStyle2Start )
-						{
-                            disarmBonus += 1 + saber[1].disarmBonus2;
-						}
-						else
-						{
-                            disarmBonus += 1 + saber[1].disarmBonus;
-						}
-					}
-					return disarmBonus;
-				};
-	int			SaberParryBonus( void )
-				{
-					int parryBonus = 0;
-					if ( saber[0].Active() )
-					{
-						parryBonus += saber[0].parryBonus;
-					}
-					if ( dualSabers && saber[1].Active() )
-					{//bonus for having 2 sabers
-						parryBonus += 1 + saber[1].parryBonus;
-					}
-					return parryBonus;
-				};
-#endif // !JK2_MODE
-
-	short		saberMove;
-
-#ifndef JK2_MODE
-	short		saberMoveNext;
-#endif // !JK2_MODE
-
-	short		saberBounceMove;
-	short		saberBlocking;
-	short		saberBlocked;
-	short		leanStopDebounceTime;
-
-#ifdef JK2_MODE
-	float		saberLengthOld;
-#endif
-	int			saberEntityNum;
-	float		saberEntityDist;
-	int			saberThrowTime;
-	int			saberEntityState;
-	int			saberDamageDebounceTime;
-	int			saberHitWallSoundDebounceTime;
-	int			saberEventFlags;
-	int			saberBlockingTime;
-	int			saberAnimLevel;
-	int			saberAttackChainCount;
-	int			saberLockTime;
-	int			saberLockEnemy;
-
-#ifndef JK2_MODE
-	int			saberStylesKnown;
-#endif // !JK2_MODE
-
-#ifdef JK2_MODE
-	char		*saberModel;
-#endif
-
-	int			forcePowersKnown;
-	int			forcePowerDuration[NUM_FORCE_POWERS];	//for effects that have a duration
-	int			forcePowerDebounce[NUM_FORCE_POWERS];	//for effects that must have an interval
-	int			forcePower;
-	int			forcePowerMax;
-	int			forcePowerRegenDebounceTime;
-
-#ifndef JK2_MODE
-	int			forcePowerRegenRate;				//default is 100ms
-	int			forcePowerRegenAmount;				//default is 1
-#endif // !JK2_MODE
-
-	int			forcePowerLevel[NUM_FORCE_POWERS];		//so we know the max forceJump power you have
-	float		forceJumpZStart;					//So when you land, you don't get hurt as much
-	float		forceJumpCharge;					//you're current forceJump charge-up level, increases the longer you hold the force jump button down
-	int			forceGripEntityNum;					//what entity I'm gripping
-	vec3_t		forceGripOrg;						//where the gripped ent should be lifted to
-
-#ifndef JK2_MODE
-	int			forceDrainEntityNum;				//what entity I'm draining
-	vec3_t		forceDrainOrg;						//where the drained ent should be lifted to
-#endif // !JK2_MODE
-
-	int			forceHealCount;						//how many points of force heal have been applied so far
-
-#ifndef JK2_MODE
-	//new Jedi Academy force powers
-	int			forceAllowDeactivateTime;
-	int			forceRageDrainTime;
-	int			forceRageRecoveryTime;
-	int			forceDrainEntNum;
-	float		forceDrainTime;
-	int			forcePowersForced;					//client is being forced to use these powers (FIXME: and only these?)
-	int			pullAttackEntNum;
-	int			pullAttackTime;
-	int			lastKickedEntNum;
-#endif // !JK2_MODE
-
-	int			taunting;							//replaced BUTTON_GESTURE
-
-	float		jumpZStart;							//So when you land, you don't get hurt as much
-	vec3_t		moveDir;
-
-	float		waterheight;						//exactly what the z org of the water is (will be +4 above if under water, -4 below if not in water)
-	waterHeightLevel_t	waterHeightLevel;					//how high it really is
-
-#ifndef JK2_MODE
-	//testing IK grabbing
-	qboolean	ikStatus;		//for IK
-	int			heldClient;		//for IK, who I'm grabbing, if anyone
-	int			heldByClient;	//for IK, someone is grabbing me
-	int			heldByBolt;		//for IK, what bolt I'm attached to on the holdersomeone is grabbing me by
-	int			heldByBone;		//for IK, what bone I'm being held by
-
-	//vehicle turn-around stuff... FIXME: only vehicles need this in SP...
-	int			vehTurnaroundIndex;
-	int			vehTurnaroundTime;
-
-	//NOTE: not really used in SP, just for Fighter Vehicle damage stuff
-	int			brokenLimbs;
-	int			electrifyTime;
-#endif // !JK2_MODE
-
-
-	void sg_export(
-		ojk::SavedGameHelper& saved_game) const
-	{
-		saved_game.write<int32_t>(commandTime);
-		saved_game.write<int32_t>(pm_type);
-		saved_game.write<int32_t>(bobCycle);
-		saved_game.write<int32_t>(pm_flags);
-		saved_game.write<int32_t>(pm_time);
-		saved_game.write<float>(origin);
-		saved_game.write<float>(velocity);
-		saved_game.write<int32_t>(weaponTime);
-		saved_game.write<int32_t>(weaponChargeTime);
-		saved_game.write<int32_t>(rechargeTime);
-		saved_game.write<int32_t>(gravity);
-		saved_game.write<int32_t>(leanofs);
-		saved_game.write<int32_t>(friction);
-		saved_game.write<int32_t>(speed);
-		saved_game.write<int32_t>(delta_angles);
-		saved_game.write<int32_t>(groundEntityNum);
-		saved_game.write<int32_t>(legsAnim);
-		saved_game.write<int32_t>(legsAnimTimer);
-		saved_game.write<int32_t>(torsoAnim);
-		saved_game.write<int32_t>(torsoAnimTimer);
-		saved_game.write<int32_t>(movementDir);
-		saved_game.write<int32_t>(eFlags);
-		saved_game.write<int32_t>(eventSequence);
-		saved_game.write<int32_t>(events);
-		saved_game.write<int32_t>(eventParms);
-		saved_game.write<int32_t>(externalEvent);
-		saved_game.write<int32_t>(externalEventParm);
-		saved_game.write<int32_t>(externalEventTime);
-		saved_game.write<int32_t>(clientNum);
-		saved_game.write<int32_t>(weapon);
-		saved_game.write<int32_t>(weaponstate);
-		saved_game.write<int32_t>(batteryCharge);
-		saved_game.write<float>(viewangles);
-		saved_game.write<float>(legsYaw);
-		saved_game.write<int32_t>(viewheight);
-		saved_game.write<int32_t>(damageEvent);
-		saved_game.write<int32_t>(damageYaw);
-		saved_game.write<int32_t>(damagePitch);
-		saved_game.write<int32_t>(damageCount);
-		saved_game.write<int32_t>(stats);
-		saved_game.write<int32_t>(persistant);
-		saved_game.write<int32_t>(powerups);
-		saved_game.write<int32_t>(ammo);
-		saved_game.write<int32_t>(inventory);
-		saved_game.write<int8_t>(security_key_message);
-		saved_game.write<float>(serverViewOrg);
-		saved_game.write<int32_t>(saberInFlight);
-
-#ifdef JK2_MODE
-		saved_game.write<int32_t>(saberActive);
-		saved_game.write<int32_t>(vehicleModel);
-		saved_game.write<int32_t>(viewEntity);
-		saved_game.write<int32_t>(saberColor);
-		saved_game.write<float>(saberLength);
-		saved_game.write<float>(saberLengthMax);
-		saved_game.write<int32_t>(forcePowersActive);
-#else
-		saved_game.write<int32_t>(viewEntity);
-		saved_game.write<int32_t>(forcePowersActive);
-#endif // JK2_MODE
-
-		saved_game.write<int32_t>(useTime);
-		saved_game.write<int32_t>(lastShotTime);
-		saved_game.write<int32_t>(ping);
-		saved_game.write<int32_t>(lastOnGround);
-		saved_game.write<int32_t>(lastStationary);
-		saved_game.write<int32_t>(weaponShotCount);
-
-#ifndef JK2_MODE
-		saved_game.write<>(saber);
-		saved_game.write<int32_t>(dualSabers);
-#endif // !JK2_MODE
-
-		saved_game.write<int16_t>(saberMove);
-
-#ifndef JK2_MODE
-		saved_game.write<int16_t>(saberMoveNext);
-#endif // !JK2_MODE
-
-		saved_game.write<int16_t>(saberBounceMove);
-		saved_game.write<int16_t>(saberBlocking);
-		saved_game.write<int16_t>(saberBlocked);
-		saved_game.write<int16_t>(leanStopDebounceTime);
-
-#ifdef JK2_MODE
-		saved_game.skip(2);
-		saved_game.write<float>(saberLengthOld);
-#endif // JK2_MODE
-
-		saved_game.write<int32_t>(saberEntityNum);
-		saved_game.write<float>(saberEntityDist);
-		saved_game.write<int32_t>(saberThrowTime);
-		saved_game.write<int32_t>(saberEntityState);
-		saved_game.write<int32_t>(saberDamageDebounceTime);
-		saved_game.write<int32_t>(saberHitWallSoundDebounceTime);
-		saved_game.write<int32_t>(saberEventFlags);
-		saved_game.write<int32_t>(saberBlockingTime);
-		saved_game.write<int32_t>(saberAnimLevel);
-		saved_game.write<int32_t>(saberAttackChainCount);
-		saved_game.write<int32_t>(saberLockTime);
-		saved_game.write<int32_t>(saberLockEnemy);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(saberStylesKnown);
-#endif // !JK2_MODE
-
-#ifdef JK2_MODE
-		saved_game.write<int32_t>(saberModel);
-#endif // JK2_MODE
-
-		saved_game.write<int32_t>(forcePowersKnown);
-		saved_game.write<int32_t>(forcePowerDuration);
-		saved_game.write<int32_t>(forcePowerDebounce);
-		saved_game.write<int32_t>(forcePower);
-		saved_game.write<int32_t>(forcePowerMax);
-		saved_game.write<int32_t>(forcePowerRegenDebounceTime);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(forcePowerRegenRate);
-		saved_game.write<int32_t>(forcePowerRegenAmount);
-#endif // !JK2_MODE
-
-		saved_game.write<int32_t>(forcePowerLevel);
-		saved_game.write<float>(forceJumpZStart);
-		saved_game.write<float>(forceJumpCharge);
-		saved_game.write<int32_t>(forceGripEntityNum);
-		saved_game.write<float>(forceGripOrg);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(forceDrainEntityNum);
-		saved_game.write<float>(forceDrainOrg);
-#endif // !JK2_MODE
-
-		saved_game.write<int32_t>(forceHealCount);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(forceAllowDeactivateTime);
-		saved_game.write<int32_t>(forceRageDrainTime);
-		saved_game.write<int32_t>(forceRageRecoveryTime);
-		saved_game.write<int32_t>(forceDrainEntNum);
-		saved_game.write<float>(forceDrainTime);
-		saved_game.write<int32_t>(forcePowersForced);
-		saved_game.write<int32_t>(pullAttackEntNum);
-		saved_game.write<int32_t>(pullAttackTime);
-		saved_game.write<int32_t>(lastKickedEntNum);
-#endif // !JK2_MODE
-
-		saved_game.write<int32_t>(taunting);
-		saved_game.write<float>(jumpZStart);
-		saved_game.write<float>(moveDir);
-		saved_game.write<float>(waterheight);
-		saved_game.write<int32_t>(waterHeightLevel);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(ikStatus);
-		saved_game.write<int32_t>(heldClient);
-		saved_game.write<int32_t>(heldByClient);
-		saved_game.write<int32_t>(heldByBolt);
-		saved_game.write<int32_t>(heldByBone);
-		saved_game.write<int32_t>(vehTurnaroundIndex);
-		saved_game.write<int32_t>(vehTurnaroundTime);
-		saved_game.write<int32_t>(brokenLimbs);
-		saved_game.write<int32_t>(electrifyTime);
-#endif // !JK2_MODE
-	}
-
-	void sg_import(
-		ojk::SavedGameHelper& saved_game)
-	{
-		saved_game.read<int32_t>(commandTime);
-		saved_game.read<int32_t>(pm_type);
-		saved_game.read<int32_t>(bobCycle);
-		saved_game.read<int32_t>(pm_flags);
-		saved_game.read<int32_t>(pm_time);
-		saved_game.read<float>(origin);
-		saved_game.read<float>(velocity);
-		saved_game.read<int32_t>(weaponTime);
-		saved_game.read<int32_t>(weaponChargeTime);
-		saved_game.read<int32_t>(rechargeTime);
-		saved_game.read<int32_t>(gravity);
-		saved_game.read<int32_t>(leanofs);
-		saved_game.read<int32_t>(friction);
-		saved_game.read<int32_t>(speed);
-		saved_game.read<int32_t>(delta_angles);
-		saved_game.read<int32_t>(groundEntityNum);
-		saved_game.read<int32_t>(legsAnim);
-		saved_game.read<int32_t>(legsAnimTimer);
-		saved_game.read<int32_t>(torsoAnim);
-		saved_game.read<int32_t>(torsoAnimTimer);
-		saved_game.read<int32_t>(movementDir);
-		saved_game.read<int32_t>(eFlags);
-		saved_game.read<int32_t>(eventSequence);
-		saved_game.read<int32_t>(events);
-		saved_game.read<int32_t>(eventParms);
-		saved_game.read<int32_t>(externalEvent);
-		saved_game.read<int32_t>(externalEventParm);
-		saved_game.read<int32_t>(externalEventTime);
-		saved_game.read<int32_t>(clientNum);
-		saved_game.read<int32_t>(weapon);
-		saved_game.read<int32_t>(weaponstate);
-		saved_game.read<int32_t>(batteryCharge);
-		saved_game.read<float>(viewangles);
-		saved_game.read<float>(legsYaw);
-		saved_game.read<int32_t>(viewheight);
-		saved_game.read<int32_t>(damageEvent);
-		saved_game.read<int32_t>(damageYaw);
-		saved_game.read<int32_t>(damagePitch);
-		saved_game.read<int32_t>(damageCount);
-		saved_game.read<int32_t>(stats);
-		saved_game.read<int32_t>(persistant);
-		saved_game.read<int32_t>(powerups);
-		saved_game.read<int32_t>(ammo);
-		saved_game.read<int32_t>(inventory);
-		saved_game.read<int8_t>(security_key_message);
-		saved_game.read<float>(serverViewOrg);
-		saved_game.read<int32_t>(saberInFlight);
-
-#ifdef JK2_MODE
-		saved_game.read<int32_t>(saberActive);
-		saved_game.read<int32_t>(vehicleModel);
-		saved_game.read<int32_t>(viewEntity);
-		saved_game.read<int32_t>(saberColor);
-		saved_game.read<float>(saberLength);
-		saved_game.read<float>(saberLengthMax);
-		saved_game.read<int32_t>(forcePowersActive);
-#else
-		saved_game.read<int32_t>(viewEntity);
-		saved_game.read<int32_t>(forcePowersActive);
-#endif // JK2_MODE
-
-		saved_game.read<int32_t>(useTime);
-		saved_game.read<int32_t>(lastShotTime);
-		saved_game.read<int32_t>(ping);
-		saved_game.read<int32_t>(lastOnGround);
-		saved_game.read<int32_t>(lastStationary);
-		saved_game.read<int32_t>(weaponShotCount);
-
-#ifndef JK2_MODE
-		saved_game.read<>(saber);
-		saved_game.read<int32_t>(dualSabers);
-#endif // !JK2_MODE
-
-		saved_game.read<int16_t>(saberMove);
-
-#ifndef JK2_MODE
-		saved_game.read<int16_t>(saberMoveNext);
-#endif // !JK2_MODE
-
-		saved_game.read<int16_t>(saberBounceMove);
-		saved_game.read<int16_t>(saberBlocking);
-		saved_game.read<int16_t>(saberBlocked);
-		saved_game.read<int16_t>(leanStopDebounceTime);
-
-#ifdef JK2_MODE
-		saved_game.skip(2);
-		saved_game.read<float>(saberLengthOld);
-#endif // JK2_MODE
-
-		saved_game.read<int32_t>(saberEntityNum);
-		saved_game.read<float>(saberEntityDist);
-		saved_game.read<int32_t>(saberThrowTime);
-		saved_game.read<int32_t>(saberEntityState);
-		saved_game.read<int32_t>(saberDamageDebounceTime);
-		saved_game.read<int32_t>(saberHitWallSoundDebounceTime);
-		saved_game.read<int32_t>(saberEventFlags);
-		saved_game.read<int32_t>(saberBlockingTime);
-		saved_game.read<int32_t>(saberAnimLevel);
-		saved_game.read<int32_t>(saberAttackChainCount);
-		saved_game.read<int32_t>(saberLockTime);
-		saved_game.read<int32_t>(saberLockEnemy);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(saberStylesKnown);
-#endif // !JK2_MODE
-
-#ifdef JK2_MODE
-		saved_game.read<int32_t>(saberModel);
-#endif // JK2_MODE
-
-		saved_game.read<int32_t>(forcePowersKnown);
-		saved_game.read<int32_t>(forcePowerDuration);
-		saved_game.read<int32_t>(forcePowerDebounce);
-		saved_game.read<int32_t>(forcePower);
-		saved_game.read<int32_t>(forcePowerMax);
-		saved_game.read<int32_t>(forcePowerRegenDebounceTime);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(forcePowerRegenRate);
-		saved_game.read<int32_t>(forcePowerRegenAmount);
-#endif // !JK2_MODE
-
-		saved_game.read<int32_t>(forcePowerLevel);
-		saved_game.read<float>(forceJumpZStart);
-		saved_game.read<float>(forceJumpCharge);
-		saved_game.read<int32_t>(forceGripEntityNum);
-		saved_game.read<float>(forceGripOrg);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(forceDrainEntityNum);
-		saved_game.read<float>(forceDrainOrg);
-#endif // !JK2_MODE
-
-		saved_game.read<int32_t>(forceHealCount);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(forceAllowDeactivateTime);
-		saved_game.read<int32_t>(forceRageDrainTime);
-		saved_game.read<int32_t>(forceRageRecoveryTime);
-		saved_game.read<int32_t>(forceDrainEntNum);
-		saved_game.read<float>(forceDrainTime);
-		saved_game.read<int32_t>(forcePowersForced);
-		saved_game.read<int32_t>(pullAttackEntNum);
-		saved_game.read<int32_t>(pullAttackTime);
-		saved_game.read<int32_t>(lastKickedEntNum);
-#endif // !JK2_MODE
-
-		saved_game.read<int32_t>(taunting);
-		saved_game.read<float>(jumpZStart);
-		saved_game.read<float>(moveDir);
-		saved_game.read<float>(waterheight);
-		saved_game.read<int32_t>(waterHeightLevel);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(ikStatus);
-		saved_game.read<int32_t>(heldClient);
-		saved_game.read<int32_t>(heldByClient);
-		saved_game.read<int32_t>(heldByBolt);
-		saved_game.read<int32_t>(heldByBone);
-		saved_game.read<int32_t>(vehTurnaroundIndex);
-		saved_game.read<int32_t>(vehTurnaroundTime);
-		saved_game.read<int32_t>(brokenLimbs);
-		saved_game.read<int32_t>(electrifyTime);
-#endif // !JK2_MODE
-	}
-}; // PlayerStateBase
-
-
-using playerState_t = PlayerStateBase<saberInfo_t>;
 //====================================================================
 
 
@@ -2387,195 +1785,66 @@ typedef struct {// !!!!!!!!!!! LOADSAVE-affecting struct !!!!!!!!!!
 // The messages are delta compressed, so it doesn't really matter if
 // the structure size is fairly large
 
-typedef struct entityState_s {// !!!!!!!!!!! LOADSAVE-affecting struct !!!!!!!!!!!!!
-	int		number;			// entity index
-	int		eType;			// entityType_t
-	int		eFlags;
+// SOF2-specific entityState_t — 256 bytes (0x100)
+// Verified from gamex86.dll: CEntity_Constructor zeros 0x40 dwords (256 bytes)
+// Field offsets verified from CG_TransitionEntity, CG_EntityEvent, G_SetOrigin, G_AddEvent
+// XOR-obfuscated delta compression (SOF2 extension over Q3A)
+typedef struct entityState_s {
+	int		number;			// 0x00  entity index
+	int		eType;			// 0x04  entityType_t
+	int		eFlags;			// 0x08  EF_* flags
 
-	trajectory_t	pos;	// for calculating position
-	trajectory_t	apos;	// for calculating angles
+	trajectory_t	pos;	// 0x0C  position trajectory (36 bytes → ends at 0x30)
+	trajectory_t	apos;	// 0x30  angle trajectory (36 bytes → ends at 0x54)
 
-	int		time;
-	int		time2;
+	int		time;			// 0x54
+	int		time2;			// 0x58
 
-	vec3_t	origin;
-	vec3_t	origin2;
+	vec3_t	origin;			// 0x5C
+	vec3_t	origin2;		// 0x68
 
-	vec3_t	angles;
-	vec3_t	angles2;
+	vec3_t	angles;			// 0x74
+	vec3_t	angles2;		// 0x80
 
-	int		otherEntityNum;	// shotgun sources, etc
-	int		otherEntityNum2;
+	int		otherEntityNum;		// 0x8C  shotgun sources, etc
+	int		otherEntityNum2;	// 0x90
 
-	int		groundEntityNum;	// -1 = in air
+	int		groundEntityNum;	// 0x94  -1 = in air
 
-	int		constantLight;	// r + (g<<8) + (b<<16) + (intensity<<24)
-	int		loopSound;		// constantly loop this sound
+	int		constantLight;	// 0x98  r + (g<<8) + (b<<16) + (intensity<<24)
+	int		loopSound;		// 0x9C  constantly loop this sound
 
-	int		modelindex;
-	int		modelindex2;
-	int		modelindex3;
-	int		clientNum;		// 0 to (MAX_CLIENTS - 1), for players and corpses
-	int		frame;
+	int		modelindex;		// 0xA0
+	int		modelindex2;	// 0xA4
+	int		clientNum;		// 0xA8  0 to (MAX_CLIENTS - 1), for players and corpses
+	int		frame;			// 0xAC
 
-	int		solid;			// for client side prediction, gi.linkentity sets this properly
+	int		solid;			// 0xB0  for client side prediction, gi.linkentity sets this properly
 
-	int		event;			// impulse events -- muzzle flashes, footsteps, etc
-	int		eventParm;
+	int		event;			// 0xB4  impulse events -- muzzle flashes, footsteps, etc
+	int		eventParm;		// 0xB8
 
 	// for players
-	int		powerups;		// bit flags
-	int		weapon;			// determines weapon and flash model, etc
-	int		legsAnim;		//
-	int		legsAnimTimer;	// don't change low priority animations on legs until this runs out
-	int		torsoAnim;		//
-	int		torsoAnimTimer;	// don't change low priority animations on torso until this runs out
+	int		powerups;		// 0xBC  bit flags
+	int		weapon;			// 0xC0  determines weapon and flash model, etc
+	int		legsAnim;		// 0xC4
+	int		torsoAnim;		// 0xC8
 
-	int		scale;			//Scale players
+	// SOF2-specific Ghoul2 fields (replace JKA's modelScale/radius/boltInfo/scale/saber/vehicle)
+	int		g2radius;		// 0xCC  Ghoul2 collision radius; repurposed per event type
+	int		boltIndex;		// 0xD0  bolt attachment info
+	int		boltToPlayer;	// 0xD4
+	int		teamNum;		// 0xD8
+	int		npcType;		// 0xDC  NPC class type
+	int		generic1;		// 0xE0
+	int		soundSetIndex;	// 0xE4
+	int		material;		// 0xE8
+	int		skinIndex;		// 0xEC
+	unsigned char	animationData[12];	// 0xF0  compact Ghoul2 animation hint (12 bytes)
+	int		xorKey;			// 0xFC  XOR obfuscation key for delta compression
+} entityState_t;			// Total: 0x100 = 256 bytes
 
-	//FIXME: why did IMMERSION dupe these 2 fields here?  There's no reason for this!!!
-	qboolean	saberInFlight;
-	qboolean	saberActive;
-
-#ifdef JK2_MODE
-	int		vehicleModel;	// For overriding your playermodel with a drivable vehicle
-#endif
-
-#ifndef JK2_MODE
-	//int		vehicleIndex;		// What kind of vehicle you're driving
-	vec3_t	vehicleAngles;		//
-	int		vehicleArmor;		// current armor of your vehicle (explodes if drops to 0)
-	// 0 if not in a vehicle, otherwise the client number.
-	int m_iVehicleNum;
-#endif // !JK2_MODE
-
-/*
-Ghoul2 Insert Start
-*/
-	vec3_t	modelScale;		// used to scale models in any axis
-	int		radius;			// used for culling all the ghoul models attached to this ent NOTE - this is automatically scaled by Ghoul2 if/when you scale the model. This is a 100% size value
-	int		boltInfo;		// info used for bolting entities to Ghoul2 models - NOT used for bolting ghoul2 models to themselves, more for stuff like bolting effects to ghoul2 models
-/*
-Ghoul2 Insert End
-*/
-
-#ifndef JK2_MODE
-	qboolean	isPortalEnt;
-#endif // !JK2_MODE
-
-
-	void sg_export(
-		ojk::SavedGameHelper& saved_game) const
-	{
-		saved_game.write<int32_t>(number);
-		saved_game.write<int32_t>(eType);
-		saved_game.write<int32_t>(eFlags);
-		saved_game.write<>(pos);
-		saved_game.write<>(apos);
-		saved_game.write<int32_t>(time);
-		saved_game.write<int32_t>(time2);
-		saved_game.write<float>(origin);
-		saved_game.write<float>(origin2);
-		saved_game.write<float>(angles);
-		saved_game.write<float>(angles2);
-		saved_game.write<int32_t>(otherEntityNum);
-		saved_game.write<int32_t>(otherEntityNum2);
-		saved_game.write<int32_t>(groundEntityNum);
-		saved_game.write<int32_t>(constantLight);
-		saved_game.write<int32_t>(loopSound);
-		saved_game.write<int32_t>(modelindex);
-		saved_game.write<int32_t>(modelindex2);
-		saved_game.write<int32_t>(modelindex3);
-		saved_game.write<int32_t>(clientNum);
-		saved_game.write<int32_t>(frame);
-		saved_game.write<int32_t>(solid);
-		saved_game.write<int32_t>(event);
-		saved_game.write<int32_t>(eventParm);
-		saved_game.write<int32_t>(powerups);
-		saved_game.write<int32_t>(weapon);
-		saved_game.write<int32_t>(legsAnim);
-		saved_game.write<int32_t>(legsAnimTimer);
-		saved_game.write<int32_t>(torsoAnim);
-		saved_game.write<int32_t>(torsoAnimTimer);
-		saved_game.write<int32_t>(scale);
-		saved_game.write<int32_t>(saberInFlight);
-		saved_game.write<int32_t>(saberActive);
-
-#ifdef JK2_MODE
-		saved_game.write<int32_t>(vehicleModel);
-#endif // JK2_MODE
-
-#ifndef JK2_MODE
-		saved_game.write<float>(vehicleAngles);
-		saved_game.write<int32_t>(vehicleArmor);
-		saved_game.write<int32_t>(m_iVehicleNum);
-#endif // !JK2_MODE
-
-		saved_game.write<float>(modelScale);
-		saved_game.write<int32_t>(radius);
-		saved_game.write<int32_t>(boltInfo);
-
-#ifndef JK2_MODE
-		saved_game.write<int32_t>(isPortalEnt);
-#endif // !JK2_MODE
-	}
-
-	void sg_import(
-		ojk::SavedGameHelper& saved_game)
-	{
-		saved_game.read<int32_t>(number);
-		saved_game.read<int32_t>(eType);
-		saved_game.read<int32_t>(eFlags);
-		saved_game.read<>(pos);
-		saved_game.read<>(apos);
-		saved_game.read<int32_t>(time);
-		saved_game.read<int32_t>(time2);
-		saved_game.read<float>(origin);
-		saved_game.read<float>(origin2);
-		saved_game.read<float>(angles);
-		saved_game.read<float>(angles2);
-		saved_game.read<int32_t>(otherEntityNum);
-		saved_game.read<int32_t>(otherEntityNum2);
-		saved_game.read<int32_t>(groundEntityNum);
-		saved_game.read<int32_t>(constantLight);
-		saved_game.read<int32_t>(loopSound);
-		saved_game.read<int32_t>(modelindex);
-		saved_game.read<int32_t>(modelindex2);
-		saved_game.read<int32_t>(modelindex3);
-		saved_game.read<int32_t>(clientNum);
-		saved_game.read<int32_t>(frame);
-		saved_game.read<int32_t>(solid);
-		saved_game.read<int32_t>(event);
-		saved_game.read<int32_t>(eventParm);
-		saved_game.read<int32_t>(powerups);
-		saved_game.read<int32_t>(weapon);
-		saved_game.read<int32_t>(legsAnim);
-		saved_game.read<int32_t>(legsAnimTimer);
-		saved_game.read<int32_t>(torsoAnim);
-		saved_game.read<int32_t>(torsoAnimTimer);
-		saved_game.read<int32_t>(scale);
-		saved_game.read<int32_t>(saberInFlight);
-		saved_game.read<int32_t>(saberActive);
-
-#ifdef JK2_MODE
-		saved_game.read<int32_t>(vehicleModel);
-#endif // JK2_MODE
-
-#ifndef JK2_MODE
-		saved_game.read<float>(vehicleAngles);
-		saved_game.read<int32_t>(vehicleArmor);
-		saved_game.read<int32_t>(m_iVehicleNum);
-#endif // !JK2_MODE
-
-		saved_game.read<float>(modelScale);
-		saved_game.read<int32_t>(radius);
-		saved_game.read<int32_t>(boltInfo);
-
-#ifndef JK2_MODE
-		saved_game.read<int32_t>(isPortalEnt);
-#endif // !JK2_MODE
-	}
-} entityState_t;
+static_assert(sizeof(entityState_t) == 256, "entityState_t must be exactly 256 bytes for SOF2 compatibility");
 
 
 typedef enum {

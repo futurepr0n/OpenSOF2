@@ -349,9 +349,7 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 	int		leafnum;
 	const byte *clientpvs;
 	const byte *bitvector;
-#ifndef JK2_MODE
-	qboolean sightOn = qfalse;
-#endif
+	// SOF2: sightOn removed (no Force powers)
 
 	// during an error shutdown message we may need to transmit
 	// the shutdown message after the server has shutdown, so
@@ -369,15 +367,7 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 
 	clientpvs = CM_ClusterPVS (clientcluster);
 
-#ifndef JK2_MODE
-	if ( !portal )
-	{//not if this if through a portal...???  James said to do this...
-		if ( (frame->ps.forcePowersActive&(1<<FP_SEE)) )
-		{
-			sightOn = qtrue;
-		}
-	}
-#endif // !JK2_MODE
+	// SOF2: no Force powers — sightOn stays qfalse
 
 	for ( e = 0 ; e < MAX_GENTITIES ; e++ ) {
 		ent = SV_GentityNum(e);
@@ -430,16 +420,7 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 		}
 #endif
 
-#ifndef JK2_MODE
-		if ( sightOn )
-		{//force sight is on, sees through portals, so draw them always if in radius
-			if ( SV_PlayerCanSeeEnt( ent, frame->ps.forcePowerLevel[FP_SEE] ) )
-			{//entity is visible
-				SV_AddEntToSnapshot( svEnt, ent, eNums );
-				continue;
-			}
-		}
-#endif // !JK2_MODE
+		// SOF2: no Force sight — skip force-see entity visibility check
 
 		// ignore if not touching a PV leaf
 		// check area
@@ -554,29 +535,12 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		if ( clPS ) {
 			VectorCopy( clPS->origin, org );
 			org[2] += clPS->viewheight;
-
-			// need to account for lean, or areaportal doors don't draw properly
-			if (frame->ps.leanofs != 0)
-			{
-				vec3_t	right;
-				vec3_t v3ViewAngles;
-				VectorCopy(clPS->viewangles, v3ViewAngles);
-				v3ViewAngles[2] += (float)frame->ps.leanofs/2;
-				AngleVectors(v3ViewAngles, NULL, right, NULL);
-				VectorMA(org, (float)frame->ps.leanofs, right, org);
-			}
+			// SOF2: no lean mechanic — basic origin + viewheight is sufficient
 		} else {
 			VectorClear( org );
 		}
 	}
-	VectorCopy( org, frame->ps.serverViewOrg );
-	{
-		int clientNum = client - svs.clients;
-		playerState_t *clPS = SV_GameClientNum( clientNum );
-		if ( clPS ) {
-			VectorCopy( org, clPS->serverViewOrg );
-		}
-	}
+	// SOF2: no serverViewOrg in playerState_t — skip copy
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints

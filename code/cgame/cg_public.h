@@ -34,38 +34,39 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // needs to be larger than PACKET_BACKUP
 
 
-#define	MAX_ENTITIES_IN_SNAPSHOT	512
+#define	MAX_ENTITIES_IN_SNAPSHOT	256		// SOF2 uses 256 (verified from SoF2.exe CL_GetSnapshot)
 
 #define	SNAPFLAG_RATE_DELAYED		1		// the server withheld a packet to save bandwidth
 #define	SNAPFLAG_DROPPED_COMMANDS	2		// the server lost some cmds coming from the client
 
 // snapshots are a view of the server at a given time
-
-// Snapshots are generated at regular time intervals by the server,
-// but they may not be sent if a client's rate level is exceeded, or
-// they may be dropped by the network.
+//
+// SOF2 snapshot_t layout verified from SoF2.exe CL_GetSnapshot decompilation:
+//   +0x000: serverTime, +0x004: snapFlags, +0x008: ping,
+//   +0x00C: areamask[32], +0x02C: playerState_t (472 bytes),
+//   +0x204: pad, +0x208: serverCommandSequence,
+//   +0x20C: numEntities, +0x210: entities[]
 #ifndef SNAPSHOT_S_DEFINED
 #define SNAPSHOT_S_DEFINED
 struct snapshot_s
 {
-	int				snapFlags;			// SNAPFLAG_RATE_DELAYED, SNAPFLAG_DROPPED_COMMANDS
+	int				serverTime;		// +0x00 server time the message is valid for (in msec)
 
-	int				serverTime;		// server time the message is valid for (in msec)
+	int				snapFlags;		// +0x04 SNAPFLAG_RATE_DELAYED, SNAPFLAG_DROPPED_COMMANDS
 
-	byte			areamask[MAX_MAP_AREA_BYTES];		// portalarea visibility bits
+	int				ping;			// +0x08 round-trip time
 
-	int				cmdNum;			// the next cmdNum the server is expecting
-									// client side prediction should start with this cmd
-	playerState_t	ps;						// complete information about the current player at this time
+	byte			areamask[MAX_MAP_AREA_BYTES];	// +0x0C portalarea visibility bits (32 bytes)
 
-	int				numEntities;			// all of the entities that need to be presented
-	entityState_t	entities[MAX_ENTITIES_IN_SNAPSHOT];	// at the time of this snapshot
+	playerState_t	ps;				// +0x2C complete information about the current player (472 bytes)
 
-	int				numConfigstringChanges;	// configstrings that have changed since the last
-	int				configstringNum;		// acknowledged snapshot_t (which is usually NOT the previous snapshot!)
+	int				pad_204;		// +0x204 unused padding (not written by CL_GetSnapshot)
 
-	int				numServerCommands;		// text based server commands to execute when this
-	int				serverCommandSequence;	// snapshot becomes current
+	int				serverCommandSequence;	// +0x208 execute all commands up to this
+
+	int				numEntities;	// +0x20C all of the entities that need to be presented
+
+	entityState_t	entities[MAX_ENTITIES_IN_SNAPSHOT];	// +0x210 at the time of this snapshot
 };
 
 typedef snapshot_s snapshot_t;

@@ -1460,9 +1460,12 @@ void RE_LoadWorldMap_Actual( const char *name, world_t &worldData, int index ) {
 //
 void RE_LoadWorldMap( const char *name )
 {
+	ri.Printf( PRINT_ALL, "[WORLD] RE_LoadWorldMap( '%s' ) enter\n", name ? name : "(null)" );
 	*(ri.gbUsingCachedMapDataRightNow()) = qtrue;	// !!!!!!!!!!!!
 
 		RE_LoadWorldMap_Actual( name, s_worldData, 0 );
 
 	*(ri.gbUsingCachedMapDataRightNow()) = qfalse;	// !!!!!!!!!!!!
+	ri.Printf( PRINT_ALL, "[WORLD] RE_LoadWorldMap done: numSurfaces=%d, lightmaps=%d\n",
+		s_worldData.numsurfaces, s_worldData.numClusters );
 }

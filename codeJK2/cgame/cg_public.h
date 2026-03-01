@@ -46,7 +46,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define	CMD_BACKUP			64
 #define	CMD_MASK			(CMD_BACKUP - 1)
 
+#ifndef MAX_ENTITIES_IN_SNAPSHOT
 #define	MAX_ENTITIES_IN_SNAPSHOT	512
+#endif
 
 #define	SNAPFLAG_RATE_DELAYED		1
 #define	SNAPFLAG_DROPPED_COMMANDS	2
@@ -390,7 +392,7 @@ typedef struct {
 	                                                         // +0x00 [0]  CG_Init
 	void    (*Shutdown)(void);                               // +0x04 [1]  CG_Shutdown
 	int     (*ConsoleCommand)(void);                         // +0x08 [2]  CG_ConsoleCommand
-	void    (*DrawInformation)(void);                        // +0x0c [3]  CG_DrawInformation (loading screen)
+	void    (*DrawInformation)(int serverTime);               // +0x0c [3]  CG_DrawInformation (full rendering pipeline)
 	void    (*DrawActiveFrame)(int serverTime, int stereoView, int demoPlayback);
 	                                                         // +0x10 [4]  CG_DrawActiveFrame
 

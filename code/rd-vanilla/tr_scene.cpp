@@ -271,13 +271,19 @@ void RE_RenderScene( const refdef_t *fd ) {
 	viewParms_t		parms;
 	int				startTime;
 	static int		lastTime = 0;
+	static int renderSceneCount = 0;
+	renderSceneCount++;
 
 	if ( !tr.registered ) {
+		if ( renderSceneCount <= 5 )
+			ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: tr.registered=false, SKIP\n", renderSceneCount );
 		return;
 	}
 	GLimp_LogComment( "====== RE_RenderScene =====\n" );
 
 	if ( r_norefresh->integer ) {
+		if ( renderSceneCount <= 5 )
+			ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: r_norefresh=1, SKIP\n", renderSceneCount );
 		return;
 	}
 
@@ -285,6 +291,15 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	if (!tr.world && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
 		Com_Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
+	}
+
+	if ( renderSceneCount <= 5 ) {
+		ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: vieworg=(%.1f,%.1f,%.1f) fov=(%.1f,%.1f) size=(%dx%d) rdflags=0x%x tr.world=%p\n",
+			renderSceneCount,
+			fd->vieworg[0], fd->vieworg[1], fd->vieworg[2],
+			fd->fov_x, fd->fov_y,
+			fd->width, fd->height,
+			fd->rdflags, (void*)tr.world );
 	}
 
 //	memcpy( tr.refdef.text, fd->text, sizeof( tr.refdef.text ) );
