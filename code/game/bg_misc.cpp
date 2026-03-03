@@ -520,7 +520,8 @@ void EvaluateTrajectory( const trajectory_t *tr, int atTime, vec3_t result ) {
 		result[2] -= 0.5F * g_gravity->value * deltaTime * deltaTime;//DEFAULT_GRAVITY
 		break;
 	default:
-		Com_Error( ERR_DROP, "EvaluateTrajectory: unknown trType: %i", tr->trTime );
+		Com_Error( ERR_DROP, "EvaluateTrajectory: unknown trType=%i trTime=%i trDuration=%i",
+			tr->trType, tr->trTime, tr->trDuration );
 		break;
 	}
 }
@@ -573,7 +574,8 @@ void EvaluateTrajectoryDelta( const trajectory_t *tr, int atTime, vec3_t result 
 		result[2] -= g_gravity->value * deltaTime;		// DEFAULT_GRAVITY
 		break;
 	default:
-		Com_Error( ERR_DROP, "EvaluateTrajectoryDelta: unknown trType: %i", tr->trTime );
+		Com_Error( ERR_DROP, "EvaluateTrajectoryDelta: unknown trType=%i trTime=%i trDuration=%i",
+			tr->trType, tr->trTime, tr->trDuration );
 		break;
 	}
 }

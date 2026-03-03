@@ -24,6 +24,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "q_shared.h"
 #include "qcommon.h"
 #include "../server/server.h"
+#include <stdio.h>
+static FILE *overflowLog = nullptr;
 
 /*
 ==============================================================================
@@ -39,6 +41,7 @@ void MSG_Init( msg_t *buf, byte *data, int length ) {
 	memset (buf, 0, sizeof(*buf));
 	buf->data = data;
 	buf->maxsize = length;
+    overflowLog = fopen("snapshot_overflow.log", "w");
 }
 
 void MSG_Clear( msg_t *buf ) {
@@ -114,6 +117,7 @@ void MSG_WriteBits( msg_t *msg, int value, int bits ) {
 		msg->overflowed = qtrue;
 #ifndef FINAL_BUILD
 		Com_Printf (S_COLOR_RED"MSG_WriteBits: buffer Full writing %d in %d bits\n", value, bits);
+    if (overflowLog) { fprintf(overflowLog, "MSG_WriteBits: buffer Full writing %d in %d bits\n", value, bits); fflush(overflowLog); }
 #endif
 		return;
 	}
@@ -128,9 +132,8 @@ void MSG_WriteBits( msg_t *msg, int value, int bits ) {
 			if ( value > ( ( 1 << bits ) - 1 ) || value < 0 ) {
 				overflows++;
 #ifndef FINAL_BUILD
-#ifdef _DEBUG
-				Com_Printf (S_COLOR_RED"MSG_WriteBits: overflow writing %d in %d bits\n", value, bits);
-#endif
+				Com_Printf (S_COLOR_RED"MSG_WriteBits: overflow writing %d (0x%X) in %d bits\n", value, value, bits);
+    if (overflowLog) { fprintf(overflowLog, "MSG_WriteBits: overflow writing %d (0x%X) in %d bits\n", value, value, bits); fflush(overflowLog); }
 #endif
 			}
 		} else {
@@ -143,6 +146,7 @@ void MSG_WriteBits( msg_t *msg, int value, int bits ) {
 #ifndef FINAL_BUILD
 #ifdef _DEBUG
 				Com_Printf (S_COLOR_RED"MSG_WriteBits: overflow writing %d in %d bits\n", value, bits);
+    if (overflowLog) { fprintf(overflowLog, "MSG_WriteBits: overflow writing %d in %d bits\n", value, bits); fflush(overflowLog); }
 #endif
 #endif
 			}
@@ -644,12 +648,32 @@ void MSG_WriteField (msg_t *msg, const int *toF, const netField_t *field)
 				MSG_WriteBits( msg, *toF, 32 );
 			}
 		}
- 	} else {
+	} else {
 		if (*toF == 0) {
 			MSG_WriteBits( msg, 0, 1 );	//it's a zero
 		} else {
+			qboolean overflow = qfalse;
+
 			MSG_WriteBits( msg, 1, 1 );	//not a zero
 			// integer
+			if ( field->bits > 0 ) {
+				if ( field->bits < 32 ) {
+					const int maxValue = ( 1 << field->bits ) - 1;
+					overflow = ( *toF > maxValue || *toF < 0 ) ? qtrue : qfalse;
+				}
+			} else if ( field->bits < 0 ) {
+				const int signedBits = -field->bits;
+				if ( signedBits < 32 ) {
+					const int maxValue = ( 1 << ( signedBits - 1 ) ) - 1;
+					const int minValue = -( 1 << ( signedBits - 1 ) );
+					overflow = ( *toF > maxValue || *toF < minValue ) ? qtrue : qfalse;
+				}
+			}
+
+			if ( overflow ) {
+				Com_Printf( S_COLOR_RED"MSG_WriteField overflow: %s is %d (0x%X) for %d bits\n",
+					field->name, *toF, *toF, field->bits );
+			}
 			MSG_WriteBits( msg, *toF, field->bits );
 		}
  	}

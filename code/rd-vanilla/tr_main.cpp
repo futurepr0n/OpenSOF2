@@ -1208,6 +1208,23 @@ void R_SortDrawSurfs( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	int				fogNum;
 	int				entityNum;
 	int				dlighted;
+	drawSurf_t		*drawSurfBase = backEndData ? backEndData->drawSurfs : NULL;
+	drawSurf_t		*drawSurfEnd = drawSurfBase ? ( drawSurfBase + MAX_DRAWSURFS ) : NULL;
+
+	if ( drawSurfBase && ( drawSurfs < drawSurfBase || drawSurfs >= drawSurfEnd ) ) {
+		static int badDrawSurfBaseLogCount = 0;
+		if ( badDrawSurfBaseLogCount < 16 ) {
+			ri.Printf( PRINT_ALL,
+				"[RS] R_SortDrawSurfs: invalid drawSurfs=%p num=%d base=%p end=%p refdefNum=%d\n",
+				(void *)drawSurfs,
+				numDrawSurfs,
+				(void *)drawSurfBase,
+				(void *)drawSurfEnd,
+				tr.refdef.numDrawSurfs );
+			badDrawSurfBaseLogCount++;
+		}
+		return;
+	}
 
 	// it is possible for some views to not have any surfaces
 	if ( numDrawSurfs < 1 ) {
@@ -1230,6 +1247,22 @@ void R_SortDrawSurfs( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	// may cause another view to be rendered first
 	for ( int i = 0 ; i < numDrawSurfs ; i++ ) {
 		R_DecomposeSort( (drawSurfs+i)->sort, &entityNum, &shader, &fogNum, &dlighted );
+
+		if ( !shader ) {
+			static int badDrawSurfLogCount = 0;
+			if ( badDrawSurfLogCount < 16 ) {
+				ri.Printf( PRINT_ALL,
+					"[RS] R_SortDrawSurfs: null shader for drawSurf[%d] sort=0x%08x surface=%p entity=%d fog=%d dlight=%d\n",
+					i,
+					(drawSurfs + i)->sort,
+					(void *)(drawSurfs + i)->surface,
+					entityNum,
+					fogNum,
+					dlighted );
+				badDrawSurfLogCount++;
+			}
+			continue;
+		}
 
 		if ( shader->sort > SS_PORTAL ) {
 			break;

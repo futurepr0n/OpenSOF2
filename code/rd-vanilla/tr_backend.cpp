@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "tr_local.h"
+#include <cstdio>
 #include "tr_common.h"
 
 backEndData_t	*backEndData;
@@ -1025,8 +1026,45 @@ const void *RB_StretchPic ( const void *data ) {
 	const stretchPicCommand_t	*cmd;
 	shader_t *shader;
 	int		numVerts, numIndexes;
+	static int largeStretchLogCount = 0;
 
 	cmd = (const stretchPicCommand_t *)data;
+
+	if ( ( cmd->w > 900.0f || cmd->h > 500.0f ) && largeStretchLogCount < 64 ) {
+		const char *shaderName = "<null>";
+		FILE *probeFile;
+		if ( cmd->shader && cmd->shader->name[0] ) {
+			shaderName = cmd->shader->name;
+		}
+
+		ri.Printf( PRINT_ALL,
+			"[2D] large StretchPic #%d x=%.1f y=%.1f w=%.1f h=%.1f s1=%.3f t1=%.3f s2=%.3f t2=%.3f shader=%s rgba=(%u,%u,%u,%u)\n",
+			largeStretchLogCount + 1,
+			cmd->x, cmd->y, cmd->w, cmd->h,
+			cmd->s1, cmd->t1, cmd->s2, cmd->t2,
+			shaderName,
+			(unsigned int)backEnd.color2D[0],
+			(unsigned int)backEnd.color2D[1],
+			(unsigned int)backEnd.color2D[2],
+			(unsigned int)backEnd.color2D[3] );
+
+		probeFile = fopen( "stretchpic_probe.log", "a" );
+		if ( probeFile ) {
+			fprintf( probeFile,
+				"[2D] large StretchPic #%d x=%.1f y=%.1f w=%.1f h=%.1f s1=%.3f t1=%.3f s2=%.3f t2=%.3f shader=%s rgba=(%u,%u,%u,%u)\n",
+				largeStretchLogCount + 1,
+				cmd->x, cmd->y, cmd->w, cmd->h,
+				cmd->s1, cmd->t1, cmd->s2, cmd->t2,
+				shaderName,
+				(unsigned int)backEnd.color2D[0],
+				(unsigned int)backEnd.color2D[1],
+				(unsigned int)backEnd.color2D[2],
+				(unsigned int)backEnd.color2D[3] );
+			fclose( probeFile );
+		}
+
+		largeStretchLogCount++;
+	}
 
 	if ( !backEnd.projection2D ) {
 		RB_SetGL2D();
@@ -1567,7 +1605,6 @@ const void	*RB_SwapBuffers( const void *data ) {
 	}
 
     GLimp_LogComment( "***************** RB_SwapBuffers *****************\n\n\n" );
-
 	ri.WIN_Present(&window);
 
 	backEnd.projection2D = qfalse;

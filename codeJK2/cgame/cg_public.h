@@ -388,7 +388,7 @@ SOF2 SP does NOT export CG_KeyEvent/CG_MouseEvent/CG_EventHandling.
 
 typedef struct {
 	// --- Core callbacks (slots 0-4) ---
-	void    (*Init)(int serverMessageNum, int serverCommandSequence, int clientNum);
+	void    (*Init)(int processedSnapshotNum, int serverCommandSequence, int clientNum, int weapon);
 	                                                         // +0x00 [0]  CG_Init
 	void    (*Shutdown)(void);                               // +0x04 [1]  CG_Shutdown
 	int     (*ConsoleCommand)(void);                         // +0x08 [2]  CG_ConsoleCommand

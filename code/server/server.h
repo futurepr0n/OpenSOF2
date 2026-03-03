@@ -42,6 +42,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // for primary BSP (worldIndex=0) and sub-BSP (worldIndex=1).
 // Offsets verified from original SoF2.exe SV_LinkEntityInWorld @ 0x1001a0f0.
 // =============================================================================
+#define SOF2_ENT_SERVERINDEX(e) (*(int *)((byte *)(e) + 0x004))
 #define SOF2_ENT_NUMBER(e)      (*(int *)((byte *)(e) + 0x008))
 #define SOF2_ENT_ETYPE(e)       (*(int *)((byte *)(e) + 0x00C))
 #define SOF2_ENT_EFLAGS(e)      (*(int *)((byte *)(e) + 0x010))

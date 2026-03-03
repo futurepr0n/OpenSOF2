@@ -2275,6 +2275,7 @@ void RenderSurfaces(CRenderSurface &RS)
 		else if ( RS.skin )
 		{
 			int		j;
+			qboolean matchedSkinSurface = qfalse;
 
 			// match the surface name to something in the skin file
 			shader = R_GetShaderByHandle( surfInfo->shaderIndex );	//tr.defaultShader;
@@ -2284,7 +2285,29 @@ void RenderSurfaces(CRenderSurface &RS)
 				if ( !strcmp( RS.skin->surfaces[j]->name, surfInfo->name ) )
 				{
 					shader = RS.skin->surfaces[j]->shader;
+					matchedSkinSurface = qtrue;
 					break;
+				}
+			}
+
+			if ( !matchedSkinSurface ) {
+				static int sof2SkinMissLogCount = 0;
+
+				if ( sof2SkinMissLogCount < 48 ) {
+					ri.Printf( PRINT_ALL,
+						"[SOF2 g2] skin miss model='%s' surf='%s' defaultShader='%s' skin='%s' numSurfaces=%d\n",
+						RS.currentModel->name,
+						surfInfo->name,
+						shader ? shader->name : "<null>",
+						RS.skin->name,
+						RS.skin->numSurfaces );
+					for ( j = 0; j < RS.skin->numSurfaces && j < 8; j++ ) {
+						ri.Printf( PRINT_ALL, "[SOF2 g2]   skinSurf[%d]='%s' shader='%s'\n",
+							j,
+							RS.skin->surfaces[j]->name,
+							RS.skin->surfaces[j]->shader ? RS.skin->surfaces[j]->shader->name : "<null>" );
+					}
+					sof2SkinMissLogCount++;
 				}
 			}
 		}

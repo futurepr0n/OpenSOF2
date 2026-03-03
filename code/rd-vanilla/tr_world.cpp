@@ -785,6 +785,11 @@ R_AddWorldSurfaces
 =============
 */
 void R_AddWorldSurfaces (void) {
+	static int worldLogCount = 0;
+	static int worldFallbackLogCount = 0;
+	const int drawSurfBase = tr.refdef.numDrawSurfs;
+	int i;
+
 	if ( !r_drawworld->integer ) {
 		return;
 	}
@@ -808,4 +813,40 @@ void R_AddWorldSurfaces (void) {
 	}
 
 	R_RecursiveWorldNode( tr.world->nodes, 31, ( 1 << tr.refdef.num_dlights ) - 1 );
+
+	// SOF2 compatibility: if the first traversal produces no world surfaces,
+	// treat it as a broken PVS/areamask result and force all nodes visible.
+	if ( tr.refdef.numDrawSurfs == drawSurfBase ) {
+		tr.visCount++;
+		for ( i = 0 ; i < tr.world->numnodes ; i++ ) {
+			if ( tr.world->nodes[i].contents != CONTENTS_SOLID ) {
+				tr.world->nodes[i].visframe = tr.visCount;
+			}
+		}
+
+		ClearBounds( tr.viewParms.visBounds[0], tr.viewParms.visBounds[1] );
+		R_RecursiveWorldNode( tr.world->nodes, 31, ( 1 << tr.refdef.num_dlights ) - 1 );
+
+		if ( worldFallbackLogCount < 8 ) {
+			ri.Printf( PRINT_ALL,
+				"[WORLD draw] fallback #%d forced-all-visible drawSurfs=%d (+%d)\n",
+				worldFallbackLogCount + 1,
+				tr.refdef.numDrawSurfs,
+				tr.refdef.numDrawSurfs - drawSurfBase );
+			worldFallbackLogCount++;
+		}
+	}
+
+	if ( worldLogCount < 8 ) {
+		ri.Printf( PRINT_ALL,
+			"[WORLD draw] #%d rdflags=0x%x noworld=%d drawSurfs=%d (+%d) entities=%d dlights=%d\n",
+			worldLogCount + 1,
+			tr.refdef.rdflags,
+			(tr.refdef.rdflags & RDF_NOWORLDMODEL) ? 1 : 0,
+			tr.refdef.numDrawSurfs,
+			tr.refdef.numDrawSurfs - drawSurfBase,
+			tr.refdef.num_entities,
+			tr.refdef.num_dlights );
+		worldLogCount++;
+	}
 }

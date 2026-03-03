@@ -262,6 +262,26 @@ void NORETURN Sys_Quit (void) {
     Sys_Exit(0);
 }
 
+#ifdef _MSC_VER
+#include <rtcapi.h>
+static int __cdecl MyRTCFailureHandler(int errType, const char *file, int line, const char *module, const char *format, ...) {
+	va_list vl;
+	va_start(vl, format);
+	char buf[2048];
+	vsnprintf(buf, sizeof(buf), format, vl);
+	va_end(vl);
+	
+	FILE *fp = fopen("E:\\SOF2\\OpenSOF2\\rtc_error.log", "a");
+	if (fp) {
+		fprintf(fp, "\n--- RTC ERROR ---\n");
+		fprintf(fp, "Type: %d\nFile: %s:%d\nModule: %s\nMessage: %s\n", errType, file?file:"?", line, module?module:"?", buf);
+		fprintf(fp, "-----------------\n\n");
+		fclose(fp);
+	}
+	return 0;
+}
+#endif
+
 /*
 ============
 Sys_FileTime
@@ -753,6 +773,10 @@ int main ( int argc, char* argv[] )
 {
 	int		i;
 	char	commandLine[ MAX_STRING_CHARS ] = { 0 };
+
+#ifdef _MSC_VER
+	_RTC_SetErrorFunc(MyRTCFailureHandler);
+#endif
 
 	Sys_PlatformInit( argc, argv );
 	CON_Init();

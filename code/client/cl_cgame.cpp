@@ -37,6 +37,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #endif
 #include "../codeJK2/cgame/cg_public.h"
 #include <intrin.h>
+#include <stdio.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -46,6 +47,7 @@ vm_t	cgvm;
 // SOF2: cgame is a separate struct-based DLL loaded via GetCGameAPI(), not vmMain dispatch.
 static cgame_export_t *cge          = NULL;
 static void           *cgameLibrary = NULL;
+static void CG_FileTrace( const char *fmt, ... );
 
 // Forward declarations needed by wrapper helpers / import table below
 extern qboolean CL_GetDefaultState( int index, entityState_t *state );
@@ -71,9 +73,34 @@ qboolean CL_GetServerCommand( int serverCommandNumber );
 // Wrapper helpers for cgame_import_t signature mismatches
 // -----------------------------------------------------------------------
 
-// slot 32: Z_Malloc(int size) — SOF2 cgame wants single-arg version
-static void *Z_Malloc_stub( int size ) {
-	return Z_Malloc( size, TAG_ALL, qfalse );
+// SOF2 cgame actually calls this as Z_Malloc(size, tag, clear). Accept the
+// extra args so allocator-backed grids are zero-initialized like the original.
+static void *Z_Malloc_stub( int size, int tag, int clear ) {
+	memtag_t memTag = ( tag > 0 ) ? (memtag_t)tag : TAG_ALL;
+	return Z_Malloc( size, memTag, (qboolean)( clear != 0 ) );
+}
+
+#define SOF2_GLCONFIG_SIZE              0x898
+#define SOF2_GLCONFIG_VIDWIDTH_OFFSET   0x87c
+#define SOF2_GLCONFIG_VIDHEIGHT_OFFSET  0x880
+#define SOF2_GLCONFIG_ASPECT_OFFSET     0x884
+#define SOF2_GLCONFIG_DISPLAYFREQ_OFFSET 0x888
+#define SOF2_GLCONFIG_FULLSCREEN_OFFSET 0x88c
+
+static void CL_GetGlconfig_SOF2( void *glconfigRaw ) {
+	byte *dst = (byte *)glconfigRaw;
+
+	if ( !dst ) {
+		return;
+	}
+
+	memset( dst, 0, SOF2_GLCONFIG_SIZE );
+	*(int *)( dst + SOF2_GLCONFIG_VIDWIDTH_OFFSET ) = cls.glconfig.vidWidth;
+	*(int *)( dst + SOF2_GLCONFIG_VIDHEIGHT_OFFSET ) = cls.glconfig.vidHeight;
+	*(float *)( dst + SOF2_GLCONFIG_ASPECT_OFFSET ) =
+		( cls.glconfig.vidHeight > 0 ) ? ( (float)cls.glconfig.vidWidth / (float)cls.glconfig.vidHeight ) : 1.0f;
+	*(int *)( dst + SOF2_GLCONFIG_DISPLAYFREQ_OFFSET ) = cls.glconfig.displayFrequency;
+	*(int *)( dst + SOF2_GLCONFIG_FULLSCREEN_OFFSET ) = cls.glconfig.isFullscreen ? 1 : 0;
 }
 
 // slot 67: CL_CM_LoadMap(name, clientLoad, checksum*) — SOF2 cgame signature
@@ -155,6 +182,154 @@ static void CG_Cvar_SetModified( const char *name ) {
 	char buf[MAX_CVAR_VALUE_STRING];
 	Cvar_VariableStringBuffer( name, buf, sizeof(buf) );
 	Cvar_Set( name, buf );
+}
+
+// SOF2 cgame exposes a cvar_t*-returning import and expects the original
+// inline-name SOF2 layout rather than OpenJK's pointer-based cvar_t.
+typedef struct sof2_cvar_s {
+	char    name[64];
+	void   *next;
+	char   *string;
+	char   *resetString;
+	char   *latchedString;
+	int     flags;
+	int     modified;
+	int     modificationCount;
+	float   value;
+	int     integer;
+} sof2_cvar_t;
+
+#define MAX_SOF2_CGAME_CVARS 256
+static sof2_cvar_t s_sof2CgCvars[MAX_SOF2_CGAME_CVARS];
+static cvar_t     *s_sof2CgCvarReal[MAX_SOF2_CGAME_CVARS];
+static int         s_sof2CgCvarCount = 0;
+static int         s_cgRenderSerial = 0;
+static int         s_cgCvarUpdatesThisRender = 0;
+static int         s_cgRenderDepth = 0;
+
+static void CG_SOF2_SyncCvar( int idx ) {
+	cvar_t *real = s_sof2CgCvarReal[idx];
+
+	s_sof2CgCvars[idx].string            = real->string;
+	s_sof2CgCvars[idx].resetString       = real->resetString;
+	s_sof2CgCvars[idx].latchedString     = real->latchedString;
+	s_sof2CgCvars[idx].flags             = real->flags;
+	s_sof2CgCvars[idx].modified          = real->modified;
+	s_sof2CgCvars[idx].modificationCount = real->modificationCount;
+	s_sof2CgCvars[idx].value             = real->value;
+	s_sof2CgCvars[idx].integer           = real->integer;
+}
+
+static int CG_SOF2_FindCvarByName( const char *name ) {
+	if ( !name ) {
+		return -1;
+	}
+
+	for ( int i = 0; i < s_sof2CgCvarCount; i++ ) {
+		if ( !Q_stricmp( s_sof2CgCvars[i].name, name ) ) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+static void CG_SOF2_SyncAfterSet( const char *name ) {
+	const int idx = CG_SOF2_FindCvarByName( name );
+
+	if ( idx >= 0 ) {
+		CG_SOF2_SyncCvar( idx );
+	}
+}
+
+static cvar_t *CG_Cvar_GetModified_SOF2( const char *name, const char *val, int flags ) {
+	cvar_t *real = Cvar_Get( name, val, flags );
+
+	if ( !real ) {
+		return NULL;
+	}
+
+	for ( int i = 0; i < s_sof2CgCvarCount; i++ ) {
+		if ( s_sof2CgCvarReal[i] == real ) {
+			CG_SOF2_SyncCvar( i );
+			return (cvar_t *)&s_sof2CgCvars[i];
+		}
+	}
+
+	if ( s_sof2CgCvarCount >= MAX_SOF2_CGAME_CVARS ) {
+		Com_Error( ERR_FATAL, "CG_Cvar_GetModified_SOF2: too many cvars (%d)", MAX_SOF2_CGAME_CVARS );
+		return NULL;
+	}
+
+	const int idx = s_sof2CgCvarCount++;
+	s_sof2CgCvarReal[idx] = real;
+	Q_strncpyz( s_sof2CgCvars[idx].name, real->name, sizeof( s_sof2CgCvars[idx].name ) );
+	s_sof2CgCvars[idx].next = NULL;
+	CG_SOF2_SyncCvar( idx );
+
+	return (cvar_t *)&s_sof2CgCvars[idx];
+}
+
+static void CG_Cvar_Set_SOF2( const char *name, const char *value ) {
+	if ( !name ) {
+		return;
+	}
+
+	Cvar_Set( name, value );
+	CG_SOF2_SyncAfterSet( name );
+}
+
+static void CG_Cvar_SetValue_SOF2( const char *name, float value ) {
+	if ( !name ) {
+		return;
+	}
+
+	Cvar_SetValue( name, value );
+	CG_SOF2_SyncAfterSet( name );
+}
+
+static void CG_Cvar_Update_SOF2( vmCvar_t *vmCvar ) {
+	static int cgCvarUpdateCount = 0;
+	static qboolean loggedCaller = qfalse;
+	const int callIndex = ++cgCvarUpdateCount;
+	void *caller = _ReturnAddress();
+
+	if ( !vmCvar ) {
+		Com_Printf( "^1[CG CVAR] Update #%d with NULL vmCvar caller=%p draw=%d\n",
+			callIndex, caller, s_cgRenderSerial );
+		return;
+	}
+
+	s_cgCvarUpdatesThisRender++;
+
+#ifdef _WIN32
+	__try {
+		if ( !loggedCaller ) {
+			Com_Printf( "[CG CVAR] first caller=%p vmCvar=%p draw=%d\n",
+				caller, vmCvar, s_cgRenderSerial );
+			loggedCaller = qtrue;
+		}
+
+		if ( callIndex <= 32 || ( callIndex % 1024 ) == 0 ) {
+			Com_Printf( "[CG CVAR] Update #%d vmCvar=%p handle=%d mod=%d draw=%d drawCount=%d caller=%p\n",
+				callIndex,
+				vmCvar,
+				vmCvar->handle,
+				vmCvar->modificationCount,
+				s_cgRenderSerial,
+				s_cgCvarUpdatesThisRender,
+				caller );
+		}
+
+		Cvar_Update( vmCvar );
+	}
+	__except ( EXCEPTION_EXECUTE_HANDLER ) {
+		Com_Printf( "^1[CG CVAR] exception 0x%08x in Cvar_Update(vmCvar=%p caller=%p draw=%d drawCount=%d)\n",
+			GetExceptionCode(), vmCvar, caller, s_cgRenderSerial, s_cgCvarUpdatesThisRender );
+	}
+#else
+	Cvar_Update( vmCvar );
+#endif
 }
 
 // ----- Slot 34: Z_CheckHeap -----
@@ -356,6 +531,202 @@ static void CG_R_AddAdditiveLightToScene( const vec3_t org, float intensity,
 	re.AddLightToScene( org, intensity, r, g, b );
 }
 
+static void CG_R_ClearScene_Wrapper( void ) {
+	static int clearSceneLogCount = 0;
+	if ( clearSceneLogCount < 12 ) {
+		Com_Printf( "[CG scene] ClearScene #%d depth=%d state=%d renderSerial=%d\n",
+			clearSceneLogCount + 1, s_cgRenderDepth, (int)cls.state, s_cgRenderSerial );
+		clearSceneLogCount++;
+	}
+	re.ClearScene();
+}
+
+static void CG_R_DrawStretchPic_Wrapper( float x, float y, float w, float h,
+		unsigned int packedColor, qhandle_t hShader, int /*unused*/ ) {
+	static int badShaderLogCount = 0;
+	vec4_t rgba;
+	qhandle_t resolvedShader = hShader;
+	const float *resolvedColor = NULL;
+
+	// SOF2 uses two observed forms here:
+	// 1) (x,y,w,h, packedColor, shader, 0)
+	// 2) (x,y,w,h, shader, whiteShader, 0)
+	if ( hShader == cls.whiteShader && packedColor > 0 && packedColor <= 0xFFFFu ) {
+		resolvedShader = (qhandle_t)packedColor;
+		resolvedColor = NULL;
+	}
+	else {
+		rgba[0] = ( ( packedColor >> 0 ) & 0xFF ) / 255.0f;
+		rgba[1] = ( ( packedColor >> 8 ) & 0xFF ) / 255.0f;
+		rgba[2] = ( ( packedColor >> 16 ) & 0xFF ) / 255.0f;
+		rgba[3] = ( ( packedColor >> 24 ) & 0xFF ) / 255.0f;
+		resolvedColor = rgba;
+	}
+
+	if ( resolvedShader <= 0 || (unsigned int)resolvedShader > 0xFFFFu ) {
+		if ( badShaderLogCount < 16 ) {
+			Com_Printf( "^3[CG] dropping SOF2 DrawStretchPic with invalid shader %d (0x%08X) arg5=0x%08X caller=%p\n",
+				resolvedShader, (unsigned int)resolvedShader, packedColor, _ReturnAddress() );
+			badShaderLogCount++;
+		}
+		return;
+	}
+
+	re.SetColor( resolvedColor );
+	re.DrawStretchPic( x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, resolvedShader );
+	re.SetColor( NULL );
+}
+
+static void CG_R_DrawStretchPicColor_Wrapper( float x, float y, float w, float h,
+		float s1, float t1, float s2, float t2, const float *color, qhandle_t hShader ) {
+	static int badShaderLogCount = 0;
+
+	if ( hShader <= 0 || (unsigned int)hShader > 0xFFFFu ) {
+		if ( badShaderLogCount < 16 ) {
+			Com_Printf( "^3[CG] dropping colored stretch pic with invalid shader %d (0x%08X) color=%p caller=%p\n",
+				hShader, (unsigned int)hShader, color, _ReturnAddress() );
+			badShaderLogCount++;
+		}
+		return;
+	}
+
+	if ( color == (const float *)-1 ) {
+		color = NULL;
+	}
+
+	re.SetColor( color );
+	re.DrawStretchPic( x, y, w, h, s1, t1, s2, t2, hShader );
+	re.SetColor( NULL );
+}
+
+static void CG_R_SetColor_SOF2( const void *colorOrPacked ) {
+	uintptr_t raw = (uintptr_t)colorOrPacked;
+	vec4_t rgba;
+
+	if ( raw == (uintptr_t)-1 || raw == 0 ) {
+		re.SetColor( NULL );
+		return;
+	}
+
+	// SOF2 sometimes passes packed ARGB/RGBA-style immediates instead of a float*.
+	if ( raw <= 0xFFFFFFFFu && ( raw < 0x01000000u || raw >= 0xF0000000u ) ) {
+		rgba[0] = ( ( raw >> 0 ) & 0xFF ) / 255.0f;
+		rgba[1] = ( ( raw >> 8 ) & 0xFF ) / 255.0f;
+		rgba[2] = ( ( raw >> 16 ) & 0xFF ) / 255.0f;
+		rgba[3] = ( ( raw >> 24 ) & 0xFF ) / 255.0f;
+		re.SetColor( rgba );
+		return;
+	}
+
+	re.SetColor( (const float *)colorOrPacked );
+}
+
+static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
+	static int addRefEntityLogCount = 0;
+	if ( addRefEntityLogCount < 12 && ent ) {
+		Com_Printf( "[CG scene] AddRefEntity #%d type=%d origin=(%.1f,%.1f,%.1f) hModel=%d customSkin=%d renderfx=0x%x\n",
+			addRefEntityLogCount + 1,
+			(int)ent->reType,
+			ent->origin[0], ent->origin[1], ent->origin[2],
+			(int)ent->hModel,
+			(int)ent->customSkin,
+			(unsigned int)ent->renderfx );
+		addRefEntityLogCount++;
+	}
+	re.AddRefEntityToScene( ent );
+}
+
+static void CG_R_AddLightToScene_Wrapper( const vec3_t org, float intensity,
+		float r, float g, float b ) {
+	static int addLightLogCount = 0;
+	if ( addLightLogCount < 12 ) {
+		Com_Printf( "[CG scene] AddLight #%d org=(%.1f,%.1f,%.1f) intensity=%.1f rgb=(%.2f,%.2f,%.2f)\n",
+			addLightLogCount + 1,
+			org[0], org[1], org[2],
+			intensity, r, g, b );
+		addLightLogCount++;
+	}
+	re.AddLightToScene( org, intensity, r, g, b );
+}
+
+typedef struct {
+	int x;
+	int y;
+	int width;
+	int height;
+	float fov_x;
+	float fov_y;
+	vec3_t vieworg;
+	vec3_t viewaxis[3];
+	int time;
+	int rdflags;
+	byte areamask[MAX_MAP_AREA_BYTES];
+} sof2_refdef_t;
+
+static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
+	refdef_t localRefdef;
+	static int renderLogCount = 0;
+
+	if ( !sof2Refdef ) {
+		CG_FileTrace( "CG_R_RenderScene_Wrapper null refdef" );
+		return;
+	}
+
+	memset( &localRefdef, 0, sizeof( localRefdef ) );
+	localRefdef.x = sof2Refdef->x;
+	localRefdef.y = sof2Refdef->y;
+	localRefdef.width = sof2Refdef->width;
+	localRefdef.height = sof2Refdef->height;
+	localRefdef.fov_x = sof2Refdef->fov_x;
+	localRefdef.fov_y = sof2Refdef->fov_y;
+	VectorCopy( sof2Refdef->vieworg, localRefdef.vieworg );
+	VectorCopy( sof2Refdef->viewaxis[0], localRefdef.viewaxis[0] );
+	VectorCopy( sof2Refdef->viewaxis[1], localRefdef.viewaxis[1] );
+	VectorCopy( sof2Refdef->viewaxis[2], localRefdef.viewaxis[2] );
+	localRefdef.viewContents = 0;
+	localRefdef.time = sof2Refdef->time;
+	localRefdef.rdflags = sof2Refdef->rdflags;
+	memcpy( localRefdef.areamask, sof2Refdef->areamask, sizeof( localRefdef.areamask ) );
+	if ( renderLogCount < 6 ) {
+		CG_FileTrace( "RS #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x",
+			renderLogCount + 1,
+			localRefdef.x,
+			localRefdef.y,
+			localRefdef.width,
+			localRefdef.height,
+			localRefdef.fov_x,
+			localRefdef.fov_y,
+			localRefdef.vieworg[0],
+			localRefdef.vieworg[1],
+			localRefdef.vieworg[2],
+			localRefdef.viewContents,
+			localRefdef.time,
+			localRefdef.rdflags );
+		Com_Printf(
+			"[SOF2 RS] #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x\n",
+			renderLogCount + 1,
+			localRefdef.x,
+			localRefdef.y,
+			localRefdef.width,
+			localRefdef.height,
+			localRefdef.fov_x,
+			localRefdef.fov_y,
+			localRefdef.vieworg[0],
+			localRefdef.vieworg[1],
+			localRefdef.vieworg[2],
+			0,
+			localRefdef.time,
+			localRefdef.rdflags );
+			renderLogCount++;
+	}
+	__try {
+		re.RenderScene( &localRefdef );
+	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
+		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
+		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
+	}
+}
+
 // ----- Slot 141: R_FillRect -----
 static void CG_R_FillRect( float x, float y, float w, float h, const float *color ) {
 	re.SetColor( color );
@@ -488,6 +859,50 @@ static int CG_NullSlotSentinel( void ) {
 	if ( sentinelCallCount <= 20 || sentinelCallCount % 3000 == 0 )
 		Com_Printf( "^1[CGAME] Called NULL import slot! retAddr=%p\n", retAddr );
 	return 0;
+}
+
+static int CG_NullSlotSentinelTagged( int slot ) {
+	void *retAddr = _ReturnAddress();
+	static int sentinelCallCount = 0;
+	sentinelCallCount++;
+	if ( sentinelCallCount <= 40 || sentinelCallCount % 3000 == 0 ) {
+		Com_Printf( "^1[CGAME] Called NULL import slot %d! retAddr=%p\n", slot, retAddr );
+	}
+	return 0;
+}
+
+static int CG_NullSlot142( void ) { return CG_NullSlotSentinelTagged( 142 ); }
+static int CG_NullSlot145( void ) { return CG_NullSlotSentinelTagged( 145 ); }
+static int CG_NullSlot149( void ) { return CG_NullSlotSentinelTagged( 149 ); }
+
+static entityState_t *CG_GetNextReliableEvent( int index ) {
+	static int logCount = 0;
+
+	if ( logCount < 8 ) {
+		Com_Printf( "[CG] reliable event iterator stubbed: index=%d caller=%p\n",
+			index, _ReturnAddress() );
+		logCount++;
+	}
+
+	return NULL;
+}
+
+static void CG_FlushReliableEvents( void ) {
+	static qboolean logged = qfalse;
+
+	if ( !logged ) {
+		Com_Printf( "[CG] reliable event flush stubbed caller=%p\n", _ReturnAddress() );
+		logged = qtrue;
+	}
+}
+
+static void CG_Slot58_NoOp( const void *arg ) {
+	static qboolean logged = qfalse;
+
+	if ( !logged ) {
+		Com_Printf( "[CG] slot 58 stubbed arg=%p caller=%p\n", arg, _ReturnAddress() );
+		logged = qtrue;
+	}
 }
 
 // ----- Slot 53: R_SetupFrustum -----
@@ -643,7 +1058,28 @@ static int CL_GetServerCommand_int( int serverCommandNumber ) {
 // slot 94: CL_GetCurrentSnapshotNumber wrapper (SOF2 returns int, engine func returns void)
 static int CL_GetCurrentSnapshotNumber_wrapper( int *snapshotNumber, int *serverTime ) {
 	CL_GetCurrentSnapshotNumber( snapshotNumber, serverTime );
+	static int logCount = 0;
+	if ( logCount < 12 ) {
+		Com_Printf( "[SNAP] CL_GetCurrentSnapshotNumber #%d num=%d serverTime=%d\n",
+			logCount + 1,
+			snapshotNumber ? *snapshotNumber : -1,
+			serverTime ? *serverTime : -1 );
+		logCount++;
+	}
 	return *snapshotNumber;
+}
+
+static void CL_GetGameState_wrapper( gameState_t *gs ) {
+	static int logCount = 0;
+	if ( logCount < 6 ) {
+		Com_Printf( "[SNAP] CL_GetGameState #%d gs=%p\n", logCount + 1, (void *)gs );
+		logCount++;
+	}
+	CL_GetGameState( gs );
+}
+
+static qboolean CL_GetSnapshot_wrapper( int snapshotNumber, snapshot_t *snapshot ) {
+	return CL_GetSnapshot( snapshotNumber, snapshot );
 }
 
 // slot 57: Com_WriteCam — slot is variadic; engine function takes pre-formatted string only
@@ -655,6 +1091,76 @@ static void Com_WriteCam_wrapper( const char *fmt, ... ) {
 	va_end( args );
 	Com_WriteCam( buf );
 }
+
+static void CG_UpdateScreen_SOF2( void ) {
+	static int nestedSkipCount = 0;
+
+	if ( s_cgRenderDepth > 0 ) {
+		if ( nestedSkipCount < 8 ) {
+			Com_Printf( "[CG] skipped nested UpdateScreen during render depth=%d\n", s_cgRenderDepth );
+			nestedSkipCount++;
+		}
+		return;
+	}
+
+	SCR_UpdateScreen();
+}
+
+#ifdef _WIN32
+static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
+	void *faultAddr = NULL;
+	unsigned int exceptionCode = 0;
+	void *exceptionAddr = NULL;
+	unsigned long accessType = 0;
+	void *stackRet = NULL;
+	unsigned int eax = 0;
+	unsigned int ebx = 0;
+	unsigned int ecx = 0;
+	unsigned int edx = 0;
+	unsigned int esi = 0;
+	unsigned int edi = 0;
+	unsigned int esp = 0;
+
+	if ( ep && ep->ExceptionRecord ) {
+		exceptionCode = ep->ExceptionRecord->ExceptionCode;
+		exceptionAddr = ep->ExceptionRecord->ExceptionAddress;
+		if ( ep->ExceptionRecord->NumberParameters >= 2 ) {
+			accessType = (unsigned long)ep->ExceptionRecord->ExceptionInformation[0];
+			faultAddr = (void *)ep->ExceptionRecord->ExceptionInformation[1];
+		}
+	}
+
+	if ( ep && ep->ContextRecord ) {
+		eax = ep->ContextRecord->Eax;
+		ebx = ep->ContextRecord->Ebx;
+		ecx = ep->ContextRecord->Ecx;
+		edx = ep->ContextRecord->Edx;
+		esi = ep->ContextRecord->Esi;
+		edi = ep->ContextRecord->Edi;
+		esp = ep->ContextRecord->Esp;
+		if ( esp ) {
+			stackRet = *(void **)esp;
+		}
+	}
+
+	Com_Printf(
+		"^1[CG] exception 0x%08X in DrawInformation at %p accessType=%lu fault=%p ret=%p eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
+		exceptionCode,
+		exceptionAddr,
+		accessType,
+		faultAddr,
+		stackRet,
+		eax,
+		ebx,
+		ecx,
+		edx,
+		esi,
+		edi,
+		esp );
+
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 /*
 Ghoul2 Insert Start
 */
@@ -680,6 +1186,38 @@ qboolean CL_InitCGameVM( void * /*gameLibrary*/ )
 	return qtrue;
 }
 
+static void CG_FileTrace( const char *fmt, ... ) {
+	FILE *fp;
+	va_list args;
+
+	fp = fopen( "cgame_trace.log", "a" );
+	if ( !fp ) {
+		return;
+	}
+
+	va_start( args, fmt );
+	vfprintf( fp, fmt, args );
+	va_end( args );
+	fputc( '\n', fp );
+	fclose( fp );
+}
+
+static void CL_PatchDllRet( HMODULE module, unsigned int rva, const char *name ) {
+	unsigned char *pFunc = (unsigned char *)module + rva;
+	DWORD oldProt;
+
+	if ( !VirtualProtect( pFunc, 1, PAGE_EXECUTE_READWRITE, &oldProt ) ) {
+		Com_Printf( "CL_InitSOF2CGame: failed to patch %s @ RVA 0x%X\n", name, rva );
+		CG_FileTrace( "patch failed %s rva=0x%X", name, rva );
+		return;
+	}
+
+	pFunc[0] = 0xC3; // RET
+	VirtualProtect( pFunc, 1, oldProt, &oldProt );
+	Com_Printf( "CL_InitSOF2CGame: patched %s @ RVA 0x%X\n", name, rva );
+	CG_FileTrace( "patched %s rva=0x%X", name, rva );
+}
+
 /*
 ===================
 CL_InitSOF2CGame
@@ -689,22 +1227,27 @@ Called from CL_InitCGame() when the map starts.
 ===================
 */
 qboolean CL_InitSOF2CGame( void ) {
-	typedef cgame_export_t *GetCGameAPIProc( int version, cgame_import_t *import );
+	typedef cgame_export_t *(__cdecl *GetCGameAPIProc)( int version, cgame_import_t *import );
 
+	CG_FileTrace( "CL_InitSOF2CGame enter" );
 	cgameLibrary = Sys_LoadSPGameDll( "cgame", NULL );   // "cgame" + ARCH_STRING("x86") + DLL_EXT = "cgamex86.dll"
 	if ( !cgameLibrary ) {
 		Com_Printf( "CL_InitSOF2CGame: failed to load cgamex86" ARCH_STRING DLL_EXT ": %s\n",
 					Sys_LibraryError() );
+		CG_FileTrace( "load failed: %s", Sys_LibraryError() ? Sys_LibraryError() : "(null)" );
 		return qfalse;
 	}
+	CG_FileTrace( "cgameLibrary=%p", cgameLibrary );
 
-	GetCGameAPIProc *GetCGameAPI = (GetCGameAPIProc *)Sys_LoadFunction( cgameLibrary, "GetCGameAPI" );
+	GetCGameAPIProc GetCGameAPI = (GetCGameAPIProc)Sys_LoadFunction( cgameLibrary, "GetCGameAPI" );
 	if ( !GetCGameAPI ) {
 		Sys_UnloadDll( cgameLibrary );
 		cgameLibrary = NULL;
 		Com_Printf( "CL_InitSOF2CGame: GetCGameAPI not found\n" );
+		CG_FileTrace( "GetCGameAPI missing" );
 		return qfalse;
 	}
+	CG_FileTrace( "GetCGameAPI=%p", GetCGameAPI );
 
 	// -----------------------------------------------------------------------
 	// Binary patch: CGlassMgr::ResolveConstraints (RVA 0x16BB0) crashes because
@@ -713,13 +1256,20 @@ qboolean CL_InitSOF2CGame( void ) {
 	// -----------------------------------------------------------------------
 	{
 		HMODULE hCgame = (HMODULE)cgameLibrary;
-		unsigned char *pFunc = (unsigned char *)hCgame + 0x16BB0;
-		DWORD oldProt;
-		if ( VirtualProtect( pFunc, 1, PAGE_EXECUTE_READWRITE, &oldProt ) ) {
-			pFunc[0] = 0xC3; // RET
-			VirtualProtect( pFunc, 1, oldProt, &oldProt );
-			Com_Printf( "CL_InitSOF2CGame: patched CGlassMgr::ResolveConstraints @ RVA 0x16BB0\n" );
-		}
+		CL_PatchDllRet( hCgame, 0x16BB0, "CGlassMgr::ResolveConstraints" );
+
+		// Temporary isolation patch set: short-circuit the SP/HUD overlay path after
+		// the world scene is built so we can verify that active map rendering survives.
+		CL_PatchDllRet( hCgame, 0x00A2D0, "CG_DrawSkyboxPortal" );
+		CL_PatchDllRet( hCgame, 0x00AC50, "CG_DrawRaindrops" );
+		CL_PatchDllRet( hCgame, 0x00B180, "CG_DrawFPS" );
+		CL_PatchDllRet( hCgame, 0x00B2E0, "CG_DrawTimerHUD" );
+		CL_PatchDllRet( hCgame, 0x00B3A0, "CG_DrawCrosshairHitMarker" );
+		CL_PatchDllRet( hCgame, 0x00B4F0, "CG_DrawScopeOverlay" );
+		CL_PatchDllRet( hCgame, 0x00BFA0, "CG_DrawCorpseMarkers" );
+		CL_PatchDllRet( hCgame, 0x040A70, "CG_Draw2DSprites" );
+		CL_PatchDllRet( hCgame, 0x0693C0, "CG_DrawWeaponHUD" );
+		CL_PatchDllRet( hCgame, 0x070750, "CG_DrawVehicleDirection" );
 	}
 
 	// -----------------------------------------------------------------------
@@ -778,18 +1328,18 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.Cmd_ArgvBuffer             = Cmd_ArgvBuffer;
 	// [ 22] Cmd_ArgsBuffer (SOF2 adds 'start' param)
 	import.Cmd_ArgsBuffer             = Cmd_ArgsBuffer_SOF2;
-	// [ 23] Cvar_GetModified — Cvar_Get returns cvar_t*, stub with Cvar_Get
-	import.Cvar_GetModified           = Cvar_Get;
+	// [ 23] Cvar_GetModified — SOF2 expects its original cvar_t layout
+	import.Cvar_GetModified           = CG_Cvar_GetModified_SOF2;
 	// [ 24] Cvar_Register
 	import.Cvar_Register              = Cvar_Register;
 	// [ 25] Cvar_Update
-	import.Cvar_Update                = Cvar_Update;
+	import.Cvar_Update                = CG_Cvar_Update_SOF2;
 	// [ 26] Cvar_Set
-	import.Cvar_Set                   = Cvar_Set;
+	import.Cvar_Set                   = CG_Cvar_Set_SOF2;
 	// [ 27] Cvar_SetModified
 	import.Cvar_SetModified           = CG_Cvar_SetModified;
 	// [ 28] Cvar_SetValue
-	import.Cvar_SetValue              = Cvar_SetValue;
+	import.Cvar_SetValue              = CG_Cvar_SetValue_SOF2;
 	// [ 29] Cvar_VariableIntegerValue
 	import.Cvar_VariableIntegerValue  = Cvar_VariableIntegerValue;
 	// [ 30] Cvar_VariableValue
@@ -798,7 +1348,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.Cvar_VariableStringBuffer  = Cvar_VariableStringBuffer;
 
 	// [ 32] Z_Malloc
-	import.Z_Malloc                   = Z_Malloc_stub;
+	import.Z_Malloc                   = (void *(*)(int))Z_Malloc_stub;
 	// [ 33] Z_Free — wrap to discard int return
 	import.Z_Free                     = Z_Free_void_stub;
 	// [ 34] Z_CheckHeap
@@ -817,7 +1367,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	// [ 57] Com_WriteCam — variadic wrapper needed (engine fn is non-variadic)
 	import.Com_WriteCam               = Com_WriteCam_wrapper;
 	// [ 58] UpdateScreen
-	import.UpdateScreen               = SCR_UpdateScreen;
+	import.UpdateScreen               = CG_UpdateScreen_SOF2;
 	// [59-65] METIS UI dispatch — stubs
 
 	// [ 66] CM_PointContents
@@ -871,9 +1421,9 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.AS_GetBModelSound          = AS_GetBModelSound_wrapper;
 
 	// [ 90] CL_GetGlconfig
-	import.CL_GetGlconfig             = CL_GetGlconfig;
+	import.CL_GetGlconfig             = (void (*)(glconfig_t *))CL_GetGlconfig_SOF2;
 	// [ 91] CL_GetGameState
-	import.CL_GetGameState            = CL_GetGameState;
+	import.CL_GetGameState            = CL_GetGameState_wrapper;
 	// [ 92] CL_AddCgameCommand
 	import.CL_AddCgameCommand         = CL_AddCgameCommand;
 	// [ 93] CL_AddReliableCommand
@@ -881,7 +1431,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	// [ 94] CL_GetCurrentSnapshotNumber
 	import.CL_GetCurrentSnapshotNumber = CL_GetCurrentSnapshotNumber_wrapper;
 	// [ 95] CL_GetSnapshot
-	import.CL_GetSnapshot             = CL_GetSnapshot;
+	import.CL_GetSnapshot             = CL_GetSnapshot_wrapper;
 	// [ 96] CL_GetEntityBaseline
 	import.CL_GetEntityBaseline       = CL_GetEntityBaseline_SOF2;
 	// [ 97] CL_GetServerCommand — int wrapper (engine fn returns qboolean)
@@ -923,6 +1473,8 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.G2API_SetGhoul2ModelIndexes = CG_G2API_SetGhoul2ModelIndexes;
 	// [120] G2API_ReRegisterModels
 	import.G2API_ReRegisterModels     = CG_G2API_ReRegisterModels;
+	// [124] RE_MarkFragments
+	import.RE_MarkFragments           = (void (*)(const vec3_t, const vec3_t, int, float *, int, markFragment_t *))re.MarkFragments;
 	// [121] G2API_GetBoltMatrix
 	import.G2API_GetBoltMatrix        = CG_G2API_GetBoltMatrix;
 	// [122] G2API_SetBoneAnglesOffset
@@ -948,25 +1500,25 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.R_RegisterSkin             = re.RegisterSkin;
 
 	// [132] R_ClearScene
-	import.R_ClearScene               = re.ClearScene;
+	import.R_ClearScene               = CG_R_ClearScene_Wrapper;
 	// [133] R_AddRefEntityToScene
-	import.R_AddRefEntityToScene      = re.AddRefEntityToScene;
+	import.R_AddRefEntityToScene      = CG_R_AddRefEntityToScene_Wrapper;
 	// [134] R_AddMiniRefEntityToScene
 	import.R_AddMiniRefEntityToScene  = CG_R_AddMiniRefEntityToScene;
 	// [135] R_AddPolyToScene (SOF2 has extra 'num' param ignored)
 	import.R_AddPolyToScene           = R_AddPolyToScene_SOF2;
 	// [136] R_AddLightToScene
-	import.R_AddLightToScene          = re.AddLightToScene;
+	import.R_AddLightToScene          = CG_R_AddLightToScene_Wrapper;
 	// [137] R_AddDirectedLightToScene
 	import.R_AddDirectedLightToScene  = CG_R_AddDirectedLightToScene;
 	// [138] R_AddAdditiveLightToScene
 	import.R_AddAdditiveLightToScene  = CG_R_AddAdditiveLightToScene;
 	// [139] R_RenderScene
-	import.R_RenderScene              = re.RenderScene;
+	import.R_RenderScene              = (void (*)(const refdef_t *))CG_R_RenderScene_Wrapper;
 	// [140] R_SetColor
-	import.R_SetColor                 = re.SetColor;
+	import.R_SetColor                 = (void (*)(const vec4_t))CG_R_SetColor_SOF2;
 	// [141] R_DrawStretchPic
-	import.R_DrawStretchPic           = re.DrawStretchPic;
+	import.R_DrawStretchPic           = (decltype(import.R_DrawStretchPic))CG_R_DrawStretchPic_Wrapper;
 	// [142] R_FillRect
 	import.R_FillRect                 = CG_R_FillRect;
 	// [143] R_LerpTag (OpenJK returns void; SOF2 wants int)
@@ -1027,7 +1579,7 @@ qboolean CL_InitSOF2CGame( void ) {
 		// The struct has CL_UI_RealTime at slot 64, but the DLL calls this
 		// at the end of CG_Init after CG_ClearLightStyles() — it's R_ClearScene.
 		// Verified via Ghidra xref: only caller is CG_Init at 0x3002896f.
-		slots[64] = (void *)re.ClearScene;                   // [64] R_ClearScene ← verified
+		slots[64] = (void *)CG_R_ClearScene_Wrapper;         // [64] R_ClearScene ← verified
 
 		// --- Slot 65: CM_PointContents ---
 		// The struct has CL_UI_SnapVector at slot 65 (extra METIS stub that
@@ -1039,6 +1591,7 @@ qboolean CL_InitSOF2CGame( void ) {
 		// --- METIS UI stubs 59, 61, 62 ---
 		// These are SOF2-specific UI helper imports for menu/loading screen management.
 		// Verified via Ghidra xref decompilation of CG_LoadInventoryMenus, CG_SetLoadingLevelshot.
+		slots[58] = (void *)CG_Slot58_NoOp;                  // [58] active HUD helper, currently stubbed for isolation
 		slots[59] = (void *)CG_UI_LoadMenuData;              // [59] UI_LoadMenuData ← verified
 		slots[61] = (void *)CG_UI_MenuReset;                 // [61] UI_MenuReset ← verified
 		slots[62] = (void *)CG_UI_SetInfoScreenText;         // [62] UI_SetInfoScreenText ← verified
@@ -1064,7 +1617,25 @@ qboolean CL_InitSOF2CGame( void ) {
 		slots[81] = (void *)S_Respatialize;                  // [81] S_Respatialize ← verified
 		slots[82] = (void *)S_RegisterSound_SOF2;            // [82] S_RegisterSound ← verified
 
-		// --- Renderer registration 125-129 ---
+		// --- Snapshot / command block 90-99 ---
+		// Verified in cgamex86.dll:
+		// [94] CG_ProcessSnapshots -> CL_GetCurrentSnapshotNumber
+		// [95] CG_ReadNextSnapshot  -> CL_GetSnapshot
+		slots[90] = (void *)CL_GetGlconfig_SOF2;             // [90] CL_GetGlconfig
+		slots[91] = (void *)CL_GetGameState_wrapper;         // [91] CL_GetGameState
+		slots[92] = (void *)CL_AddCgameCommand;              // [92] CL_AddCgameCommand
+		slots[93] = (void *)CL_AddReliableCommand;           // [93] CL_AddReliableCommand
+		slots[94] = (void *)CL_GetCurrentSnapshotNumber_wrapper; // [94] CL_GetCurrentSnapshotNumber
+		slots[95] = (void *)CL_GetSnapshot_wrapper;          // [95] CL_GetSnapshot
+		slots[96] = (void *)CL_GetEntityBaseline_SOF2;       // [96] CL_GetEntityBaseline
+		slots[97] = (void *)CL_GetServerCommand_int;         // [97] CL_GetServerCommand
+		slots[98] = (void *)CL_GetCurrentCmdNumber;          // [98] CL_GetCurrentCmdNumber
+		slots[99] = (void *)CL_GetUserCmd;                   // [99] CL_GetUserCmd
+		slots[103] = (void *)CG_GetNextReliableEvent;        // [103] CG_TransitionSnapshot reliable event iterator
+		slots[104] = (void *)CG_FlushReliableEvents;         // [104] CG_TransitionSnapshot reliable event flush
+
+		// --- Renderer misc / registration 124-129 ---
+		slots[124] = (void *)re.MarkFragments;               // [124] RE_MarkFragments
 		// SOF2 has R_LoadWorldMap at [125]; struct had CL_CM_SelectSubBSP.
 		slots[125] = (void *)re.LoadWorld;                   // [125] R_LoadWorldMap ← verified
 		slots[126] = (void *)re.RegisterModel;               // [126] R_RegisterModel ← verified
@@ -1073,30 +1644,30 @@ qboolean CL_InitSOF2CGame( void ) {
 		slots[129] = (void *)re.RegisterShaderNoMip;         // [129] R_RegisterShaderNoMip ← tentative
 
 		// --- Renderer scene 130-138 ---
-		slots[130] = (void *)re.ClearScene;                  // [130] R_ClearScene ← verified (was wrongly BeginRegistration!)
-		slots[131] = (void *)re.AddRefEntityToScene;         // [131] R_AddRefEntityToScene ← tentative
+		slots[130] = (void *)CG_R_ClearScene_Wrapper;        // [130] R_ClearScene ← verified (was wrongly BeginRegistration!)
+		slots[131] = (void *)CG_R_AddRefEntityToScene_Wrapper; // [131] R_AddRefEntityToScene ← tentative
 		slots[132] = (void *)CG_FX_SetParentEntity;          // [132] FX_SetParentEntity(int entityNum) ← verified
 		slots[133] = (void *)R_AddPolyToScene_SOF2;          // [133] R_AddPolyToScene ← verified
 		slots[134] = (void *)CG_NullSlotSentinel;            // [134] unused (no xrefs) ← verified
-		slots[135] = (void *)re.AddLightToScene;             // [135] R_AddLightToScene ← tentative
+		slots[135] = (void *)CG_R_AddLightToScene_Wrapper;   // [135] R_AddLightToScene ← tentative
 		slots[136] = (void *)CG_R_AddDirectedLightToScene;   // [136] R_AddDirectedLightToScene ← tentative
 		slots[137] = (void *)CG_R_AddAdditiveLightToScene;   // [137] R_AddAdditiveLightToScene ← verified
-		slots[138] = (void *)re.RenderScene;                 // [138] R_RenderScene ← verified
+		slots[138] = (void *)CG_R_RenderScene_Wrapper;       // [138] R_RenderScene ← verified
 
 		// --- Renderer drawing 139-142 ---
-		slots[139] = (void *)re.SetColor;                    // [139] R_SetColor ← verified
-		slots[140] = (void *)re.DrawStretchPic;              // [140] R_DrawStretchPic ← tentative
-		slots[141] = (void *)CG_R_FillRect;                  // [141] R_FillRect or DrawRotatePic ← tentative
-		slots[142] = (void *)CG_NullSlotSentinel;            // [142] SOF2-specific (SetRangeFog-like, 3 args)
+		slots[139] = (void *)CG_R_SetColor_SOF2;             // [139] R_SetColor / packed-color sentinel adapter
+		slots[140] = (void *)CG_R_DrawStretchPic_Wrapper;    // [140] R_DrawStretchPic ← SOF2 ABI adapter
+		slots[141] = (void *)CG_R_DrawStretchPicColor_Wrapper; // [141] colored stretch-pic helper used by CG_DrawChar
+		slots[142] = (void *)CG_NullSlot142;                 // [142] SOF2-specific (SetRangeFog-like, 3 args)
 
 		// --- Tags, effects, bounds 143-149 ---
 		slots[143] = (void *)R_LerpTag_SOF2;                 // [143] R_LerpTag ← tentative
 		slots[144] = (void *)CG_R_RemapShader;               // [144] R_RemapShader ← verified (was wrongly S_StartBGTrack!)
-		slots[145] = (void *)CG_NullSlotSentinel;            // [145] R_RegisterFont (no xrefs, unused)
+		slots[145] = (void *)CG_NullSlot145;                 // [145] R_RegisterFont (no xrefs, unused)
 		slots[146] = (void *)CG_R_SetLightStyle;             // [146] R_SetLightStyle ← verified
 		slots[147] = (void *)re.ModelBounds;                 // [147] R_ModelBounds ← verified CRASH FIX!
 		slots[148] = (void *)CG_RE_DamageSurface;             // [148] RE_DamageSurface ← verified (CG_ClientModel)
-		slots[149] = (void *)CG_NullSlotSentinel;            // [149] R_DamageSurface (SOF2-specific gore, stub)
+		slots[149] = (void *)CG_NullSlot149;                 // [149] R_DamageSurface (SOF2-specific gore, stub)
 
 		// --- Entity token, weather, FF slots 150-162 ---
 		// Verified via Ghidra xref analysis of cgamex86.dll.
@@ -1217,6 +1788,7 @@ CL_GetSnapshot
 qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	clSnapshot_t	*clSnap;
 	int				i, count;
+	static int snapshotLogCount = 0;
 
 	if ( snapshotNumber > cl.frame.messageNum ) {
 		Com_Error( ERR_DROP, "CL_GetSnapshot: snapshotNumber > cl.frame.messageNum" );
@@ -1239,7 +1811,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 		return qfalse;
 	}
 
-	// write the snapshot (SOF2 layout: serverTime, snapFlags, ping, areamask, ps)
+	// write the snapshot block for the SOF2 cgame ABI
 	snapshot->serverTime = clSnap->serverTime;
 	snapshot->snapFlags = clSnap->snapFlags;
 	snapshot->ping = clSnap->ping;
@@ -1258,6 +1830,20 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	{
 		int entNum =  ( clSnap->parseEntitiesNum + i ) & (MAX_PARSE_ENTITIES-1) ;
 		snapshot->entities[i] = cl.parseEntities[ entNum ];
+	}
+
+	if ( snapshotLogCount < 12 ) {
+		Com_Printf(
+			"[SNAP] CL_GetSnapshot #%d req=%d serverTime=%d snapFlags=0x%x ping=%d numEntities=%d parseBase=%d firstEntity=%d\n",
+			snapshotLogCount + 1,
+			snapshotNumber,
+			snapshot->serverTime,
+			snapshot->snapFlags,
+			snapshot->ping,
+			snapshot->numEntities,
+			clSnap->parseEntitiesNum,
+			snapshot->numEntities > 0 ? snapshot->entities[0].number : -1 );
+		snapshotLogCount++;
 	}
 
 	// FIXME: configstring changes and server commands!!!
@@ -2447,8 +3033,19 @@ void CL_InitCGame( void ) {
 		Com_Error( ERR_DROP, "Failed to initialize cgame DLL (cgamex86)" );
 	}
 
-	// init for this gamestate — SOF2 Init(serverMessageNum, serverCommandSequence, clientNum)
-	cge->Init( cl.frame.messageNum, clc.serverCommandSequence, cl.frame.ps.clientNum );
+	// SOF2 cgame consumes a fourth stack argument during Init and seeds its
+	// processed snapshot counter from arg0. Pass the last processed snapshot
+	// number so it will fetch the first live snapshot during active rendering.
+	const int sof2ProcessedSnapshotNum = cl.frame.messageNum - 1;
+	const int sof2InitWeapon = cl.frame.ps.weapon;
+	Com_Printf(
+		"[CG] Init processedSnapshot=%d latestMessage=%d serverCmdSeq=%d clientNum=%d weapon=%d\n",
+		sof2ProcessedSnapshotNum,
+		cl.frame.messageNum,
+		clc.serverCommandSequence,
+		cl.frame.ps.clientNum,
+		sof2InitWeapon );
+	cge->Init( sof2ProcessedSnapshotNum, clc.serverCommandSequence, cl.frame.ps.clientNum, sof2InitWeapon );
 
 	// reset any CVAR_CHEAT cvars registered by cgame
 	if ( !cl_connectedToCheatServer )
@@ -2500,9 +3097,37 @@ CL_CGameRendering
 */
 void CL_CGameRendering( stereoFrame_t stereo ) {
 	int timei = cl.serverTime;
+	static int renderLogCount = 0;
+
+	s_cgRenderSerial++;
+	s_cgCvarUpdatesThisRender = 0;
+
 	re.G2API_SetTime( cl.serverTime, G2T_CG_TIME );
 	if ( !cge ) return;
-	cge->DrawInformation( timei );
+	if ( renderLogCount < 12 ) {
+		CG_FileTrace( "CGameRender #%d state=%d serverTime=%d frameServerTime=%d newSnapshots=%d",
+			renderLogCount + 1,
+			(int)cls.state,
+			cl.serverTime,
+			cl.frame.serverTime,
+			cl.newSnapshots ? 1 : 0 );
+		Com_Printf(
+			"[CG] CGameRender #%d state=%d serverTime=%d oldServerTime=%d frameServerTime=%d newSnapshots=%d stereo=%d\n",
+			renderLogCount + 1,
+			(int)cls.state,
+			cl.serverTime,
+			cl.oldServerTime,
+			cl.frame.serverTime,
+			cl.newSnapshots ? 1 : 0,
+			(int)stereo );
+		renderLogCount++;
+	}
+	s_cgRenderDepth++;
+	__try {
+		cge->DrawInformation( timei );
+	} __except ( CG_LogDrawInformationException( GetExceptionInformation() ) ) {
+	}
+	s_cgRenderDepth--;
 }
 
 
@@ -2609,6 +3234,10 @@ void CL_FirstSnapshot( void ) {
 	re.RegisterMedia_LevelLoadEnd();
 
 	cls.state = CA_ACTIVE;
+	if ( Key_GetCatcher() & KEYCATCH_UI ) {
+		Com_Printf( "[SNAP] CL_FirstSnapshot: clearing KEYCATCH_UI on first active frame\n" );
+		Key_SetCatcher( Key_GetCatcher() & ~KEYCATCH_UI );
+	}
 	Com_Printf( "[SNAP] CL_FirstSnapshot: cls.state = CA_ACTIVE\n" );
 
 	// set the timedelta so we are exactly on this first frame

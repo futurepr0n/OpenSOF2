@@ -32,5 +32,7 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID );
 void UI_UpdateConnectionMessageString( char *string );
 qboolean UI_ConsoleCommand( void ) ;
 qboolean _UI_IsFullscreen( void );
+void UI_AllowIngameMenuOnce( void );
+qboolean UI_ConsumeIngameMenuRequest( void );
 
 #endif //__CLIENTUI_H__

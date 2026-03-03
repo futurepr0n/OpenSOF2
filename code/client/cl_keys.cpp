@@ -41,6 +41,17 @@ int			historyLine;		// the line being displayed from history buffer will be <= n
 field_t		historyEditLines[COMMAND_HISTORY];
 
 keyGlobals_t	kg;
+static qboolean s_allowIngameMenuOnce = qfalse;
+
+void UI_AllowIngameMenuOnce( void ) {
+	s_allowIngameMenuOnce = qtrue;
+}
+
+qboolean UI_ConsumeIngameMenuRequest( void ) {
+	qboolean allowed = s_allowIngameMenuOnce;
+	s_allowIngameMenuOnce = qfalse;
+	return allowed;
+}
 
 // do NOT blithely change any of the key names (3rd field) here, since they have to match the key binds
 //	in the CFG files, they're also prepended with "KEYNAME_" when looking up StripEd references
@@ -1258,9 +1269,10 @@ void CL_KeyDownEvent( int key, unsigned time )
 		}
 
 		if ( !( Key_GetCatcher( ) & KEYCATCH_UI ) ) {
-			if ( cls.state == CA_ACTIVE )
+			if ( cls.state == CA_ACTIVE ) {
+				UI_AllowIngameMenuOnce();
 				UI_SetActiveMenu( "ingame", NULL );
-			else {
+			} else {
 				CL_Disconnect_f();
 				UI_SetActiveMenu( "main", NULL );  // SOF2 main menu is "main"
 			}

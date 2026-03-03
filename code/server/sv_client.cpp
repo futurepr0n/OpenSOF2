@@ -26,6 +26,41 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "server.h"
+#include <windows.h>
+
+static int SV_ClientThinkExceptionFilter( EXCEPTION_POINTERS *ep, int clientNum ) {
+	static int thinkCrashDetailCount = 0;
+	if ( ep && ep->ContextRecord && thinkCrashDetailCount < 8 ) {
+		CONTEXT *ctx = ep->ContextRecord;
+		const usercmd_t *cmd = NULL;
+		if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
+			cmd = &svs.clients[clientNum].lastUsercmd;
+		}
+		fprintf( stderr,
+			"[SV_ClientThink] crash #%d client=%d code=0x%08lX EIP=%08lX EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX cmdTime=%d buttons=0x%08X move=(%d,%d,%d) weapon=%u gcmd=%u\n",
+			thinkCrashDetailCount + 1,
+			clientNum,
+			(unsigned long)ep->ExceptionRecord->ExceptionCode,
+			ctx->Eip, ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx,
+			ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp,
+			cmd ? cmd->serverTime : -1,
+			cmd ? (unsigned int)cmd->buttons : 0U,
+			cmd ? (int)cmd->forwardmove : 0,
+			cmd ? (int)cmd->rightmove : 0,
+			cmd ? (int)cmd->upmove : 0,
+			cmd ? (unsigned int)cmd->weapon : 0U,
+			cmd ? (unsigned int)cmd->generic_cmd : 0U );
+		if ( ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+			 ep->ExceptionRecord->NumberParameters >= 2 ) {
+			fprintf( stderr, "[SV_ClientThink]   AV %s addr=%08lX\n",
+				ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
+				(unsigned long)ep->ExceptionRecord->ExceptionInformation[1] );
+		}
+		fflush( stderr );
+		thinkCrashDetailCount++;
+	}
+	return EXCEPTION_EXECUTE_HANDLER;
+}
 
 /*
 ==================
@@ -173,6 +208,13 @@ void SV_DropClient( client_t *drop, const char *reason ) {
 	if ( drop->state == CS_ZOMBIE ) {
 		return;		// already dropped
 	}
+
+	Com_Printf( "[SV] SV_DropClient: client=%d name='%s' state=%d reason='%s'\n",
+		(int)( drop - svs.clients ),
+		drop->name,
+		drop->state,
+		reason ? reason : "(null)" );
+
 	drop->state = CS_ZOMBIE;		// become free in a few seconds
 
 	if (drop->download)	{
@@ -254,6 +296,7 @@ SV_ClientEnterWorld
 void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded ) {
 	int		clientNum;
 	gentity_t	*ent;
+	playerState_t *ps;
 
 	Com_DPrintf ("SV_ClientEnterWorld() from %s\n", client->name);
 	client->state = CS_ACTIVE;
@@ -261,8 +304,13 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	// set up the entity for the client
 	clientNum = client - svs.clients;
 	ent = SV_GentityNum( clientNum );
+	SOF2_ENT_SERVERINDEX(ent) = clientNum;
 	SOF2_ENT_NUMBER(ent) = clientNum;
 	client->gentity = ent;
+	ps = SV_GameClientNum( clientNum );
+	if ( cmd ) {
+		client->lastUsercmd = *cmd;
+	}
 
 	// normally I check 'qbFromSavedGame' to avoid overwriting loaded client data, but this stuff I want
 	//	to be reset so that client packet delta-ing bgins afresh, rather than based on your previous frame
@@ -270,12 +318,30 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	//
 	client->deltaMessage = -1;
 	client->cmdNum = 0;
+	Com_Printf(
+		"[DBG] SV_ClientEnterWorld pre ClientBegin: client=%d ent=%p serverIndex=%d entNum=%d s.clientNum=%d ps=%p cmdTime=%d buttons=0x%08X\n",
+		clientNum,
+		(void *)ent,
+		SOF2_ENT_SERVERINDEX( ent ),
+		SOF2_ENT_NUMBER( ent ),
+		SOF2_ENT_S_CLIENTNUM( ent ),
+		(void *)ps,
+		cmd ? cmd->serverTime : -1,
+		cmd ? cmd->buttons : 0 );
 
 	// call the game begin function — SOF2 ClientBegin(clientNum) takes 1 arg only
 	__try {
 		ge->ClientBegin( client - svs.clients );
 		Com_Printf( "SV_ClientEnterWorld: ge->ClientBegin(%d) succeeded, client is ACTIVE\n",
 					(int)(client - svs.clients) );
+		Com_Printf(
+			"[DBG] SV_ClientEnterWorld post ClientBegin: client=%d ent=%p serverIndex=%d entNum=%d s.clientNum=%d ps=%p\n",
+			clientNum,
+			(void *)ent,
+			SOF2_ENT_SERVERINDEX( ent ),
+			SOF2_ENT_NUMBER( ent ),
+			SOF2_ENT_S_CLIENTNUM( ent ),
+			(void *)ps );
 	} __except( 1 ) {
 		Com_Printf( "^1SV_ClientEnterWorld: EXCEPTION in ge->ClientBegin(%d)\n",
 					(int)(client - svs.clients) );
@@ -407,15 +473,38 @@ SV_ClientThink
 ==================
 */
 void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
+	static int startupThinkLogs = 0;
+	const int clientNum = (int)(cl - svs.clients);
+	gentity_t *ent = cl->gentity;
+
 	cl->lastUsercmd = *cmd;
 
 	if ( cl->state != CS_ACTIVE ) {
 		return;		// may have been kicked during the last usercmd
 	}
+	if ( startupThinkLogs < 8 && ent ) {
+		playerState_t *ps = SV_GameClientNum( clientNum );
+		Com_Printf(
+			"[DBG] SV_ClientThink pre DLL: client=%d ent=%p serverIndex=%d entNum=%d s.clientNum=%d ps=%p cmdTime=%d buttons=0x%08X move=(%d,%d,%d) weapon=%u gcmd=%u\n",
+			clientNum,
+			(void *)ent,
+			SOF2_ENT_SERVERINDEX( ent ),
+			SOF2_ENT_NUMBER( ent ),
+			SOF2_ENT_S_CLIENTNUM( ent ),
+			(void *)ps,
+			cmd->serverTime,
+			cmd->buttons,
+			(int)cmd->forwardmove,
+			(int)cmd->rightmove,
+			(int)cmd->upmove,
+			(unsigned int)cmd->weapon,
+			(unsigned int)cmd->generic_cmd );
+		startupThinkLogs++;
+	}
 
 	__try {
 		ge->ClientThink( cl - svs.clients );  // SOF2: ClientThink(int clientNum) — cmd not passed
-	} __except( 1 ) {  // EXCEPTION_EXECUTE_HANDLER = 1
+	} __except( SV_ClientThinkExceptionFilter( GetExceptionInformation(), (int)(cl - svs.clients) ) ) {
 		static int thinkCrashCount = 0;
 		if ( thinkCrashCount < 3 ) {
 			Com_Printf( "^1SV_ClientThink: EXCEPTION in game DLL (client %d), skipping\n",

@@ -30,6 +30,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "ui_local.h"
+#include "../client/client_ui.h"
 #include "gameinfo.h"
 #include <excpt.h>   // EXCEPTION_EXECUTE_HANDLER
 #include <windows.h> // EXCEPTION_POINTERS, GetExceptionInformation
@@ -69,7 +70,18 @@ UI_SetActiveMenu -
 */
 void UI_SetActiveMenu( const char* menuname,const char *menuID )
 {
-	Com_Printf( "UI_SetActiveMenu: %s\n", menuname ? menuname : "(hide)" );
+	if ( menuname && !Q_stricmp( menuname, "ingame" ) ) {
+		if ( ui.GetClientState && ui.GetClientState() == CA_ACTIVE && !UI_ConsumeIngameMenuRequest() ) {
+			Com_Printf( "UI_SetActiveMenu: suppressing unsolicited ingame open during active play\n" );
+			return;
+		}
+	}
+
+	if ( !menuname ) {
+		UI_ForceMenuOff();
+		return;
+	}
+	Com_Printf( "UI_SetActiveMenu: %s\n", menuname );
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
 		if ( uie->UI_SetActiveMenu ) {

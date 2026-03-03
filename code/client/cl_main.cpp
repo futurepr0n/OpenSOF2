@@ -277,6 +277,13 @@ void CL_Disconnect( void ) {
 		return;
 	}
 
+	Com_Printf( "[CL] CL_Disconnect: state=%d cgameStarted=%d uiStarted=%d rendererStarted=%d servername='%s'\n",
+		cls.state,
+		cls.cgameStarted ? 1 : 0,
+		cls.uiStarted ? 1 : 0,
+		cls.rendererStarted ? 1 : 0,
+		clc.servername );
+
 	if (cls.uiStarted)
 		UI_SetActiveMenu( NULL,NULL );
 
@@ -286,6 +293,7 @@ void CL_Disconnect( void ) {
 	// send a disconnect message to the server
 	// send it a few times in case one is dropped
 	if ( cls.state >= CA_CONNECTED ) {
+		Com_Printf( "[CL] CL_Disconnect: sending reliable 'disconnect'\n" );
 		CL_AddReliableCommand( "disconnect" );
 		CL_WritePacket();
 		CL_WritePacket();

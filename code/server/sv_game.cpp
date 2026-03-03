@@ -28,8 +28,11 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../qcommon/cm_local.h"
 
 #include "server.h"
+#include <intrin.h>
 #include <windows.h>
 #include <dbghelp.h>
+#include <map>
+#include <string>
 #pragma comment(lib, "dbghelp.lib")
 
 // VEH crash handler — fires before SEH, works even with corrupted SEH chain
@@ -547,7 +550,22 @@ static void SV_Traced_Cbuf_AddText( const char *text ) {
 }
 
 // Traced Cbuf_ExecuteText — logs console command executions from game DLL
+static qboolean SV_IsValidMapTokenChar( char c ) {
+	return ((c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') ||
+		c == '_' || c == '/' || c == '-') ? qtrue : qfalse;
+}
+
+static qboolean SV_ShouldBlockScriptedMapCommand( void *caller, const char *text ) {
+	if ( caller != (void *)0x2005EA75 || !text ) {
+		return qfalse;
+	}
+	return ( Q_stricmpn( text, "map ", 4 ) == 0 ) ? qtrue : qfalse;
+}
+
 static void SV_Traced_Cbuf_ExecuteText( int exec_when, const char *text ) {
+	void *caller = _ReturnAddress();
 	gi_call_count++;
 	static int cbufExecLogCount = 0;
 	if ( cbufExecLogCount < 20 ) {
@@ -557,7 +575,8 @@ static void SV_Traced_Cbuf_ExecuteText( int exec_when, const char *text ) {
 			safe[i] = (text[i] >= 32 && text[i] < 127) ? text[i] : '?';
 		}
 		safe[i] = '\0';
-		fprintf(stderr, "[GI] gi_Cbuf_ExecuteText (#%d) when=%d cmd='%s'\n", gi_call_count, exec_when, safe);
+		fprintf(stderr, "[GI] gi_Cbuf_ExecuteText (#%d) caller=%p when=%d cmd='%s'\n",
+			gi_call_count, caller, exec_when, safe);
 		fflush(stderr);
 		cbufExecLogCount++;
 	}
@@ -568,13 +587,25 @@ static void SV_Traced_Cbuf_ExecuteText( int exec_when, const char *text ) {
 			if ( c > 127 ) {
 				static int corruptCount2 = 0;
 				if ( corruptCount2 < 5 ) {
-					fprintf(stderr, "[GI] BLOCKED corrupted Cbuf_ExecuteText at byte[%d]=0x%02X cmd='%.40s'\n",
-						j, c, text);
+					fprintf(stderr,
+						"[GI] BLOCKED corrupted Cbuf_ExecuteText caller=%p at byte[%d]=0x%02X cmd='%.40s'\n",
+						caller, j, c, text);
 					fflush(stderr);
 					corruptCount2++;
 				}
 				return;
 			}
+		}
+		if ( SV_ShouldBlockScriptedMapCommand( caller, text ) ) {
+			static int badMapCount = 0;
+			if ( badMapCount < 10 ) {
+				fprintf( stderr,
+					"[GI] BLOCKED invalid scripted map command caller=%p cmd='%.80s'\n",
+					caller, text );
+				fflush( stderr );
+				badMapCount++;
+			}
+			return;
 		}
 	}
 	Cbuf_ExecuteText( exec_when, text );
@@ -647,11 +678,16 @@ static void *sv_GameClients  = NULL;   // game client array (stride-based, unlik
 static int   sv_GameClientSize = 0;    // sizeof(gclient_t) = 0x24C
 
 gentity_t	*SV_GentityNum( int num ) {
+	gentity_t *ent;
 	if ( num < 0 || num >= MAX_GENTITIES || !sv_GEntities ) {
 		return NULL;
 	}
 	// SOF2: pointer table access — each slot is a 4-byte CEntity* pointer
-	return ((gentity_t **)sv_GEntities)[num];
+	ent = ((gentity_t **)sv_GEntities)[num];
+	if ( ent ) {
+		SOF2_ENT_NUMBER( ent ) = num;
+	}
+	return ent;
 }
 
 svEntity_t	*SV_SvEntityForGentity( gentity_t *gEnt ) {
@@ -1460,6 +1496,49 @@ static qhandle_t SV_RE_RegisterSkin( const char *name )
 	return re.RegisterSkin( name );
 }
 
+struct sof2_skin_group_stub_t {
+	int unknown0;
+	int variationCount;
+};
+
+struct sof2_skin_table_stub_t {
+	char pad0[0x44];
+	sof2_skin_group_stub_t *groups[6];
+};
+
+struct sof2_skin_stub_t {
+	char pad0[0x48];
+	int hasGroups;
+	sof2_skin_table_stub_t *table;
+	qhandle_t rendererHandle;
+};
+
+static std::map<std::string, sof2_skin_stub_t> s_sof2SkinStubs;
+
+static sof2_skin_stub_t *SV_GetSOF2SkinStub( const char *name ) {
+	static sof2_skin_group_stub_t s_groupStubs[6];
+	static sof2_skin_table_stub_t s_tableStub;
+	static qboolean s_skinStubInit = qfalse;
+	std::string key;
+	sof2_skin_stub_t &stub = s_sof2SkinStubs[key = ( name ? name : "" )];
+
+	if ( !s_skinStubInit ) {
+		memset( &s_tableStub, 0, sizeof( s_tableStub ) );
+		for ( int i = 0; i < 6; ++i ) {
+			s_groupStubs[i].unknown0 = 0;
+			s_groupStubs[i].variationCount = 1;
+			s_tableStub.groups[i] = &s_groupStubs[i];
+		}
+		s_skinStubInit = qtrue;
+	}
+
+	memset( &stub, 0, sizeof( stub ) );
+	stub.hasGroups = 1;
+	stub.table = &s_tableStub;
+	stub.rendererHandle = re.RegisterSkin( name );
+	return &stub;
+}
+
 static int SV_RE_GetAnimationCFG( const char *psCFGFilename, char *psDest, int iDestSize )
 {
 	return re.GetAnimationCFG( psCFGFilename, psDest, iDestSize );
@@ -1547,18 +1626,18 @@ static void SV_Z_CheckHeap( void ) {}
 
 // gi[35-49]: Terrain/RMG stubs
 static void SV_CM_RegisterTerrain_Stub( const char * /*config*/ ) {}
-static void SV_CM_Terrain_Release_Stub( int /*terrainId*/ ) {}
-static void SV_CM_Terrain_ForEachBrush_Stub( void ) {}
-static float SV_CM_Terrain_GetWorldHeight_Stub( const vec3_t /*pos*/ ) { return 0.0f; }
-static float SV_CM_Terrain_FlattenHeight_Stub( const vec3_t /*pos*/, float /*radius*/ ) { return 0.0f; }
-static int SV_RMG_EvaluatePath_Stub( void ) { return 0; }
-static int SV_RMG_CreatePathSegment_Stub( void ) { return 0; }
-static void SV_CM_Terrain_ApplyBezierPath_Stub( void ) {}
-static void SV_CTerrainInstanceList_Add_Stub( void ) {}
-static float SV_CM_Terrain_GetFlattenedAvgHeight_Stub( void ) { return 0.0f; }
-static int SV_CM_Terrain_CheckOverlap_Stub( void ) { return 0; }
-static void *SV_CTerrainInstanceList_GetFirst_Stub( void ) { return NULL; }
-static void *SV_CTerrainInstanceList_GetNext_Stub( void ) { return NULL; }
+static void SV_CM_Terrain_Release_Stub( int /*terrainId*/ ) { fprintf(stderr, "[GI] CM_Terrain_Release_Stub\n"); }
+static void SV_CM_Terrain_ForEachBrush_Stub( void ) { fprintf(stderr, "[GI] CM_Terrain_ForEachBrush_Stub\n"); }
+static float SV_CM_Terrain_GetWorldHeight_Stub( const vec3_t /*pos*/ ) { fprintf(stderr, "[GI] CM_Terrain_GetWorldHeight_Stub\n"); return 0.0f; }
+static float SV_CM_Terrain_FlattenHeight_Stub( const vec3_t /*pos*/, float /*radius*/ ) { fprintf(stderr, "[GI] CM_Terrain_FlattenHeight_Stub\n"); return 0.0f; }
+static int SV_RMG_EvaluatePath_Stub( void ) { fprintf(stderr, "[GI] RMG_EvaluatePath_Stub\n"); return 0; }
+static int SV_RMG_CreatePathSegment_Stub( void ) { fprintf(stderr, "[GI] RMG_CreatePathSegment_Stub\n"); return 0; }
+static void SV_CM_Terrain_ApplyBezierPath_Stub( void ) { fprintf(stderr, "[GI] CM_Terrain_ApplyBezierPath_Stub\n"); }
+static void SV_CTerrainInstanceList_Add_Stub( void ) { fprintf(stderr, "[GI] CTerrainInstanceList_Add_Stub\n"); }
+static float SV_CM_Terrain_GetFlattenedAvgHeight_Stub( void ) { fprintf(stderr, "[GI] CM_Terrain_GetFlattenedAvgHeight_Stub\n"); return 0.0f; }
+static int SV_CM_Terrain_CheckOverlap_Stub( void ) { fprintf(stderr, "[GI] CM_Terrain_CheckOverlap_Stub\n"); return 0; }
+static void *SV_CTerrainInstanceList_GetFirst_Stub( void ) { fprintf(stderr, "[GI] CTerrainInstanceList_GetFirst_Stub\n"); return NULL; }
+static void *SV_CTerrainInstanceList_GetNext_Stub( void ) { fprintf(stderr, "[GI] CTerrainInstanceList_GetNext_Stub\n"); return NULL; }
 static void SV_R_LoadDataImage_Stub( void ) {}
 static void SV_ResampleTexture_Stub( void ) {}
 
@@ -1586,6 +1665,8 @@ static void SV_SaveGame_ReadChunk( int chunkId, int /*unk1*/, int /*unk2*/, void
 // SOF2: gentities is the CEntitySystem pointer table (NOT a contiguous struct array).
 // Each entry is a 4-byte CEntity* pointer; entitySize (0x560) is stored but unused for access.
 static void SV_LocateGameData_SOF2( void *gentities, int numEntities, int entitySize, void *clients, int clientSize ) {
+	int i;
+
 	sv_GEntities      = gentities;
 	sv_GEntitySize    = entitySize;
 	sv_numGEntities   = numEntities;
@@ -1593,6 +1674,13 @@ static void SV_LocateGameData_SOF2( void *gentities, int numEntities, int entity
 	sv_GameClientSize = clientSize;
 	Com_Printf("[DBG] SV_LocateGameData: ents=%p num=%d size=0x%x clients=%p clientSize=0x%x\n",
 		gentities, numEntities, entitySize, clients, clientSize);
+	for ( i = 0; i < numEntities && i < MAX_GENTITIES; ++i ) {
+		gentity_t *ent = ((gentity_t **)sv_GEntities)[i];
+		if ( !ent ) {
+			continue;
+		}
+		SOF2_ENT_NUMBER( ent ) = i;
+	}
 }
 
 // Traced version of SV_LocateGameData
@@ -1667,7 +1755,14 @@ static const char *SV_CM_GetShaderName_Stub( int /*shaderNum*/ ) { return ""; }
 static void SV_CM_DamageBrushSideHealth_Stub( int /*brushSide*/, int /*damage*/ ) {}
 
 // gi[84]: SV_GetUsercmd
-static void SV_GetUsercmd_Stub( int /*clientNum*/, void * /*cmd*/ ) {}
+// SOF2 SP only pushes the destination usercmd pointer here. The game DLL
+// implicitly expects the local single-player client's most recent command.
+static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
+	if ( !cmd ) {
+		return;
+	}
+	*cmd = svs.clients[0].lastUsercmd;
+}
 
 // gi[85]: SV_GetEntityToken — uses the one defined at top of file
 
@@ -1714,6 +1809,11 @@ static CHandlePoolStub g_handlePoolStub;
 
 class CWraithStub {
 public:
+	enum {
+		SOF2_WRAITH_ENTITY_BYTES = 0x140,
+		SOF2_WRAITH_GHOUL2_OFFSET = 0xE4
+	};
+
 	// Object layout — must place CGhoul2Info_v at offset +0xE4 from `this`:
 	// +0x00: vtable ptr (automatic, 4 bytes)
 	// +0x04: mPadding (4 bytes)
@@ -1882,16 +1982,28 @@ public:
 	}
 
 	// ===== vtable[24] (0x60): unknown — 2 stack args =====
-	virtual int Slot24(int a1, int a2) { return 0; }
+	virtual int Slot24(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] Slot24(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[25] (0x64): CheckSurfaceVisible — 2 stack args =====
-	virtual int Slot25_CheckSurfaceVisible(int a1, int a2) { return 1; }
+	virtual int Slot25_CheckSurfaceVisible(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] CheckSurfaceVisible(a1=%08X, a2=%08X)\n", a1, a2);
+		return 1;
+	}
 
 	// ===== vtable[26] (0x68): GetBoltInfo — 2 stack args =====
-	virtual int Slot26_GetBoltInfo(int a1, int a2) { return 0; }
+	virtual int Slot26_GetBoltInfo(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] GetBoltInfo(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[27] (0x6C): unknown — 2 stack args =====
-	virtual int Slot27(int a1, int a2) { return 0; }
+	virtual int Slot27(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] Slot27(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[28] (0x70): AddBoltByName — 2 stack args =====
 	virtual int Slot28_AddBoltByName(int modelHandle, const char *boneName) {
@@ -1903,27 +2015,49 @@ public:
 	}
 
 	// ===== vtable[29] (0x74): SetAnimIndex — 9 stack args =====
-	virtual int Slot29_SetAnimIndex(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return 0; }
+	virtual int Slot29_SetAnimIndex(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) {
+		fprintf(stderr, "[WRAITH] SetAnimIndex(%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X)\n",
+			a1, a2, a3, a4, a5, a6, a7, a8, a9);
+		return 0;
+	}
 
 	// ===== vtable[30] (0x78): SetBoneAnim — 9 stack args =====
-	virtual int Slot30_SetBoneAnim(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return 0; }
+	virtual int Slot30_SetBoneAnim(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) {
+		fprintf(stderr, "[WRAITH] SetBoneAnim(%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X)\n",
+			a1, a2, a3, a4, a5, a6, a7, a8, a9);
+		return 0;
+	}
 
-	// ===== vtable[31] (0x7C): PrecacheModel — 1 stack arg =====
-	virtual void PrecacheModel(const char *modelName) {
+	// ===== vtable[31] (0x7C): PrecacheModel — 1 stack arg, returns a renderer model handle =====
+	virtual int PrecacheModel(const char *modelName) {
+		int handle = 0;
+
 		fprintf(stderr, "[WRAITH] PrecacheModel('%s')\n", modelName ? modelName : "(null)");
 		if (modelName && modelName[0]) {
-			re.RegisterModel(modelName);
+			handle = re.RegisterModel(modelName);
 		}
+
+		fprintf(stderr, "[WRAITH] PrecacheModel -> handle=%d\n", handle);
+		return handle;
 	}
 
 	// ===== vtable[32] (0x80): unknown — 2 stack args =====
-	virtual int Slot32(int a1, int a2) { return 0; }
+	virtual int Slot32(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] Slot32(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[33] (0x84): unknown — 2 stack args =====
-	virtual int Slot33(int a1, int a2) { return 0; }
+	virtual int Slot33(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] Slot33(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[34] (0x88): unknown — 2 stack args =====
-	virtual int Slot34(int a1, int a2) { return 0; }
+	virtual int Slot34(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] Slot34(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[35] (0x8C): RemoveBolt — 2 stack args =====
 	virtual int Slot35_RemoveBolt(int modelHandle, int boltIndex) {
@@ -1944,17 +2078,42 @@ public:
 
 	// ===== vtable[37] (0x94): FinalizeEntity — 1 stack arg =====
 	virtual void FinalizeEntity(void *entityData) {
+		int entityHandle = 0;
+
+		fprintf(stderr, "[WRAITH] FinalizeEntity(entityData=%p)\n", entityData);
+		if ( !entityData ) {
+			return;
+		}
+
+		if ( mLastEntityGhoul2 ) {
+			entityHandle = *(int *)mLastEntityGhoul2;
+		}
+
+		memcpy( entityData, this, SOF2_WRAITH_ENTITY_BYTES );
+		if ( entityHandle > 0 ) {
+			*(int *)((byte *)entityData + SOF2_WRAITH_GHOUL2_OFFSET) = entityHandle;
+		}
+		fprintf(stderr, "[WRAITH] FinalizeEntity -> handle=%d vtable=%p\n",
+			entityHandle, *(void **)entityData);
 	}
 
 	// ===== vtable[38] (0x98): SetupModel — 1 stack arg =====
 	virtual void SetupModel(int modelHandle) {
+		mPadding = modelHandle;
+		fprintf(stderr, "[WRAITH] SetupModel(modelHandle=%08X)\n", modelHandle);
 	}
 
 	// ===== vtable[39] (0x9C): RemoveCallback — 2 stack args =====
-	virtual int Slot39_RemoveCallback(int a1, int a2) { return 0; }
+	virtual int Slot39_RemoveCallback(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] RemoveCallback(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[40] (0xA0): GetCachedModel — 2 stack args =====
-	virtual int Slot40_GetCachedModel(int a1, int a2) { return 0; }
+	virtual int Slot40_GetCachedModel(int a1, int a2) {
+		fprintf(stderr, "[WRAITH] GetCachedModel(a1=%08X, a2=%08X)\n", a1, a2);
+		return 0;
+	}
 
 	// ===== vtable[41] (0xA4): unknown — 2 stack args =====
 	virtual int Slot41(int a1, int a2) { return 0; }
@@ -2007,8 +2166,8 @@ public:
 	// ===== vtable[51] (0xCC): CopyBoltToSurface — 3 stack args =====
 	virtual int Slot51_CopyBoltToSurface(int a1, int a2, int a3) { return 0; }
 
-	// ===== vtable[52] (0xD0): SetModelTransform — 3 stack args =====
-	virtual int Slot52_SetModelTransform(int a1, int a2, int a3) { return 0; }
+	// ===== vtable[52] (0xD0): cgame calls this as a no-arg thiscall during DrawInformation.
+	virtual int Slot52_SetModelTransform(void) { return 0; }
 
 	// ===== vtable[53] (0xD4): AnimCallback — 2 stack args =====
 	virtual int Slot53_AnimCallback(int a1, int a2) { return 0; }
@@ -2107,8 +2266,10 @@ static qboolean SV_G2_InitWraithSurfaceMap( void **outPtr ) {
 // gi[89]: SV_ICARUS_Init — ICARUS scripting init
 static void SV_ICARUS_Init_Stub( void ) {}
 
-// gi[90]: Com_RegisterSkin — forward to renderer
-static qhandle_t SV_Com_RegisterSkin_Wrapper( const char *name ) { return re.RegisterSkin( name ); }
+// gi[88]: Com/RegisterSkin in SOF2 returns a skin descriptor object, not a qhandle_t.
+static void *SV_Com_RegisterSkin_Wrapper( const char *name ) {
+	return (void *)SV_GetSOF2SkinStub( name );
+}
 
 // gi[91]: G2API_AnimateGhoul2Models (wrapper already exists as SV_G2API_AnimateG2Models)
 
@@ -2268,7 +2429,7 @@ void SV_InitGameProgs (void) {
 	gi[ 81] = (void *)SV_CM_GetModelBrushShaderNum_Stub; // CM_GetModelBrushShaderNum
 	gi[ 82] = (void *)SV_CM_GetShaderName_Stub;        // CM_GetShaderName
 	gi[ 83] = (void *)SV_CM_DamageBrushSideHealth_Stub; // CM_DamageBrushSideHealth
-	gi[ 84] = (void *)SV_GetUsercmd_Stub;              // SV_GetUsercmd
+	gi[ 84] = (void *)SV_GetUsercmd_SOF2;              // SV_GetUsercmd
 	// Slots 85-97: CORRECTED per declaration order (pseudocode lines 2589-2601)
 	gi[ 85] = (void *)SV_Traced_RE_RegisterModel;      // RE_RegisterModel (traced)
 	gi[ 86] = (void *)SV_Traced_RE_RegisterShader;     // RE_RegisterShader (traced)

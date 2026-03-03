@@ -74,6 +74,8 @@ RE_ClearScene
 ====================
 */
 void RE_ClearScene( void ) {
+	r_firstSceneDrawSurf = 0;
+	tr.refdef.numDrawSurfs = 0;
 	r_firstSceneDlight = r_numdlights;
 	r_firstSceneEntity = r_numentities;
 	r_firstScenePoly = r_numpolys;
@@ -135,13 +137,6 @@ void RE_AddPolyToScene( qhandle_t hShader , int numVerts, const polyVert_t *vert
 	}
 
 	if ( r_numpolyverts + numVerts >= MAX_POLYVERTS || r_numpolys >= MAX_POLYS ) {
-      /*
-      NOTE TTimo this was initially a PRINT_WARNING
-      but it happens a lot with high fighting scenes and particles
-      since we don't plan on changing the const and making for room for those effects
-      simply cut this message to developer only
-      */
-		ri.Printf( PRINT_DEVELOPER, S_COLOR_YELLOW  "WARNING: RE_AddPolyToScene: r_max_polys or r_max_polyverts reached\n");
 		return;
 	}
 
@@ -275,15 +270,11 @@ void RE_RenderScene( const refdef_t *fd ) {
 	renderSceneCount++;
 
 	if ( !tr.registered ) {
-		if ( renderSceneCount <= 5 )
-			ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: tr.registered=false, SKIP\n", renderSceneCount );
 		return;
 	}
 	GLimp_LogComment( "====== RE_RenderScene =====\n" );
 
 	if ( r_norefresh->integer ) {
-		if ( renderSceneCount <= 5 )
-			ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: r_norefresh=1, SKIP\n", renderSceneCount );
 		return;
 	}
 
@@ -291,15 +282,6 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	if (!tr.world && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
 		Com_Error (ERR_DROP, "R_RenderScene: NULL worldmodel");
-	}
-
-	if ( renderSceneCount <= 5 ) {
-		ri.Printf( PRINT_ALL, "[RS] RE_RenderScene #%d: vieworg=(%.1f,%.1f,%.1f) fov=(%.1f,%.1f) size=(%dx%d) rdflags=0x%x tr.world=%p\n",
-			renderSceneCount,
-			fd->vieworg[0], fd->vieworg[1], fd->vieworg[2],
-			fd->fov_x, fd->fov_y,
-			fd->width, fd->height,
-			fd->rdflags, (void*)tr.world );
 	}
 
 //	memcpy( tr.refdef.text, fd->text, sizeof( tr.refdef.text ) );
@@ -418,6 +400,17 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	recursivePortalCount = 0;
 	R_RenderView( &parms );
+
+	if ( renderSceneCount <= 8 ) {
+		ri.Printf( PRINT_ALL,
+			"[WORLD scene] #%d drawSurfs=%d entities=%d dlights=%d polys=%d rdflags=0x%x\n",
+			renderSceneCount,
+			tr.refdef.numDrawSurfs,
+			tr.refdef.num_entities,
+			tr.refdef.num_dlights,
+			tr.refdef.numPolys,
+			tr.refdef.rdflags );
+	}
 
 	// the next scene rendered in this frame will tack on after this one
 	r_firstSceneDrawSurf = tr.refdef.numDrawSurfs;
