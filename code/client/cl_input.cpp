@@ -446,6 +446,17 @@ CL_MouseEvent
 =================
 */
 void CL_MouseEvent( int dx, int dy, int time ) {
+	static int s_mouseProbeCount = 0;
+	if ( s_mouseProbeCount < 24 ) {
+		Com_Printf( "[CL mouse] #%d catcher=%d dx=%d dy=%d time=%d index=%d\n",
+			s_mouseProbeCount + 1,
+			Key_GetCatcher(),
+			dx,
+			dy,
+			time,
+			cl.mouseIndex );
+		++s_mouseProbeCount;
+	}
 	if ( Key_GetCatcher( ) & KEYCATCH_UI ) {
 		_UI_MouseEvent( dx, dy );
 	}
@@ -677,6 +688,7 @@ qboolean cl_overrideAngles = qfalse;
 usercmd_t CL_CreateCmd( void ) {
 	usercmd_t	cmd;
 	vec3_t		oldAngles;
+	static int	s_cmdProbeCount = 0;
 
 	VectorCopy( cl.viewangles, oldAngles );
 
@@ -710,6 +722,29 @@ usercmd_t CL_CreateCmd( void ) {
 	}
 	// store out the final values
 	CL_FinishMove( &cmd );
+
+	if ( cls.state == CA_ACTIVE && s_cmdProbeCount < 64 ) {
+		Com_Printf( "[CL cmd] #%d catcher=%d svt=%d btn=0x%08X move=(%d,%d,%d) weapon=%d gcmd=%d ang=(%d,%d,%d) view=(%.1f,%.1f,%.1f) mouse=(%d,%d) sens=%.3f\n",
+			s_cmdProbeCount + 1,
+			Key_GetCatcher(),
+			cmd.serverTime,
+			cmd.buttons,
+			cmd.forwardmove,
+			cmd.rightmove,
+			cmd.upmove,
+			cmd.weapon,
+			cmd.generic_cmd,
+			cmd.angles[0],
+			cmd.angles[1],
+			cmd.angles[2],
+			cl.viewangles[0],
+			cl.viewangles[1],
+			cl.viewangles[2],
+			cl.mouseDx[0] + cl.mouseDx[1],
+			cl.mouseDy[0] + cl.mouseDy[1],
+			cl.cgameSensitivity );
+		++s_cmdProbeCount;
+	}
 
 	// draw debug graphs of turning for mouse testing
 	if ( cl_debugMove->integer ) {

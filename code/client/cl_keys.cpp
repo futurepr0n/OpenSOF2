@@ -47,6 +47,10 @@ void UI_AllowIngameMenuOnce( void ) {
 	s_allowIngameMenuOnce = qtrue;
 }
 
+void UI_ResetIngameMenuRequest( void ) {
+	s_allowIngameMenuOnce = qfalse;
+}
+
 qboolean UI_ConsumeIngameMenuRequest( void ) {
 	qboolean allowed = s_allowIngameMenuOnce;
 	s_allowIngameMenuOnce = qfalse;
@@ -966,7 +970,20 @@ const char *Key_GetBinding( int keynum ) {
 	if ( keynum < 0 || keynum >= MAX_KEYS )
 		return "";
 
-	return kg.keys[keynum].binding;
+	if ( kg.keys[keynum].binding ) {
+		return kg.keys[keynum].binding;
+	}
+
+	// Alpha keys are normalized to their uppercase slot by Key_SetBinding().
+	// When input arrives as lowercase keycodes, fall back to that canonical
+	// slot so movement/action binds still resolve.
+	if ( keynames[keynum].upper >= 0 && keynames[keynum].upper < MAX_KEYS ) {
+		if ( kg.keys[keynames[keynum].upper].binding ) {
+			return kg.keys[keynames[keynum].upper].binding;
+		}
+	}
+
+	return "";
 }
 
 /*
@@ -1270,8 +1287,7 @@ void CL_KeyDownEvent( int key, unsigned time )
 
 		if ( !( Key_GetCatcher( ) & KEYCATCH_UI ) ) {
 			if ( cls.state == CA_ACTIVE ) {
-				UI_AllowIngameMenuOnce();
-				UI_SetActiveMenu( "ingame", NULL );
+				Com_Printf( "[SOF2 UI] ignoring Escape during active play while ingame menu remains unstable\n" );
 			} else {
 				CL_Disconnect_f();
 				UI_SetActiveMenu( "main", NULL );  // SOF2 main menu is "main"

@@ -144,6 +144,13 @@ void QDECL Com_Printf( const char *fmt, ... ) {
 	Q_vsnprintf (msg, sizeof(msg), fmt, argptr);
 	va_end (argptr);
 
+	// Temporary SOF2 SP compatibility filter: once gameplay is active, the
+	// legacy "Quickloading..." spam can dominate the notify layer and induce
+	// visible flicker even though the world is rendering.
+	if ( strstr( msg, "Quickloading..." ) ) {
+		return;
+	}
+
 	if ( rd_buffer ) {
 		if ((strlen (msg) + strlen(rd_buffer)) > (unsigned)(rd_buffersize - 1)) {
 			rd_flush(rd_buffer);

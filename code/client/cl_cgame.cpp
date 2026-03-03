@@ -29,6 +29,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../ui/ui_shared.h"
 
 #include "client.h"
+#include "client_ui.h"
 #include "vmachine.h"
 #include "qcommon/stringed_ingame.h"
 #include "sys/sys_loadlib.h"
@@ -351,6 +352,16 @@ static int CG_S_MuteSound( int /*entityNum*/, sfxHandle_t /*sfxHandle*/ ) {
 
 // ----- Slot 100: CL_SetClientViewAngles -----
 static int CG_CL_SetClientViewAngles( const vec3_t angles ) {
+	static int logCount = 0;
+	if ( logCount < 32 ) {
+		Com_Printf( "[CG view] SetClientViewAngles #%d state=%d ang=(%.1f,%.1f,%.1f)\n",
+			logCount + 1,
+			cls.state,
+			angles[0],
+			angles[1],
+			angles[2] );
+		++logCount;
+	}
 	cl.viewangles[0] = angles[0];
 	cl.viewangles[1] = angles[1];
 	cl.viewangles[2] = angles[2];
@@ -666,6 +677,7 @@ typedef struct {
 static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	refdef_t localRefdef;
 	static int renderLogCount = 0;
+	static int forceViewLogCount = 0;
 
 	if ( !sof2Refdef ) {
 		CG_FileTrace( "CG_R_RenderScene_Wrapper null refdef" );
@@ -683,6 +695,20 @@ static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	VectorCopy( sof2Refdef->viewaxis[0], localRefdef.viewaxis[0] );
 	VectorCopy( sof2Refdef->viewaxis[1], localRefdef.viewaxis[1] );
 	VectorCopy( sof2Refdef->viewaxis[2], localRefdef.viewaxis[2] );
+
+	// Temporary SOF2 compatibility path:
+	// the active render camera is still decoupled from the client view even
+	// though usercmd/viewangles are changing. Force the submitted view axis to
+	// match cl.viewangles so we can verify real mouse-look in-world.
+	if ( cls.state == CA_ACTIVE && !( Key_GetCatcher() & KEYCATCH_UI ) ) {
+		AnglesToAxis( cl.viewangles, localRefdef.viewaxis );
+		if ( forceViewLogCount < 12 ) {
+			Com_Printf( "[SOF2 RS] forcing viewaxis from cl.viewangles=(%.1f,%.1f,%.1f)\n",
+				cl.viewangles[0], cl.viewangles[1], cl.viewangles[2] );
+			++forceViewLogCount;
+		}
+	}
+
 	localRefdef.viewContents = 0;
 	localRefdef.time = sof2Refdef->time;
 	localRefdef.rdflags = sof2Refdef->rdflags;
@@ -985,7 +1011,12 @@ static int CG_R_CullLocalBox( float *frustum, float *origin,
 }
 
 // slot 0: Printf — SOF2 slot takes pre-formatted string only (no variadic)
-static void Printf_stub( const char *s ) { Com_Printf( "%s", s ); }
+static void Printf_stub( const char *s ) {
+	if ( s && cls.state == CA_ACTIVE && strstr( s, "Quickloading..." ) ) {
+		return;
+	}
+	Com_Printf( "%s", s );
+}
 
 // slot 3: Sprintf — Com_sprintf returns int; SOF2 slot is void
 static void Sprintf_void( char *buf, int size, const char *fmt, ... ) {
@@ -2759,8 +2790,15 @@ Ghoul2 Insert End
 		return 0;
 
 	case CG_UI_SETACTIVE_MENU:
-		UI_SetActiveMenu((const char *) VMA(1),NULL);
+	{
+		const char *menuName = (const char *)VMA(1);
+		if ( menuName && !Q_stricmp( menuName, "ingame" ) && cls.state == CA_ACTIVE && !UI_ConsumeIngameMenuRequest() ) {
+			Com_Printf( "[SOF2 UI] suppressing cgame ingame open during active play\n" );
+			return 0;
+		}
+		UI_SetActiveMenu( menuName, NULL );
 		return 0;
+	}
 
 	case CG_UI_MENU_OPENBYNAME:
 		Menus_OpenByName((const char *) VMA(1));
@@ -3234,6 +3272,7 @@ void CL_FirstSnapshot( void ) {
 	re.RegisterMedia_LevelLoadEnd();
 
 	cls.state = CA_ACTIVE;
+	UI_ResetIngameMenuRequest();
 	if ( Key_GetCatcher() & KEYCATCH_UI ) {
 		Com_Printf( "[SNAP] CL_FirstSnapshot: clearing KEYCATCH_UI on first active frame\n" );
 		Key_SetCatcher( Key_GetCatcher() & ~KEYCATCH_UI );

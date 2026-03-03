@@ -71,8 +71,8 @@ UI_SetActiveMenu -
 void UI_SetActiveMenu( const char* menuname,const char *menuID )
 {
 	if ( menuname && !Q_stricmp( menuname, "ingame" ) ) {
-		if ( ui.GetClientState && ui.GetClientState() == CA_ACTIVE && !UI_ConsumeIngameMenuRequest() ) {
-			Com_Printf( "UI_SetActiveMenu: suppressing unsolicited ingame open during active play\n" );
+		if ( ui.GetClientState && ui.GetClientState() == CA_ACTIVE ) {
+			Com_Printf( "UI_SetActiveMenu: suppressing ingame open during active play\n" );
 			return;
 		}
 	}
