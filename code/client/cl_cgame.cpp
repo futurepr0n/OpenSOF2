@@ -208,6 +208,13 @@ static int         s_cgRenderSerial = 0;
 static int         s_cgCvarUpdatesThisRender = 0;
 static int         s_cgRenderDepth = 0;
 
+// Flicker fix: track whether DrawInformation submitted a scene this frame.
+// If it crashes before calling R_RenderScene, we submit a fallback scene
+// so the screen never goes blank.
+static qboolean    s_renderSceneSubmitted = qfalse;
+static refdef_t    s_lastGoodRefdef;        // last successfully submitted refdef
+static qboolean    s_lastGoodRefdefValid = qfalse;
+
 static void CG_SOF2_SyncCvar( int idx ) {
 	cvar_t *real = s_sof2CgCvarReal[idx];
 
@@ -549,6 +556,7 @@ static void CG_R_ClearScene_Wrapper( void ) {
 			clearSceneLogCount + 1, s_cgRenderDepth, (int)cls.state, s_cgRenderSerial );
 		clearSceneLogCount++;
 	}
+	s_renderSceneSubmitted = qfalse;  // scene cleared — will need a new RenderScene call
 	re.ClearScene();
 }
 
@@ -678,6 +686,8 @@ static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	refdef_t localRefdef;
 	static int renderLogCount = 0;
 	static int forceViewLogCount = 0;
+	static int forceOriginLogCount = 0;
+	static int clientOriginLogCount = 0;
 
 	if ( !sof2Refdef ) {
 		CG_FileTrace( "CG_R_RenderScene_Wrapper null refdef" );
@@ -701,7 +711,31 @@ static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	// though usercmd/viewangles are changing. Force the submitted view axis to
 	// match cl.viewangles so we can verify real mouse-look in-world.
 	if ( cls.state == CA_ACTIVE && !( Key_GetCatcher() & KEYCATCH_UI ) ) {
+		if ( clientOriginLogCount < 24 ) {
+			Com_Printf( "[CL ps] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) pm_type=%d ground=%d viewheight=%d\n",
+				clientOriginLogCount + 1,
+				cl.frame.ps.origin[0],
+				cl.frame.ps.origin[1],
+				cl.frame.ps.origin[2],
+				cl.frame.ps.velocity[0],
+				cl.frame.ps.velocity[1],
+				cl.frame.ps.velocity[2],
+				cl.frame.ps.pm_type,
+				cl.frame.ps.groundEntityNum,
+				cl.frame.ps.viewheight );
+			++clientOriginLogCount;
+		}
+		VectorCopy( cl.frame.ps.origin, localRefdef.vieworg );
+		localRefdef.vieworg[2] += cl.frame.ps.viewheight;
 		AnglesToAxis( cl.viewangles, localRefdef.viewaxis );
+		if ( forceOriginLogCount < 12 ) {
+			Com_Printf( "[SOF2 RS] forcing vieworg from ps.origin=(%.1f,%.1f,%.1f) vh=%d\n",
+				cl.frame.ps.origin[0],
+				cl.frame.ps.origin[1],
+				cl.frame.ps.origin[2],
+				cl.frame.ps.viewheight );
+			++forceOriginLogCount;
+		}
 		if ( forceViewLogCount < 12 ) {
 			Com_Printf( "[SOF2 RS] forcing viewaxis from cl.viewangles=(%.1f,%.1f,%.1f)\n",
 				cl.viewangles[0], cl.viewangles[1], cl.viewangles[2] );
@@ -747,6 +781,10 @@ static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	}
 	__try {
 		re.RenderScene( &localRefdef );
+		// Scene was successfully submitted — save it as the fallback.
+		s_renderSceneSubmitted = qtrue;
+		s_lastGoodRefdef = localRefdef;
+		s_lastGoodRefdefValid = qtrue;
 	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
 		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
 		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
@@ -3161,11 +3199,20 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		renderLogCount++;
 	}
 	s_cgRenderDepth++;
+	s_renderSceneSubmitted = qfalse;
 	__try {
 		cge->DrawInformation( timei );
 	} __except ( CG_LogDrawInformationException( GetExceptionInformation() ) ) {
 	}
 	s_cgRenderDepth--;
+
+	// Flicker fix: if DrawInformation crashed before submitting a scene (it called
+	// ClearScene which wiped the buffer, but never called RenderScene), submit a
+	// fallback scene using the last known camera so the screen doesn't go blank.
+	if ( !s_renderSceneSubmitted && s_lastGoodRefdefValid && cls.state == CA_ACTIVE ) {
+		s_lastGoodRefdef.time = timei;
+		re.RenderScene( &s_lastGoodRefdef );
+	}
 }
 
 

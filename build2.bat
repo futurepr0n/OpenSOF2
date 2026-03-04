@@ -1,0 +1,1 @@
+"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\msbuild.exe" "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" /p:Configuration=Debug /p:Platform=Win32 /m > E:\SOF2\OpenSOF2\build_log_antigravity.txt 2>&1

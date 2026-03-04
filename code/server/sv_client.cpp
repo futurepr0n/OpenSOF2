@@ -474,6 +474,9 @@ SV_ClientThink
 */
 void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	static int startupThinkLogs = 0;
+	static int sof2MoveLogCount = 0;
+	static int sof2OriginLogCount = 0;
+	static int sof2PmTypeOverrideCount = 0;
 	const int clientNum = (int)(cl - svs.clients);
 	gentity_t *ent = cl->gentity;
 
@@ -501,9 +504,68 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			(unsigned int)cmd->generic_cmd );
 		startupThinkLogs++;
 	}
+	if ( sof2MoveLogCount < 128 &&
+		( cmd->forwardmove || cmd->rightmove || cmd->upmove || cmd->buttons ) ) {
+		Com_Printf(
+			"[SV cmd] #%d client=%d move=(%d,%d,%d) btn=0x%08X weapon=%u gcmd=%u cmdTime=%d\n",
+			sof2MoveLogCount + 1,
+			clientNum,
+			(int)cmd->forwardmove,
+			(int)cmd->rightmove,
+			(int)cmd->upmove,
+			cmd->buttons,
+			(unsigned int)cmd->weapon,
+			(unsigned int)cmd->generic_cmd,
+			cmd->serverTime );
+		++sof2MoveLogCount;
+	}
+	if ( sof2OriginLogCount < 128 && ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) ) {
+		playerState_t *ps = SV_GameClientNum( clientNum );
+		if ( ps ) {
+			Com_Printf(
+				"[SV ps] #%d client=%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) pm_type=%d ground=%d viewheight=%d cmd=(%d,%d,%d)\n",
+				sof2OriginLogCount + 1,
+				clientNum,
+				ps->origin[0],
+				ps->origin[1],
+				ps->origin[2],
+				ps->velocity[0],
+				ps->velocity[1],
+				ps->velocity[2],
+				ps->pm_type,
+				ps->groundEntityNum,
+				ps->viewheight,
+				(int)cmd->forwardmove,
+				(int)cmd->rightmove,
+				(int)cmd->upmove );
+			++sof2OriginLogCount;
+		}
+	}
+
+	if ( ent ) {
+		playerState_t *ps = SV_GameClientNum( clientNum );
+		if ( ps &&
+			ps->pm_type == 2 &&
+			( cmd->forwardmove || cmd->rightmove || cmd->upmove ) ) {
+			if ( sof2PmTypeOverrideCount < 32 ) {
+				Com_Printf(
+					"[SV fix] forcing pm_type %d -> 0 for client=%d cmd=(%d,%d,%d) origin=(%.1f,%.1f,%.1f)\n",
+					ps->pm_type,
+					clientNum,
+					(int)cmd->forwardmove,
+					(int)cmd->rightmove,
+					(int)cmd->upmove,
+					ps->origin[0],
+					ps->origin[1],
+					ps->origin[2] );
+				++sof2PmTypeOverrideCount;
+			}
+			ps->pm_type = 0;
+		}
+	}
 
 	__try {
-		ge->ClientThink( cl - svs.clients );  // SOF2: ClientThink(int clientNum) — cmd not passed
+		ge->ClientThink( cl - svs.clients );
 	} __except( SV_ClientThinkExceptionFilter( GetExceptionInformation(), (int)(cl - svs.clients) ) ) {
 		static int thinkCrashCount = 0;
 		if ( thinkCrashCount < 3 ) {

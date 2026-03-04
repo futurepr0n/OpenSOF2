@@ -1,0 +1,164 @@
+MSBuild version 17.14.23+b0019275e for .NET Framework
+Build started 2026-03-02 5:50:00 PM.
+
+     1>Project "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" on node 1 (default targets).
+     1>Project "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" (1) is building "E:\SOF2\OpenSOF2\build_test\ZERO_CHECK.vcxproj" (2) on node 1 (default targets).
+     2>PrepareForBuild:
+         Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+       InitializeBuildStatus:
+         Creating "Win32\Debug\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+         Touching "Win32\Debug\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild".
+       CustomBuild:
+         All outputs are up-to-date.
+       FinalizeBuildStatus:
+         Deleting file "Win32\Debug\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild".
+         Touching "Win32\Debug\ZERO_CHECK\ZERO_CHECK.tlog\ZERO_CHECK.lastbuildstate".
+     2>Done Building Project "E:\SOF2\OpenSOF2\build_test\ZERO_CHECK.vcxproj" (default targets).
+     1>Project "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" (1) is building "E:\SOF2\OpenSOF2\build_test\lib\minizip\bundled_minizip.vcxproj" (3) on node 1 (default targets).
+     3>PrepareForBuild:
+         Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+       InitializeBuildStatus:
+         Creating "bundled_minizip.dir\Debug\bundled_minizip.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+         Touching "bundled_minizip.dir\Debug\bundled_minizip.tlog\unsuccessfulbuild".
+       CustomBuild:
+         All outputs are up-to-date.
+       ClCompile:
+         All outputs are up-to-date.
+       Lib:
+         All outputs are up-to-date.
+         bundled_minizip.vcxproj -> E:\SOF2\OpenSOF2\build_test\lib\minizip\Debug\bundled_minizip.lib
+       FinalizeBuildStatus:
+         Deleting file "bundled_minizip.dir\Debug\bundled_minizip.tlog\unsuccessfulbuild".
+         Touching "bundled_minizip.dir\Debug\bundled_minizip.tlog\bundled_minizip.lastbuildstate".
+     3>Done Building Project "E:\SOF2\OpenSOF2\build_test\lib\minizip\bundled_minizip.vcxproj" (default targets).
+     1>Project "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" (1) is building "E:\SOF2\OpenSOF2\build_test\lib\zlib\bundled_zlib.vcxproj" (4) on node 2 (default targets).
+     4>PrepareForBuild:
+         Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+       InitializeBuildStatus:
+         Creating "bundled_zlib.dir\Debug\bundled_zlib.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+         Touching "bundled_zlib.dir\Debug\bundled_zlib.tlog\unsuccessfulbuild".
+       CustomBuild:
+         All outputs are up-to-date.
+       ClCompile:
+         All outputs are up-to-date.
+       Lib:
+         All outputs are up-to-date.
+         bundled_zlib.vcxproj -> E:\SOF2\OpenSOF2\build_test\lib\zlib\Debug\bundled_zlib.lib
+       FinalizeBuildStatus:
+         Deleting file "bundled_zlib.dir\Debug\bundled_zlib.tlog\unsuccessfulbuild".
+         Touching "bundled_zlib.dir\Debug\bundled_zlib.tlog\bundled_zlib.lastbuildstate".
+     4>Done Building Project "E:\SOF2\OpenSOF2\build_test\lib\zlib\bundled_zlib.vcxproj" (default targets).
+     1>PrepareForBuild:
+         Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+       InitializeBuildStatus:
+         Touching "openjk_sp.x86.dir\Debug\SP Client.tlog\unsuccessfulbuild".
+       CustomBuild:
+         All outputs are up-to-date.
+       ClCompile:
+         All outputs are up-to-date.
+         C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x86\CL.exe /c /IE:\SOF2\OpenSOF2\shared /IE:\SOF2\OpenSOF2\build_test\shared /IE:\SOF2\OpenSOF2\code /I"E:\SOF2\OpenSOF2\lib\gsl-lite\include" /IE:\SOF2\OpenSOF2\lib\SDL2\include /IE:\SOF2\OpenSOF2\lib\minizip\include /IE:\SOF2\OpenSOF2\lib\zlib\include /Zi /nologo /W1 /WX- /diagnostics:column /MP /Od /Ob0 /Oy- /D _MBCS /D WIN32 /D _WINDOWS /D NOMINMAX /D _CRT_SECURE_NO_WARNINGS /D _SCL_SECURE_NO_WARNINGS /D _CRT_NONSTDC_NO_DEPRECATE /D _DEBUG /D _JK2EXE /D "CMAKE_INTDIR=\"Debug\"" /EHsc /RTC1 /MDd /GS /arch:SSE2 /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"openjk_sp.x86.dir\Debug\/qcommon/files.cpp.obj" /Fd"openjk_sp.x86.dir\Debug\vc143.pdb" /external:W1 /Gd /TP /analyze- /errorReport:queue E:\SOF2\OpenSOF2\code\qcommon\files.cpp
+         files.cpp
+         All outputs are up-to-date.
+         All outputs are up-to-date.
+       ResourceCompile:
+         All outputs are up-to-date.
+       Link:
+         C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x86\link.exe /ERRORREPORT:QUEUE /OUT:"E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe" /INCREMENTAL /ILK:"openjk_sp.x86.dir\Debug\openjk_sp.x86.ilk" /NOLOGO winmm.lib E:\SOF2\OpenSOF2\lib\OpenAL32.lib E:\SOF2\OpenSOF2\lib\SDL2\lib\x86\SDL2main.lib E:\SOF2\OpenSOF2\lib\SDL2\lib\x86\SDL2.lib ..\lib\minizip\Debug\bundled_minizip.lib ..\lib\zlib\Debug\bundled_zlib.lib kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /manifestinput:E:\SOF2\OpenSOF2\shared\sys\win_manifest.manifest /DEBUG /PDB:"E:/SOF2/OpenSOF2/build_test/Debug/openjk_sp.x86.pdb" /SUBSYSTEM:WINDOWS /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"E:/SOF2/OpenSOF2/build_test/code/Debug/openjk_sp.x86.lib" /MACHINE:X86  /machine:X86 openjk_sp.x86.dir\Debug\winquake.res
+         openjk_sp.x86.dir\Debug\cl_cgame.obj
+         openjk_sp.x86.dir\Debug\cl_cin.obj
+         openjk_sp.x86.dir\Debug\cl_console.obj
+         openjk_sp.x86.dir\Debug\cl_input.obj
+         openjk_sp.x86.dir\Debug\cl_keys.obj
+         openjk_sp.x86.dir\Debug\cl_net_chan.obj
+         openjk_sp.x86.dir\Debug\cl_main.obj
+         openjk_sp.x86.dir\Debug\cl_mp3.obj
+         openjk_sp.x86.dir\Debug\cl_parse.obj
+         openjk_sp.x86.dir\Debug\cl_scrn.obj
+         openjk_sp.x86.dir\Debug\cl_ui.obj
+         openjk_sp.x86.dir\Debug\snd_ambient.obj
+         openjk_sp.x86.dir\Debug\snd_dma.obj
+         openjk_sp.x86.dir\Debug\snd_mem.obj
+         openjk_sp.x86.dir\Debug\snd_mix.obj
+         openjk_sp.x86.dir\Debug\snd_music.obj
+         openjk_sp.x86.dir\Debug\vmachine.obj
+         openjk_sp.x86.dir\Debug\cm_load.obj
+         openjk_sp.x86.dir\Debug\cm_patch.obj
+         openjk_sp.x86.dir\Debug\cm_polylib.obj
+         openjk_sp.x86.dir\Debug\cm_test.obj
+         openjk_sp.x86.dir\Debug\cm_trace.obj
+         openjk_sp.x86.dir\Debug\cmd.obj
+         openjk_sp.x86.dir\Debug\common.obj
+         openjk_sp.x86.dir\Debug\cvar.obj
+         openjk_sp.x86.dir\Debug\md4.obj
+         openjk_sp.x86.dir\Debug\msg.obj
+         openjk_sp.x86.dir\Debug\net_chan.obj
+         openjk_sp.x86.dir\Debug\q_shared.obj
+         openjk_sp.x86.dir\Debug\stringed_ingame.obj
+         openjk_sp.x86.dir\Debug\stringed_interface.obj
+         openjk_sp.x86.dir\Debug\strip.obj
+         openjk_sp.x86.dir\Debug\persistence.obj
+         openjk_sp.x86.dir\Debug\z_memman_pc.obj
+         openjk_sp.x86.dir\Debug\ojk_saved_game.obj
+         openjk_sp.x86.dir\Debug\q_color.obj
+         openjk_sp.x86.dir\Debug\q_math.obj
+         openjk_sp.x86.dir\Debug\q_string.obj
+         openjk_sp.x86.dir\Debug\string.obj
+         openjk_sp.x86.dir\Debug\exe_headers.obj
+         openjk_sp.x86.dir\Debug\sv_ccmds.obj
+         openjk_sp.x86.dir\Debug\sv_client.obj
+         openjk_sp.x86.dir\Debug\sv_game.obj
+         openjk_sp.x86.dir\Debug\sv_init.obj
+         openjk_sp.x86.dir\Debug\sv_main.obj
+         openjk_sp.x86.dir\Debug\sv_net_chan.obj
+         openjk_sp.x86.dir\Debug\sv_savegame.obj
+         openjk_sp.x86.dir\Debug\sv_snapshot.obj
+         openjk_sp.x86.dir\Debug\sv_world.obj
+         openjk_sp.x86.dir\Debug\genericparser2.obj
+         openjk_sp.x86.dir\Debug\cdct.obj
+         openjk_sp.x86.dir\Debug\csbt.obj
+         openjk_sp.x86.dir\Debug\csbtb.obj
+         openjk_sp.x86.dir\Debug\csbtl3.obj
+         openjk_sp.x86.dir\Debug\cup.obj
+         openjk_sp.x86.dir\Debug\cupini.obj
+         openjk_sp.x86.dir\Debug\cupl1.obj
+         openjk_sp.x86.dir\Debug\cupl3.obj
+         openjk_sp.x86.dir\Debug\cwin.obj
+         openjk_sp.x86.dir\Debug\cwinb.obj
+         openjk_sp.x86.dir\Debug\cwinm.obj
+         openjk_sp.x86.dir\Debug\hwin.obj
+         openjk_sp.x86.dir\Debug\l3dq.obj
+         openjk_sp.x86.dir\Debug\l3init.obj
+         openjk_sp.x86.dir\Debug\mdct.obj
+         openjk_sp.x86.dir\Debug\mhead.obj
+         openjk_sp.x86.dir\Debug\msis.obj
+         openjk_sp.x86.dir\Debug\towave.obj
+         openjk_sp.x86.dir\Debug\uph.obj
+         openjk_sp.x86.dir\Debug\upsf.obj
+         openjk_sp.x86.dir\Debug\wavep.obj
+         openjk_sp.x86.dir\Debug\ui_atoms.obj
+         openjk_sp.x86.dir\Debug\ui_connect.obj
+         openjk_sp.x86.dir\Debug\ui_main.obj
+         openjk_sp.x86.dir\Debug\ui_saber.obj
+         openjk_sp.x86.dir\Debug\ui_shared.obj
+         openjk_sp.x86.dir\Debug\ui_syscalls.obj
+         openjk_sp.x86.dir\Debug\sys_main.obj
+         openjk_sp.x86.dir\Debug\sys_event.obj
+         openjk_sp.x86.dir\Debug\con_log.obj
+         openjk_sp.x86.dir\Debug\sdl_sound.obj
+         openjk_sp.x86.dir\Debug\sdl_input.obj
+         openjk_sp.x86.dir\Debug\sdl_window.obj
+         openjk_sp.x86.dir\Debug\sys_win32.obj
+         openjk_sp.x86.dir\Debug\con_passive.obj
+         openjk_sp.x86.dir\Debug\/qcommon/files.cpp.obj
+         openjk_sp.x86.dir\Debug\/__/shared/qcommon/safe/files.cpp.obj
+         openjk_sp.x86.vcxproj -> E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe
+       FinalizeBuildStatus:
+         Deleting file "openjk_sp.x86.dir\Debug\SP Client.tlog\unsuccessfulbuild".
+         Touching "openjk_sp.x86.dir\Debug\SP Client.tlog\SP Client.lastbuildstate".
+     1>Done Building Project "E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj" (default targets).
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.54

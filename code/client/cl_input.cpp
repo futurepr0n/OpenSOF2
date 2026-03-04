@@ -689,6 +689,7 @@ usercmd_t CL_CreateCmd( void ) {
 	usercmd_t	cmd;
 	vec3_t		oldAngles;
 	static int	s_cmdProbeCount = 0;
+	static int	s_moveProbeCount = 0;
 
 	VectorCopy( cl.viewangles, oldAngles );
 
@@ -708,6 +709,24 @@ usercmd_t CL_CreateCmd( void ) {
 	// get basic movement from joystick
 	CL_JoystickMove( &cmd );
 
+	if ( cls.state == CA_ACTIVE && s_moveProbeCount < 128 &&
+		( in_forward.active || in_back.active || in_moveleft.active || in_moveright.active ||
+		  in_left.active || in_right.active || cmd.forwardmove || cmd.rightmove || cmd.upmove ) ) {
+		Com_Printf( "[CL move] #%d active f=%d b=%d ml=%d mr=%d left=%d right=%d cmd=(%d,%d,%d) frame_msec=%u\n",
+			s_moveProbeCount + 1,
+			in_forward.active ? 1 : 0,
+			in_back.active ? 1 : 0,
+			in_moveleft.active ? 1 : 0,
+			in_moveright.active ? 1 : 0,
+			in_left.active ? 1 : 0,
+			in_right.active ? 1 : 0,
+			cmd.forwardmove,
+			cmd.rightmove,
+			cmd.upmove,
+			frame_msec );
+		++s_moveProbeCount;
+	}
+
 	// check to make sure the angles haven't wrapped
 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
 		cl.viewangles[PITCH] = oldAngles[PITCH] + 90;
@@ -723,7 +742,7 @@ usercmd_t CL_CreateCmd( void ) {
 	// store out the final values
 	CL_FinishMove( &cmd );
 
-	if ( cls.state == CA_ACTIVE && s_cmdProbeCount < 64 ) {
+	if ( cls.state == CA_ACTIVE && s_cmdProbeCount < 160 ) {
 		Com_Printf( "[CL cmd] #%d catcher=%d svt=%d btn=0x%08X move=(%d,%d,%d) weapon=%d gcmd=%d ang=(%d,%d,%d) view=(%.1f,%.1f,%.1f) mouse=(%d,%d) sens=%.3f\n",
 			s_cmdProbeCount + 1,
 			Key_GetCatcher(),
