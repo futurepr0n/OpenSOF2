@@ -200,11 +200,12 @@ for any reason, no changes to the state will be made at all.
 */
 void CL_ParseSnapshot( msg_t *msg ) {
 	int			len;
-	clSnapshot_t	*old;
+	clSnapshot_t	*old = NULL;
 	clSnapshot_t	newSnap;
 	int			deltaNum;
 	int			oldMessageNum;
 	int			i, packetNum;
+	static int snapshotParseLogCount = 0;
 
 	// get the reliable sequence acknowledge number
 	clc.reliableAcknowledge = MSG_ReadLong( msg );
@@ -252,6 +253,19 @@ void CL_ParseSnapshot( msg_t *msg ) {
 		} else {
 			newSnap.valid = qtrue;	// valid delta parse
 		}
+	}
+	if ( snapshotParseLogCount < 24 ) {
+		Com_Printf(
+			"[CL parse] snapshot #%d serverTime=%d msg=%d delta=%d cmdNum=%d flags=0x%X oldValid=%d oldMsg=%d\n",
+			snapshotParseLogCount + 1,
+			newSnap.serverTime,
+			newSnap.messageNum,
+			newSnap.deltaNum,
+			newSnap.cmdNum,
+			newSnap.snapFlags,
+			old ? 1 : 0,
+			old ? old->messageNum : -1 );
+		++snapshotParseLogCount;
 	}
 
 	// read areamask
@@ -486,6 +500,8 @@ CL_ParseServerMessage
 */
 void CL_ParseServerMessage( msg_t *msg ) {
 	int			cmd;
+	static int serverMessageLogCount = 0;
+	static int serverCommandOpcodeLogCount = 0;
 
 	if ( cl_shownet->integer == 1 ) {
 		Com_Printf ("%i ",msg->cursize);
@@ -496,6 +512,14 @@ void CL_ParseServerMessage( msg_t *msg ) {
 	//
 	// parse the message
 	//
+	if ( serverMessageLogCount < 24 ) {
+		Com_Printf( "[CL parse] server msg #%d size=%d state=%d readcount=%d\n",
+			serverMessageLogCount + 1,
+			msg->cursize,
+			(int)cls.state,
+			msg->readcount );
+		++serverMessageLogCount;
+	}
 	while ( 1 ) {
 		if ( msg->readcount > msg->cursize ) {
 			Com_Error (ERR_DROP,"CL_ParseServerMessage: read past end of server message");
@@ -507,6 +531,19 @@ void CL_ParseServerMessage( msg_t *msg ) {
 		if ( cmd == -1 ) {
 			SHOWNET( msg, "END OF MESSAGE" );
 			break;
+		}
+		if ( serverCommandOpcodeLogCount < 64 ) {
+			const char *name = ( cmd >= 0 && cmd < ARRAY_LEN( svc_strings ) && svc_strings[cmd] )
+				? svc_strings[cmd]
+				: "svc_unknown";
+			Com_Printf( "[CL parse] cmd #%d opcode=%d (%s) readcount=%d/%d state=%d\n",
+				serverCommandOpcodeLogCount + 1,
+				cmd,
+				name,
+				msg->readcount,
+				msg->cursize,
+				(int)cls.state );
+			++serverCommandOpcodeLogCount;
 		}
 
 		if ( cl_shownet->integer >= 2 ) {

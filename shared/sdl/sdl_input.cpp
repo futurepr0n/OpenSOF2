@@ -818,6 +818,21 @@ static void IN_ProcessEvents( void )
 	SDL_Event e;
 	fakeAscii_t key = A_NULL;
 	static fakeAscii_t lastKeyDown = A_NULL;
+	static qboolean s_polledMovementInit = qfalse;
+	static qboolean s_polledMovementDown[8];
+	static const struct {
+		SDL_Scancode scan;
+		fakeAscii_t key;
+	} s_polledMovementMap[8] = {
+		{ SDL_SCANCODE_W, (fakeAscii_t)'W' },
+		{ SDL_SCANCODE_A, (fakeAscii_t)'A' },
+		{ SDL_SCANCODE_S, (fakeAscii_t)'S' },
+		{ SDL_SCANCODE_D, (fakeAscii_t)'D' },
+		{ SDL_SCANCODE_UP, A_CURSOR_UP },
+		{ SDL_SCANCODE_LEFT, A_CURSOR_LEFT },
+		{ SDL_SCANCODE_DOWN, A_CURSOR_DOWN },
+		{ SDL_SCANCODE_RIGHT, A_CURSOR_RIGHT }
+	};
 
 	if( !SDL_WasInit( SDL_INIT_VIDEO ) )
 			return;
@@ -941,6 +956,25 @@ static void IN_ProcessEvents( void )
 
 			default:
 				break;
+		}
+	}
+
+	// Movement-key fallback: track physical key transitions for WASD/arrows.
+	// This keeps movement reliable if event delivery becomes inconsistent.
+	{
+		int i;
+		const uint8_t *state = SDL_GetKeyboardState( NULL );
+		if ( !s_polledMovementInit ) {
+			memset( s_polledMovementDown, 0, sizeof( s_polledMovementDown ) );
+			s_polledMovementInit = qtrue;
+		}
+
+		for ( i = 0; i < (int)ARRAY_LEN( s_polledMovementMap ); ++i ) {
+			qboolean downNow = state[s_polledMovementMap[i].scan] ? qtrue : qfalse;
+			if ( downNow != s_polledMovementDown[i] ) {
+				Sys_QueEvent( 0, SE_KEY, s_polledMovementMap[i].key, downNow, 0, NULL );
+				s_polledMovementDown[i] = downNow;
+			}
 		}
 	}
 }

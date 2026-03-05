@@ -542,36 +542,91 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 		}
 	}
 
-	if ( ent ) {
-		playerState_t *ps = SV_GameClientNum( clientNum );
-		if ( ps &&
-			ps->pm_type == 2 &&
-			( cmd->forwardmove || cmd->rightmove || cmd->upmove ) ) {
-			if ( sof2PmTypeOverrideCount < 32 ) {
-				Com_Printf(
-					"[SV fix] forcing pm_type %d -> 0 for client=%d cmd=(%d,%d,%d) origin=(%.1f,%.1f,%.1f)\n",
-					ps->pm_type,
-					clientNum,
-					(int)cmd->forwardmove,
-					(int)cmd->rightmove,
-					(int)cmd->upmove,
-					ps->origin[0],
-					ps->origin[1],
-					ps->origin[2] );
-				++sof2PmTypeOverrideCount;
+	// SOF2 movement fix: write usercmd into playerState embedded cmd slot.
+	// The SOF2 game DLL (ClientThink @ 0x2004cc40) reads the usercmd directly
+	// from ps+0x1DC (ps[0x77..0x7c] as 6 ints = 24 bytes) rather than calling
+	// gi_GetUsercmd. The embedded layout is Q3-style:
+	//   [0]=serverTime, [1..3]=angles[3], [4]=buttons, [5]={weapon,fwd,right,up}
+	// OpenJK usercmd_t differs: {serverTime, buttons, weapon, angles[3], generic_cmd+fwd+right+up}
+	// so we must map fields explicitly. Without this, PM_Pmove sees cmd.forwardmove=0
+	// on every frame → no velocity → player frozen despite input being received.
+	// Also: ps[0x77] (serverTime) must be > ps[0] (commandTime) or ClientThink
+	// exits before calling G_ClientThink/PM_Pmove at all.
+	{
+		playerState_t *psCmdPs = SV_GameClientNum( clientNum );
+		if ( psCmdPs ) {
+			int *cmdSlot = (int *)( (char *)psCmdPs + 0x1DC );
+			cmdSlot[0] = cmd->serverTime;
+			cmdSlot[1] = cmd->angles[0];
+			cmdSlot[2] = cmd->angles[1];
+			cmdSlot[3] = cmd->angles[2];
+			cmdSlot[4] = cmd->buttons;
+			cmdSlot[5] = (unsigned char)cmd->weapon
+						| ( (unsigned char)cmd->forwardmove << 8 )
+						| ( (unsigned char)cmd->rightmove   << 16 )
+						| ( (unsigned char)cmd->upmove      << 24 );
+
+			// Also override pm_type=2 (spectator) unconditionally so PM_Pmove
+			// runs PM_WalkMove instead of PM_SpectatorMove and viewheight stays +38.
+			if ( psCmdPs->pm_type == 2 ) {
+				if ( sof2PmTypeOverrideCount < 32 ) {
+					Com_Printf( "[SV fix] forcing pm_type 2->0 client=%d origin=(%.1f,%.1f,%.1f)\n",
+						clientNum, psCmdPs->origin[0], psCmdPs->origin[1], psCmdPs->origin[2] );
+					++sof2PmTypeOverrideCount;
+				}
+				psCmdPs->pm_type = 0;
 			}
-			ps->pm_type = 0;
 		}
 	}
 
 	__try {
-		ge->ClientThink( cl - svs.clients );
-	} __except( SV_ClientThinkExceptionFilter( GetExceptionInformation(), (int)(cl - svs.clients) ) ) {
+		ge->ClientThink( clientNum );
+	} __except( SV_ClientThinkExceptionFilter( GetExceptionInformation(), clientNum ) ) {
 		static int thinkCrashCount = 0;
 		if ( thinkCrashCount < 3 ) {
 			Com_Printf( "^1SV_ClientThink: EXCEPTION in game DLL (client %d), skipping\n",
-						(int)(cl - svs.clients) );
+						clientNum );
 			thinkCrashCount++;
+		}
+	}
+
+	// SOF2 movement fix: clear world CInvInst "controller active" flag.
+	// gamex86.dll G_ClientThink checks world->vtable[10]() before deciding between
+	// PM_Pmove (player input movement) and CPlayer_Think (Ghoul2/script movement).
+	// vtable[10] reads field +0x74 of the world CInvInst singleton, which is set to 1
+	// by the no-arg constructor (G_GetWorldSingleton, first call). Clearing it here
+	// ensures PM_Pmove runs on subsequent frames, fixing frozen player after +map.
+	// World singleton RVA in gamex86.dll = 0x310128 (preferred base 0x20000000).
+	{
+		static HMODULE s_hGameDll = NULL;
+		if ( !s_hGameDll )
+			s_hGameDll = GetModuleHandleA( "gamex86" );
+		if ( s_hGameDll ) {
+			volatile char *worldControlFlag = (volatile char *)s_hGameDll + 0x310128 + 0x74;
+			if ( *worldControlFlag != 0 ) {
+				static int s_fixLogCount = 0;
+				if ( s_fixLogCount < 4 ) {
+					Com_Printf( "[SOF2 fix] cleared world CInvInst+0x74 (was %d), base=%p\n",
+						(int)(unsigned char)*worldControlFlag, (void *)s_hGameDll );
+					++s_fixLogCount;
+				}
+				*worldControlFlag = 0;
+			}
+		}
+	}
+
+	// Post-ClientThink diagnostic: log playerState after DLL ran
+	if ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) {
+		static int postThinkLogCount = 0;
+		if ( postThinkLogCount < 16 ) {
+			playerState_t *psPost = SV_GameClientNum( clientNum );
+			if ( psPost ) {
+				Com_Printf( "[SV post] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f)\n",
+					postThinkLogCount + 1,
+					psPost->origin[0], psPost->origin[1], psPost->origin[2],
+					psPost->velocity[0], psPost->velocity[1], psPost->velocity[2] );
+			}
+			postThinkLogCount++;
 		}
 	}
 }
@@ -598,6 +653,7 @@ static void SV_UserMove( client_t *cl, msg_t *msg ) {
 	usercmd_t	*cmd, *oldcmd;
 	//int			clientTime;
 	int			serverId;
+	static int primedUserMoveLogCount = 0;
 
 	cl->reliableAcknowledge = MSG_ReadLong( msg );
 	serverId = MSG_ReadLong( msg );
@@ -641,6 +697,19 @@ static void SV_UserMove( client_t *cl, msg_t *msg ) {
 	// if this is the first usercmd we have received
 	// this gamestate, put the client into the world
 	if ( cl->state == CS_PRIMED ) {
+		if ( primedUserMoveLogCount < 24 ) {
+			Com_Printf(
+				"[SV net] UserMove #%d primed client=%d serverId=%d deltaMsg=%d cmdNum=%d cmdCount=%d firstCmdTime=%d state=%d\n",
+				primedUserMoveLogCount + 1,
+				(int)( cl - svs.clients ),
+				serverId,
+				cl->deltaMessage,
+				cmdNum,
+				cmdCount,
+				cmdCount > 0 ? cmds[0].serverTime : -1,
+				cl->state );
+			++primedUserMoveLogCount;
+		}
 
 		SV_ClientEnterWorld( cl, &cmds[0], eSavedGameJustLoaded );
 		if ( sv_mapname->string[0]!='_' )

@@ -1727,10 +1727,24 @@ static void SV_GP_SetSubGroups_Stub( void ) {}
 // gi[71]: SV_Trace — 10-arg wrapper matching SOF2 gamex86.dll calling convention
 // SOF2 game DLL pushes 10 args: results, start, mins, maxs, end, passEnt, contentmask,
 //   eG2TraceType, useLod, traceFlags(always 0)
+// Set to 1 when game DLL has received a non-zero-move usercmd — trace logging starts then
+static int sv_trace_log_armed = 0;
+static int sv_trace_log_count = 0;
+
 static void SV_Trace_10args( trace_t *results, const vec3_t start,
 		const vec3_t mins, const vec3_t maxs, const vec3_t end,
 		int passEnt, int contentmask,
 		int eG2TraceType, int useLod, int /*traceFlags*/ ) {
+	if ( sv_trace_log_armed && sv_trace_log_count < 16 ) {
+		// Log start pointer address so we can compute pm.ps = start_ptr - 0x14
+		Com_Printf( "[GI trace] #%d start_ptr=%p=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pass=%d mask=0x%X\n",
+			sv_trace_log_count + 1,
+			(void*)start,
+			start[0], start[1], start[2],
+			end[0], end[1], end[2],
+			passEnt, (unsigned int)contentmask );
+		sv_trace_log_count++;
+	}
 	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask,
 		(EG2_Collision)eG2TraceType, useLod );
 }
@@ -1758,10 +1772,31 @@ static void SV_CM_DamageBrushSideHealth_Stub( int /*brushSide*/, int /*damage*/ 
 // SOF2 SP only pushes the destination usercmd pointer here. The game DLL
 // implicitly expects the local single-player client's most recent command.
 static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
+	static int getCmdLogCount = 0;
+	static int getCmdMoveLogCount = 0;
 	if ( !cmd ) {
 		return;
 	}
 	*cmd = svs.clients[0].lastUsercmd;
+	// Always log first 4 calls
+	if ( getCmdLogCount < 4 ) {
+		Com_Printf( "[GI GetUsercmd] #%d move=(%d,%d,%d) btn=0x%08X cmdTime=%d\n",
+			getCmdLogCount + 1,
+			(int)cmd->forwardmove, (int)cmd->rightmove, (int)cmd->upmove,
+			cmd->buttons, cmd->serverTime );
+		getCmdLogCount++;
+	}
+	// Separately log first 16 calls with non-zero move; arm trace logging
+	if ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) {
+		sv_trace_log_armed = 1;
+		if ( getCmdMoveLogCount < 16 ) {
+			Com_Printf( "[GI GetUsercmd MOVE] #%d move=(%d,%d,%d) cmdTime=%d\n",
+				getCmdMoveLogCount + 1,
+				(int)cmd->forwardmove, (int)cmd->rightmove, (int)cmd->upmove,
+				cmd->serverTime );
+			getCmdMoveLogCount++;
+		}
+	}
 }
 
 // gi[85]: SV_GetEntityToken — uses the one defined at top of file

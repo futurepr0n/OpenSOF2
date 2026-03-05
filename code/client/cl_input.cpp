@@ -964,6 +964,7 @@ Called every frame to builds and sends a command packet to the server.
 =================
 */
 void CL_SendCmd( void ) {
+	static int primedSendLogCount = 0;
 	// don't send any message if not connected
 	if ( cls.state < CA_CONNECTED ) {
 		return;
@@ -976,6 +977,23 @@ void CL_SendCmd( void ) {
 
 	// we create commands even if a demo is playing,
 	CL_CreateNewCommands();
+
+	if ( cls.state == CA_PRIMED && primedSendLogCount < 32 ) {
+		const usercmd_t *latest = &cl.cmds[ cl.cmdNumber & CMD_MASK ];
+		Com_Printf(
+			"[CL net] SendCmd #%d state=CA_PRIMED cmdNum=%d serverId=%d frameMsg=%d valid=%d catcher=%d move=(%d,%d,%d) btn=0x%08X\n",
+			primedSendLogCount + 1,
+			cl.cmdNumber,
+			cl.serverId,
+			cl.frame.messageNum,
+			cl.frame.valid ? 1 : 0,
+			Key_GetCatcher(),
+			(int)latest->forwardmove,
+			(int)latest->rightmove,
+			(int)latest->upmove,
+			(unsigned int)latest->buttons );
+		++primedSendLogCount;
+	}
 
 	// don't send a packet if the last packet was sent too recently
 	if ( !CL_ReadyToSendPacket() ) {

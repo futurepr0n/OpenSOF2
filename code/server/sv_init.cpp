@@ -38,6 +38,135 @@ CMiniHeap *G2VertSpaceServer = NULL;
 Ghoul2 Insert End
 */
 
+static void SV_SOF2_ApplyBootstrapCfg( const char *path, int depth ) {
+	void *buffer = NULL;
+	char *cursor;
+	int len;
+	int appliedCount = 0;
+
+	if ( !path || !path[0] || depth > 8 ) {
+		return;
+	}
+
+	len = FS_ReadFile( path, &buffer );
+	if ( len <= 0 || !buffer ) {
+		Com_Printf( "[SOF2 bootstrap] missing cfg '%s'\n", path );
+		return;
+	}
+
+	Com_Printf( "[SOF2 bootstrap] apply cfg '%s'\n", path );
+	cursor = static_cast<char *>( buffer );
+	while ( *cursor ) {
+		char line[1024];
+		char *lineStart = cursor;
+		int lineLen = 0;
+		const char *cmd;
+
+		while ( *cursor && *cursor != '\n' && *cursor != '\r' ) {
+			++cursor;
+		}
+		lineLen = (int)( cursor - lineStart );
+		if ( lineLen >= (int)sizeof( line ) ) {
+			lineLen = sizeof( line ) - 1;
+		}
+		memcpy( line, lineStart, lineLen );
+		line[lineLen] = '\0';
+
+		while ( *cursor == '\r' || *cursor == '\n' ) {
+			++cursor;
+		}
+
+		Cmd_TokenizeString( line );
+		if ( Cmd_Argc() < 1 ) {
+			continue;
+		}
+
+		cmd = Cmd_Argv( 0 );
+		if ( !cmd[0] || !Q_stricmp( cmd, "wait" ) || !Q_stricmp( cmd, "intermission" ) ) {
+			continue;
+		}
+		if ( !Q_stricmp( cmd, "exec" ) ) {
+			if ( Cmd_Argc() >= 2 ) {
+				SV_SOF2_ApplyBootstrapCfg( Cmd_Argv( 1 ), depth + 1 );
+			}
+			continue;
+		}
+		if ( !Q_stricmp( cmd, "select" ) ) {
+			if ( Cmd_Argc() >= 2 ) {
+				Cvar_Set( Cmd_Argv( 1 ), "1" );
+				if ( appliedCount < 24 ) {
+					Com_Printf( "[SOF2 bootstrap] select %s=1\n", Cmd_Argv( 1 ) );
+				}
+				++appliedCount;
+			}
+			continue;
+		}
+		if ( !Q_stricmpn( cmd, "set", 3 ) ) {
+			if ( Cmd_Argc() >= 3 ) {
+				Cvar_Set( Cmd_Argv( 1 ), Cmd_ArgsFrom( 2 ) );
+				if ( appliedCount < 24 ) {
+					Com_Printf( "[SOF2 bootstrap] set %s=%s\n", Cmd_Argv( 1 ), Cmd_ArgsFrom( 2 ) );
+				}
+				++appliedCount;
+			}
+			continue;
+		}
+
+		if ( appliedCount < 24 ) {
+			Com_Printf( "[SOF2 bootstrap] ignored cmd '%s' in %s\n", cmd, path );
+		}
+	}
+
+	FS_FreeFile( buffer );
+}
+
+static const char *SV_SOF2_SelectCfgForMap( const char *server ) {
+	if ( !server || !server[0] ) {
+		return NULL;
+	}
+	if ( !Q_stricmp( server, "air1" ) ) {
+		return "menus/select_air1.cfg";
+	}
+	return NULL;
+}
+
+static void SV_SOF2_SeedDirectMapBootstrap( const char *server ) {
+	const char *selectCfg;
+	const char *currentMission = Cvar_VariableString( "current_mission" );
+	const char *defaultWpns;
+
+	if ( currentMission && currentMission[0] ) {
+		Com_Printf( "[SOF2 bootstrap] preserving existing current_mission=%s\n", currentMission );
+		return;
+	}
+
+	selectCfg = SV_SOF2_SelectCfgForMap( server );
+	if ( !selectCfg ) {
+		return;
+	}
+
+	Com_Printf( "[SOF2 bootstrap] seeding direct map bootstrap for %s via %s\n", server, selectCfg );
+	SV_SOF2_ApplyBootstrapCfg( selectCfg, 0 );
+
+	defaultWpns = Cvar_VariableString( "default_wpns" );
+	if ( defaultWpns && defaultWpns[0] ) {
+		SV_SOF2_ApplyBootstrapCfg( defaultWpns, 0 );
+	}
+
+	Com_Printf(
+		"[SOF2 bootstrap] result: world_map=%s current_mission=%s inv=%s mi_health=%s mi_armor=%s wp_ussocom=%s wp_oicw=%s wp_m590=%s wp_m84=%s wp_thermal=%s\n",
+		Cvar_VariableString( "world_map" ),
+		Cvar_VariableString( "current_mission" ),
+		Cvar_VariableString( "current_mission_inv" ),
+		Cvar_VariableString( "mi_health" ),
+		Cvar_VariableString( "mi_armor" ),
+		Cvar_VariableString( "wp_ussocom" ),
+		Cvar_VariableString( "wp_oicw" ),
+		Cvar_VariableString( "wp_m590" ),
+		Cvar_VariableString( "wp_m84" ),
+		Cvar_VariableString( "wp_thermal" ) );
+}
+
 
 /*
 ===============
@@ -285,6 +414,7 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 
 	Cvar_Set( "mapname", server );
 	Cvar_Set( "sv_mapChecksum", va("%i",checksum) );
+	SV_SOF2_SeedDirectMapBootstrap( server );
 
 	sv.serverId = com_frameTime;
 	Cvar_Set( "sv_serverid", va("%i", sv.serverId ) );

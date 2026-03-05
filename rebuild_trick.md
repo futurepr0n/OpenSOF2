@@ -1,0 +1,2 @@
+ The trick for future rebuilds is the same two-step unlock:
+  1. Kill mspdbsrv.exe / cl.exe / link.exe                                                                                2. Delete vc143.pdb and SP Client.tlog

@@ -861,15 +861,25 @@ static void CG_R_SetLightStyle( int index, float r, float g, float b ) {
 // Called from CG_LoadInventoryMenus, CG_ServerCommand, CG_CamEnable.
 // We stub this — UI menus are not functional yet.
 static void CG_UI_LoadMenuData( const char *menuData, const char *category ) {
-	Com_DPrintf( "[CGAME] UI_LoadMenuData: data='%.32s' cat='%s' — stub\n",
-		menuData ? menuData : "(null)", category ? category : "(null)" );
+	static int logCount = 0;
+	if ( logCount < 12 ) {
+		Com_Printf( "[CG init] UI_LoadMenuData #%d data='%.32s' cat='%s' (stub)\n",
+			logCount + 1,
+			menuData ? menuData : "(null)",
+			category ? category : "(null)" );
+		++logCount;
+	}
 }
 
 // ----- Slot 61: UI_MenuReset() -----
 // Resets UI menu system state before reloading menu definitions.
 // Called from CG_LoadInventoryMenus as first step.
 static void CG_UI_MenuReset( void ) {
-	Com_DPrintf( "[CGAME] UI_MenuReset — stub\n" );
+	static int logCount = 0;
+	if ( logCount < 8 ) {
+		Com_Printf( "[CG init] UI_MenuReset #%d (stub)\n", logCount + 1 );
+		++logCount;
+	}
 }
 
 // ----- Slot 62: UI_SetInfoScreenText(text) -----
@@ -1050,18 +1060,49 @@ static int CG_R_CullLocalBox( float *frustum, float *origin,
 
 // slot 0: Printf — SOF2 slot takes pre-formatted string only (no variadic)
 static void Printf_stub( const char *s ) {
+	static int nullLogCount = 0;
+	if ( !s ) {
+		if ( nullLogCount < 8 ) {
+			Com_Printf( "^3[CG] Printf_stub received NULL string (ignored)\n" );
+			++nullLogCount;
+		}
+		return;
+	}
 	if ( s && cls.state == CA_ACTIVE && strstr( s, "Quickloading..." ) ) {
 		return;
 	}
 	Com_Printf( "%s", s );
 }
 
+// slot 1/2: DPrintf variants in SOF2 are effectively string-only call sites.
+// Route through "%s" to avoid treating literal '%' text as format specifiers.
+static void DPrintf_stub( const char *s ) {
+	if ( !s ) {
+		return;
+	}
+	Com_DPrintf( "%s", s );
+}
+
 // slot 3: Sprintf — Com_sprintf returns int; SOF2 slot is void
 static void Sprintf_void( char *buf, int size, const char *fmt, ... ) {
-	va_list args;
-	va_start( args, fmt );
-	Q_vsnprintf( buf, size, fmt, args );
-	va_end( args );
+	static int warnCount = 0;
+	(void)fmt;
+
+	if ( !buf || size <= 0 ) {
+		return;
+	}
+
+	if ( !fmt ) {
+		buf[0] = '\0';
+		if ( warnCount < 8 ) {
+			Com_Printf( "^3[CG] Sprintf_void received NULL fmt (cleared buffer)\n" );
+			++warnCount;
+		}
+		return;
+	}
+
+	// Safety-first bridge for SOF2 import ABI mismatches: treat fmt as literal text.
+	Q_strncpyz( buf, fmt, size );
 }
 
 // slot 34: Z_Free — Z_Free returns int; SOF2 slot expects void
@@ -1095,6 +1136,9 @@ static const char *AS_GetBModelSound_wrapper( const char *name, int stage ) {
 // slot 112/113: SE_GetString / SE_DisplayString — SOF2 takes (const char *, int);
 // OpenJK SE_GetString is overloaded; use the single-arg version and ignore index
 static char *SE_GetString_wrapper( const char *ref, int /*index*/ ) {
+	if ( !ref ) {
+		return (char *)"";
+	}
 	return (char *)SE_GetString( ref );
 }
 
@@ -1140,11 +1184,37 @@ static int CL_GetCurrentSnapshotNumber_wrapper( int *snapshotNumber, int *server
 
 static void CL_GetGameState_wrapper( gameState_t *gs ) {
 	static int logCount = 0;
+	static int compatMaskCount = 0;
+	int cs20Offset = cl.gameState.stringOffsets[20];
+	int cs21Offset = cl.gameState.stringOffsets[21];
+	const char *cs20 = cs20Offset ? cl.gameState.stringData + cs20Offset : "";
+	const char *cs21 = cs21Offset ? cl.gameState.stringData + cs21Offset : "";
 	if ( logCount < 6 ) {
-		Com_Printf( "[SNAP] CL_GetGameState #%d gs=%p\n", logCount + 1, (void *)gs );
+		const char *serverInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
+		const char *systemInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SYSTEMINFO ];
+		const char *mapName = Info_ValueForKey( serverInfo, "mapname" );
+		Com_Printf(
+			"[SNAP] CL_GetGameState #%d gs=%p dataCount=%d map='%s' cs20='%s' cs21='%s' serverinfo='%.96s' systeminfo='%.96s'\n",
+			logCount + 1,
+			(void *)gs,
+			cl.gameState.dataCount,
+			mapName ? mapName : "",
+			cs20,
+			cs21,
+			serverInfo ? serverInfo : "",
+			systemInfo ? systemInfo : "" );
 		logCount++;
 	}
 	CL_GetGameState( gs );
+	if ( cls.state == CA_PRIMED && compatMaskCount < 2 ) {
+		if ( cs20Offset || cs21Offset ) {
+			Com_Printf( "[CG init] masking cs20/cs21 for compatibility test: cs20='%s' cs21='%s'\n",
+				cs20, cs21 );
+		}
+		gs->stringOffsets[20] = 0;
+		gs->stringOffsets[21] = 0;
+		++compatMaskCount;
+	}
 }
 
 static qboolean CL_GetSnapshot_wrapper( int snapshotNumber, snapshot_t *snapshot ) {
@@ -1176,6 +1246,35 @@ static void CG_UpdateScreen_SOF2( void ) {
 }
 
 #ifdef _WIN32
+static void CG_FormatModuleForAddress( void *address, char *out, size_t outSize ) {
+	MEMORY_BASIC_INFORMATION mbi;
+	HMODULE module = NULL;
+	char modulePath[MAX_PATH];
+
+	if ( !out || outSize == 0 ) {
+		return;
+	}
+	out[0] = '\0';
+
+	if ( !address ) {
+		Q_strncpyz( out, "(null)", (int)outSize );
+		return;
+	}
+
+	if ( VirtualQuery( address, &mbi, sizeof( mbi ) ) == 0 ) {
+		Q_strncpyz( out, "(unknown)", (int)outSize );
+		return;
+	}
+
+	module = (HMODULE)mbi.AllocationBase;
+	modulePath[0] = '\0';
+	if ( module && GetModuleFileNameA( module, modulePath, sizeof( modulePath ) ) > 0 ) {
+		Com_sprintf( out, (int)outSize, "%s+0x%X", modulePath, (unsigned int)((unsigned char *)address - (unsigned char *)module) );
+	} else {
+		Com_sprintf( out, (int)outSize, "base=%p+0x%X", module, (unsigned int)((unsigned char *)address - (unsigned char *)module) );
+	}
+}
+
 static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
 	void *faultAddr = NULL;
 	unsigned int exceptionCode = 0;
@@ -1189,6 +1288,8 @@ static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
 	unsigned int esi = 0;
 	unsigned int edi = 0;
 	unsigned int esp = 0;
+	char exceptionModule[512];
+	char returnModule[512];
 
 	if ( ep && ep->ExceptionRecord ) {
 		exceptionCode = ep->ExceptionRecord->ExceptionCode;
@@ -1211,14 +1312,18 @@ static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
 			stackRet = *(void **)esp;
 		}
 	}
+	CG_FormatModuleForAddress( exceptionAddr, exceptionModule, sizeof( exceptionModule ) );
+	CG_FormatModuleForAddress( stackRet, returnModule, sizeof( returnModule ) );
 
 	Com_Printf(
-		"^1[CG] exception 0x%08X in DrawInformation at %p accessType=%lu fault=%p ret=%p eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
+		"^1[CG] exception 0x%08X in DrawInformation at %p (%s) accessType=%lu fault=%p ret=%p (%s) eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
 		exceptionCode,
 		exceptionAddr,
+		exceptionModule,
 		accessType,
 		faultAddr,
 		stackRet,
+		returnModule,
 		eax,
 		ebx,
 		ecx,
@@ -1227,6 +1332,27 @@ static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
 		edi,
 		esp );
 
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static int CG_LogInitException( EXCEPTION_POINTERS *ep ) {
+	EXCEPTION_RECORD *rec = ep ? ep->ExceptionRecord : NULL;
+	CONTEXT *ctx = ep ? ep->ContextRecord : NULL;
+	Com_Printf(
+		"^1[CG] exception 0x%08X in Init at %p accessType=%lu fault=%p eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
+		rec ? (unsigned int)rec->ExceptionCode : 0U,
+		ctx ? (void *)ctx->Eip : NULL,
+		(rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 1)
+			? (unsigned long)rec->ExceptionInformation[0] : 0UL,
+		(rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+			? (void *)rec->ExceptionInformation[1] : NULL,
+		ctx ? ctx->Eax : 0U,
+		ctx ? ctx->Ebx : 0U,
+		ctx ? ctx->Ecx : 0U,
+		ctx ? ctx->Edx : 0U,
+		ctx ? ctx->Esi : 0U,
+		ctx ? ctx->Edi : 0U,
+		ctx ? ctx->Esp : 0U );
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
@@ -1287,6 +1413,22 @@ static void CL_PatchDllRet( HMODULE module, unsigned int rva, const char *name )
 	CG_FileTrace( "patched %s rva=0x%X", name, rva );
 }
 
+static void CL_PatchDllBytes( HMODULE module, unsigned int rva, const unsigned char *bytes, size_t count, const char *name ) {
+	unsigned char *pFunc = (unsigned char *)module + rva;
+	DWORD oldProt;
+
+	if ( !VirtualProtect( pFunc, count, PAGE_EXECUTE_READWRITE, &oldProt ) ) {
+		Com_Printf( "CL_InitSOF2CGame: failed to patch %s @ RVA 0x%X\n", name, rva );
+		CG_FileTrace( "patch failed %s rva=0x%X", name, rva );
+		return;
+	}
+
+	memcpy( pFunc, bytes, count );
+	VirtualProtect( pFunc, count, oldProt, &oldProt );
+	Com_Printf( "CL_InitSOF2CGame: patched %s @ RVA 0x%X (%u bytes)\n", name, rva, (unsigned int)count );
+	CG_FileTrace( "patched %s rva=0x%X bytes=%u", name, rva, (unsigned int)count );
+}
+
 /*
 ===================
 CL_InitSOF2CGame
@@ -1325,6 +1467,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	// -----------------------------------------------------------------------
 	{
 		HMODULE hCgame = (HMODULE)cgameLibrary;
+		static const unsigned char retTrue8[] = { 0xB0, 0x01, 0xC2, 0x08, 0x00 };
 		CL_PatchDllRet( hCgame, 0x16BB0, "CGlassMgr::ResolveConstraints" );
 
 		// Temporary isolation patch set: short-circuit the SP/HUD overlay path after
@@ -1339,6 +1482,9 @@ qboolean CL_InitSOF2CGame( void ) {
 		CL_PatchDllRet( hCgame, 0x040A70, "CG_Draw2DSprites" );
 		CL_PatchDllRet( hCgame, 0x0693C0, "CG_DrawWeaponHUD" );
 		CL_PatchDllRet( hCgame, 0x070750, "CG_DrawVehicleDirection" );
+		CL_PatchDllRet( hCgame, 0x0284F0, "CG_LoadInventoryMenus" );
+		CL_PatchDllRet( hCgame, 0x0301E0, "CG_SpawnEntitiesFromSpawnVars" );
+		CL_PatchDllBytes( hCgame, 0x068A10, retTrue8, sizeof( retTrue8 ), "CG_InitPlayerEntity" );
 	}
 
 	// -----------------------------------------------------------------------
@@ -1346,14 +1492,14 @@ qboolean CL_InitSOF2CGame( void ) {
 	// Unset slots remain NULL — non-critical features will simply be stubs.
 	// Full slot reference: E:\SOF2\structs\cgame_import_t.h
 	// -----------------------------------------------------------------------
-	cgame_import_t import = {};
+	static cgame_import_t import = {};
 
 	// [  0] Printf — SOF2 slot takes pre-formatted string; wrap to add format
 	import.Printf                     = Printf_stub;
 	// [  1] DPrintf
-	import.DPrintf                    = Com_DPrintf;
+	import.DPrintf                    = (void (*)(const char *, ...))DPrintf_stub;
 	// [  2] DPrintf2 (same function, alternate verbosity)
-	import.DPrintf2                   = Com_DPrintf;
+	import.DPrintf2                   = (void (*)(const char *, ...))DPrintf_stub;
 	// [  3] Sprintf — wrap to discard return value
 	import.Sprintf                    = Sprintf_void;
 	// [  4] Error
@@ -3121,7 +3267,12 @@ void CL_InitCGame( void ) {
 		clc.serverCommandSequence,
 		cl.frame.ps.clientNum,
 		sof2InitWeapon );
-	cge->Init( sof2ProcessedSnapshotNum, clc.serverCommandSequence, cl.frame.ps.clientNum, sof2InitWeapon );
+	__try {
+		cge->Init( sof2ProcessedSnapshotNum, clc.serverCommandSequence, cl.frame.ps.clientNum, sof2InitWeapon );
+	}
+	__except ( CG_LogInitException( GetExceptionInformation() ) ) {
+		Com_Error( ERR_DROP, "cgame Init crashed" );
+	}
 
 	// reset any CVAR_CHEAT cvars registered by cgame
 	if ( !cl_connectedToCheatServer )
