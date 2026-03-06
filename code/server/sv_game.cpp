@@ -251,7 +251,7 @@ static void *SV_Traced_Cvar_Get( const char *name, const char *value, int flags 
 	return Cvar_Get( name, value, flags );
 }
 
-static void SV_Traced_Cvar_Set( const char *name, const char *value ) {
+static void SV_Traced_Cvar_Set( const char *name, const char *value, int /*force*/ ) {
 	gi_call_count++;
 	fprintf(stderr, "[GI] gi_Cvar_Set called (#%d) name='%s'\n", gi_call_count, name ? name : "(null)");
 	Cvar_Set( name, value );
@@ -1047,7 +1047,16 @@ void SV_ShutdownGameProgs (qboolean shutdownCin) {
 	if (!ge) {
 		return;
 	}
+#ifdef _WIN32
+	__try {
+		ge->Shutdown(0);
+	}
+	__except ( EXCEPTION_EXECUTE_HANDLER ) {
+		Com_Printf( "^3[SV] suppressed exception during ge->Shutdown(0)\n" );
+	}
+#else
 	ge->Shutdown(0);
+#endif
 
 	SCR_StopCinematic();
 	CL_ShutdownCGame();	//we have cgame burried in here.
@@ -1771,30 +1780,136 @@ static void SV_CM_DamageBrushSideHealth_Stub( int /*brushSide*/, int /*damage*/ 
 // gi[84]: SV_GetUsercmd
 // SOF2 SP only pushes the destination usercmd pointer here. The game DLL
 // implicitly expects the local single-player client's most recent command.
+// DLL playerState pointer — set inside SV_GetUsercmd_SOF2 each frame.
+// cmd = ps+0x1DC, so ps = (char*)cmd - 0x1DC.
+// Used by sv_client.cpp after ClientThink to sync DLL position to engine playerState.
+char *g_sof2_dll_ps = NULL;
+
 static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 	static int getCmdLogCount = 0;
 	static int getCmdMoveLogCount = 0;
 	if ( !cmd ) {
 		return;
 	}
-	*cmd = svs.clients[0].lastUsercmd;
-	// Always log first 4 calls
-	if ( getCmdLogCount < 4 ) {
-		Com_Printf( "[GI GetUsercmd] #%d move=(%d,%d,%d) btn=0x%08X cmdTime=%d\n",
-			getCmdLogCount + 1,
-			(int)cmd->forwardmove, (int)cmd->rightmove, (int)cmd->upmove,
-			cmd->buttons, cmd->serverTime );
-		getCmdLogCount++;
+
+	// Derive DLL's playerState base from the embedded usercmd slot address.
+	// The DLL calls gi[84] with (ps+0x1DC), so ps = cmd - 0x1DC.
+	g_sof2_dll_ps = (char *)cmd - 0x1DC;
+
+	// Fix J + L: force DLL playerState values so movement runs correctly.
+	// SOF2 playerState_t offsets:
+	//   ps+0x04 = pm_type
+	//   ps+0x50 = delta_angles[3]
+	//   ps+0xD0 = stats[0]/health
+	//
+	// (a) Health=100: PM_UpdateViewAngles exits early if health<1, freezing viewangles at
+	//     spawn orientation → all movement goes in wrong direction. Health=100 also stops
+	//     ClientThink from re-assigning pm_type=2 via CPlayer::vtable[1]() health check.
+	// (b) Keep DLL delta_angles aligned with the current server playerState so
+	//     command angle decoding stays consistent with client input.
+	// (c) pm_type=0: even with health=100, pm_type may carry over as 2 from the previous
+	//     frame (set when health was 0). pm_type=2 → PM_FlyMove (3D, no ground detect)
+	//     instead of PM_WalkMove (horizontal, gravity). Forcing to 0 each frame ensures
+	//     PM_WalkMove with proper ground collision.
+	{
+		int *pm_type_ptr   = (int *)(g_sof2_dll_ps + 0x04);
+		int *dll_delta = (int *)(g_sof2_dll_ps + 0x50);
+		int *health        = (int *)(g_sof2_dll_ps + 0xD0);
+		int *controlSlot   = (int *)(g_sof2_dll_ps + 0x150);
+		int *moveType      = (int *)(g_sof2_dll_ps + 2212);
+		playerState_t *enginePs = SV_GameClientNum( 0 );
+		*pm_type_ptr   = 0;   // PM_NORMAL — use PM_WalkMove with ground detection
+		if ( enginePs ) {
+			dll_delta[0] = enginePs->delta_angles[0];
+			dll_delta[1] = enginePs->delta_angles[1];
+			dll_delta[2] = enginePs->delta_angles[2];
+		} else {
+			dll_delta[0] = 0;
+			dll_delta[1] = 0;
+			dll_delta[2] = 0;
+		}
+		if ( *health < 1 ) {
+			*health = 100;
+		}
+		if ( *controlSlot != 0 ) {
+			static int s_controlSlotLogCount = 0;
+			if ( s_controlSlotLogCount < 24 ) {
+				Com_Printf(
+					"[SOF2 fix] cleared control slot (SV_GetUsercmd) generic1/viewEntity=%d\n",
+					*controlSlot );
+				++s_controlSlotLogCount;
+			}
+			*controlSlot = 0;
+		}
+		if ( *moveType == 3 ) {
+			static int s_moveTypeLogCount = 0;
+			if ( s_moveTypeLogCount < 24 ) {
+				Com_Printf(
+					"[SOF2 fix] cleared flyswim (SV_GetUsercmd) moveType=%d -> %d\n",
+					*moveType,
+					2 );
+				++s_moveTypeLogCount;
+			}
+			*moveType = 2;
+		}
 	}
-	// Separately log first 16 calls with non-zero move; arm trace logging
-	if ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) {
-		sv_trace_log_armed = 1;
-		if ( getCmdMoveLogCount < 16 ) {
-			Com_Printf( "[GI GetUsercmd MOVE] #%d move=(%d,%d,%d) cmdTime=%d\n",
-				getCmdMoveLogCount + 1,
-				(int)cmd->forwardmove, (int)cmd->rightmove, (int)cmd->upmove,
-				cmd->serverTime );
-			getCmdMoveLogCount++;
+
+	// SOF2's game DLL expects Q3-style layout at the destination pointer:
+	//   int[0]=serverTime, int[1-3]=angles[3], int[4]=buttons,
+	//   int[5]=weapon|(fwd<<8)|(right<<16)|(up<<24)
+	// OpenJK's usercmd_t has a different field order (buttons at +4, weapon at +8
+	// with 3 bytes padding, angles at +12..+20, forwardmove at +25).
+	// A direct struct copy writes OpenJK layout → DLL reads forwardmove=0 always.
+	//
+	// Angle convention (Fix L — revert Fix H swap):
+	// The earlier swap (out[1]=YAW, out[2]=PITCH) was derived from pre-health-fix data
+	// when PM_UpdateViewAngles was NOT running and the ICARUS spawn viewangles coincidentally
+	// had PITCH≈YAW≈344°. With PM_UpdateViewAngles now running, the DLL uses standard Q3A
+	// AngleVectors convention (viewangles[0]=PITCH, viewangles[1]=YAW) for the forward vector
+	// in PM_WalkMove. Using standard Q3A layout: out[1]=PITCH, out[2]=YAW.
+	{
+		const usercmd_t *src = &svs.clients[0].lastUsercmd;
+		int *out = (int *)cmd;
+		out[0] = src->serverTime;
+		out[1] = src->angles[0];  // PITCH (OpenJK angles[0]) → DLL viewangles[0]
+		out[2] = src->angles[1];  // YAW   (OpenJK angles[1]) → DLL viewangles[1]
+		out[3] = src->angles[2];  // ROLL
+		out[4] = src->buttons;
+		out[5] = (unsigned char)src->weapon
+		       | ( (unsigned char)src->forwardmove << 8 )
+		       | ( (unsigned char)src->rightmove   << 16 )
+		       | ( (unsigned char)src->upmove      << 24 );
+
+		// Keep DLL viewangles aligned with the incoming command stream.
+		// This avoids cases where movement uses stale spawn orientation.
+		{
+			int *dll_delta = (int *)(g_sof2_dll_ps + 0x50);
+			float *dll_viewangles = (float *)(g_sof2_dll_ps + 0xB0);
+			dll_viewangles[0] = SHORT2ANGLE( (short)( src->angles[0] + dll_delta[0] ) );
+			dll_viewangles[1] = SHORT2ANGLE( (short)( src->angles[1] + dll_delta[1] ) );
+			dll_viewangles[2] = SHORT2ANGLE( (short)( src->angles[2] + dll_delta[2] ) );
+		}
+	}
+	// Log using the original OpenJK usercmd fields
+	{
+		const usercmd_t *src2 = &svs.clients[0].lastUsercmd;
+		if ( getCmdLogCount < 4 ) {
+			Com_Printf( "[GI GetUsercmd] #%d move=(%d,%d,%d) ang=(%d,%d,%d) btn=0x%08X cmdTime=%d\n",
+				getCmdLogCount + 1,
+				(int)src2->forwardmove, (int)src2->rightmove, (int)src2->upmove,
+				src2->angles[0], src2->angles[1], src2->angles[2],
+				src2->buttons, src2->serverTime );
+			getCmdLogCount++;
+		}
+		if ( src2->forwardmove || src2->rightmove || src2->upmove ) {
+			sv_trace_log_armed = 1;
+			if ( getCmdMoveLogCount < 128 ) {
+				Com_Printf( "[GI GetUsercmd MOVE] #%d move=(%d,%d,%d) cmdTime=%d\n",
+					getCmdMoveLogCount + 1,
+					(int)src2->forwardmove, (int)src2->rightmove, (int)src2->upmove,
+					src2->serverTime );
+				getCmdMoveLogCount++;
+			}
 		}
 	}
 }
@@ -2208,7 +2323,57 @@ public:
 	virtual int Slot53_AnimCallback(int a1, int a2) { return 0; }
 
 	// ===== vtable[54] (0xD8): unknown — 2 stack args =====
-	virtual int Slot54(int a1, int a2) { return 0; }
+	// Actual retail use: CG_Entity_AttachBolt calls this slot with 8 stack args.
+	virtual int Slot54_AttachBolt( int ghoul2Handle, int modelIndex, int boltIndex, float *outPos,
+		const float *angles, const float *origin, void * /*modelList*/, const float * /*scale*/ ) {
+		static int slot54LogCount = 0;
+		mdxaBone_t matrix;
+		vec3_t safeAngles = { 0.0f, 0.0f, 0.0f };
+		vec3_t safeOrigin = { 0.0f, 0.0f, 0.0f };
+		vec3_t scaleVec = { 1.0f, 1.0f, 1.0f };
+
+		if ( slot54LogCount < 12 ) {
+			Com_Printf(
+				"[WRAITH54] ghoul2=%d model=%d bolt=%d out=%p angles=%p origin=%p\n",
+				ghoul2Handle,
+				modelIndex,
+				boltIndex,
+				outPos,
+				angles,
+				origin );
+			++slot54LogCount;
+		}
+
+		if ( !outPos ) {
+			return 0;
+		}
+
+		if ( angles ) {
+			VectorCopy( angles, safeAngles );
+		}
+		if ( origin ) {
+			VectorCopy( origin, safeOrigin );
+			VectorCopy( origin, outPos );
+		} else {
+			VectorClear( outPos );
+		}
+
+		if ( ghoul2Handle > 0 ) {
+			IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+			if ( arr.IsValid( ghoul2Handle ) ) {
+				CGhoul2Info_v &g2 = *(CGhoul2Info_v *)&ghoul2Handle;
+				if ( re.G2API_GetBoltMatrix( g2, modelIndex, boltIndex, &matrix,
+						safeAngles, safeOrigin, 0, NULL, scaleVec ) ) {
+					outPos[0] = matrix.matrix[0][3];
+					outPos[1] = matrix.matrix[1][3];
+					outPos[2] = matrix.matrix[2][3];
+					return 1;
+				}
+			}
+		}
+
+		return 0;
+	}
 
 	// ===== vtable[55] (0xDC): GetBoltMatrixBlend — 4 stack args =====
 	virtual int Slot55_GetBoltMatrixBlend(int a1, int a2, int a3, int a4) { return 0; }

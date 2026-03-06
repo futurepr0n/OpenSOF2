@@ -28,6 +28,95 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "server.h"
 #include <windows.h>
 
+extern char *g_sof2_dll_ps;
+
+static void SV_ClearSOF2ForcedMove( char *dllPs, const char *phase ) {
+	// Verified with a source-layout probe:
+	//   offsetof(gclient_t, forced_forwardmove) = 1702
+	//   offsetof(gclient_t, forced_rightmove)  = 1703
+	// g_sof2_dll_ps points at gclient->ps, and ps is the first gclient field.
+	if ( !dllPs ) {
+		return;
+	}
+
+	volatile signed char *forcedForward = (volatile signed char *)( dllPs + 1702 );
+	volatile signed char *forcedRight = (volatile signed char *)( dllPs + 1703 );
+	const int forwardValue = (int)( *forcedForward );
+	const int rightValue = (int)( *forcedRight );
+
+	if ( forwardValue == 0 && rightValue == 0 ) {
+		return;
+	}
+
+	static int s_forcedMoveLogCount = 0;
+	if ( s_forcedMoveLogCount < 24 ) {
+		Com_Printf(
+			"[SOF2 fix] cleared scripted move (%s) fwd=%d right=%d\n",
+			phase,
+			forwardValue,
+			rightValue );
+		++s_forcedMoveLogCount;
+	}
+
+	*forcedForward = 0;
+	*forcedRight = 0;
+}
+
+static void SV_ClearSOF2ControlSlot( char *dllPs, const char *phase ) {
+	// playerState_t::generic1 lives at ps+0x150 and is the only networked field
+	// in the retail SOF2 layout that plausibly backs the code's viewEntity-style
+	// control path. Clearing it here prevents stale control/camera takeover from
+	// swallowing movement on direct +map startup.
+	if ( !dllPs ) {
+		return;
+	}
+
+	volatile int *controlSlot = (volatile int *)( dllPs + 0x150 );
+	const int controlValue = *controlSlot;
+	if ( controlValue == 0 ) {
+		return;
+	}
+
+	static int s_controlSlotLogCount = 0;
+	if ( s_controlSlotLogCount < 24 ) {
+		Com_Printf(
+			"[SOF2 fix] cleared control slot (%s) generic1/viewEntity=%d\n",
+			phase,
+			controlValue );
+		++s_controlSlotLogCount;
+	}
+
+	*controlSlot = 0;
+}
+
+static void SV_ClearSOF2FlySwim( char *dllPs, const char *phase ) {
+	// Verified with a source-layout probe:
+	//   offsetof(gclient_t, moveType) = 2212
+	// MT_FLYSWIM drives PM_FlyMove even when pm_type==PM_NORMAL, which matches
+	// the pra1 "look up and fly into the sky" symptom. Direct +map should start
+	// the player on MT_RUNJUMP, not MT_FLYSWIM.
+	if ( !dllPs ) {
+		return;
+	}
+
+	volatile int *moveType = (volatile int *)( dllPs + 2212 );
+	if ( *moveType != 3 ) {
+		return;
+	}
+
+	static int s_moveTypeLogCount = 0;
+	if ( s_moveTypeLogCount < 24 ) {
+		Com_Printf(
+			"[SOF2 fix] cleared flyswim (%s) moveType=%d -> %d\n",
+			phase,
+			*moveType,
+			2 );
+		++s_moveTypeLogCount;
+	}
+
+	*moveType = 2; // MT_RUNJUMP
+}
+
 static int SV_ClientThinkExceptionFilter( EXCEPTION_POINTERS *ep, int clientNum ) {
 	static int thinkCrashDetailCount = 0;
 	if ( ep && ep->ContextRecord && thinkCrashDetailCount < 8 ) {
@@ -476,9 +565,9 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	static int startupThinkLogs = 0;
 	static int sof2MoveLogCount = 0;
 	static int sof2OriginLogCount = 0;
-	static int sof2PmTypeOverrideCount = 0;
 	const int clientNum = (int)(cl - svs.clients);
 	gentity_t *ent = cl->gentity;
+	const qboolean hasMovementInput = ( cmd->forwardmove || cmd->rightmove || cmd->upmove || cmd->buttons ) ? qtrue : qfalse;
 
 	cl->lastUsercmd = *cmd;
 
@@ -504,22 +593,22 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			(unsigned int)cmd->generic_cmd );
 		startupThinkLogs++;
 	}
-	if ( sof2MoveLogCount < 128 &&
-		( cmd->forwardmove || cmd->rightmove || cmd->upmove || cmd->buttons ) ) {
+	if ( sof2MoveLogCount < 256 && hasMovementInput ) {
 		Com_Printf(
-			"[SV cmd] #%d client=%d move=(%d,%d,%d) btn=0x%08X weapon=%u gcmd=%u cmdTime=%d\n",
+			"[SV cmd] #%d client=%d move=(%d,%d,%d) ang=(%d,%d,%d) btn=0x%08X weapon=%u gcmd=%u cmdTime=%d\n",
 			sof2MoveLogCount + 1,
 			clientNum,
 			(int)cmd->forwardmove,
 			(int)cmd->rightmove,
 			(int)cmd->upmove,
+			cmd->angles[0], cmd->angles[1], cmd->angles[2],
 			cmd->buttons,
 			(unsigned int)cmd->weapon,
 			(unsigned int)cmd->generic_cmd,
 			cmd->serverTime );
 		++sof2MoveLogCount;
 	}
-	if ( sof2OriginLogCount < 128 && ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) ) {
+	if ( sof2OriginLogCount < 256 && hasMovementInput ) {
 		playerState_t *ps = SV_GameClientNum( clientNum );
 		if ( ps ) {
 			Com_Printf(
@@ -552,30 +641,125 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	// on every frame → no velocity → player frozen despite input being received.
 	// Also: ps[0x77] (serverTime) must be > ps[0] (commandTime) or ClientThink
 	// exits before calling G_ClientThink/PM_Pmove at all.
+	// SOF2 movement fix: per-frame flag clears.
+	// All must happen before ge->ClientThink or movement is bypassed.
+	//
+	// Patch 1 (once): PM_Pmove @ RVA 0x2f04 — JL→JLE
+	//   PM_Pmove zeroes forwardmove/rightmove/upmove when ps->pm_type >= 2.
+	//   ClientThink re-sets pm_type=2 every frame if CPlayer health < 1
+	//   (which happens during direct +map load with no save game — player
+	//   entity spawns with health=0). This makes ALL movement input zero
+	//   inside PM_Pmove before PM_WalkMove even runs.
+	//   Fix: change JL (0x7C) to JLE (0x7E) so only pm_type > 2 (dead=3,
+	//   frozen=4) zeroes movement; pm_type=2 (spectator) keeps input intact.
+	//
+	// Patch 2 (per-frame): g_skipSpawnTargets @ RVA 0x3100f4
+	//   ClientThink: if non-zero → G_IntermissionThink + return, skipping
+	//   all of G_ClientThink/PM_Pmove. Set by G_InitGame for direct +map.
+	//
+	// Patch 3 (per-frame): CInvInst+0x74 @ RVA 0x31019c
+	//   G_ClientThink: vtable[10]() returns this byte.
+	//   Non-zero → CPlayer_Think (no input); zero → PM_Pmove.
+	//
+	// Patch 4 (per-frame): camera entity active flag @ *(g_cameraEntityA)+0x5ee
+	//   g_cameraEntityA ptr @ RVA 0x308cd4. Points to a CCameraEntity heap
+	//   object. When +0x5ee != 0, ClientThink skips G_ClientThink entirely
+	//   and only drives the cinematic camera. Air1/pra1 both activate a
+	//   camera sequence at map load, causing "scripted" automatic movement
+	//   and no player control. CCameraEntity_Create initializes this to 0;
+	//   map/script logic sets it to 1 to start a cutscene.
 	{
-		playerState_t *psCmdPs = SV_GameClientNum( clientNum );
-		if ( psCmdPs ) {
-			int *cmdSlot = (int *)( (char *)psCmdPs + 0x1DC );
-			cmdSlot[0] = cmd->serverTime;
-			cmdSlot[1] = cmd->angles[0];
-			cmdSlot[2] = cmd->angles[1];
-			cmdSlot[3] = cmd->angles[2];
-			cmdSlot[4] = cmd->buttons;
-			cmdSlot[5] = (unsigned char)cmd->weapon
-						| ( (unsigned char)cmd->forwardmove << 8 )
-						| ( (unsigned char)cmd->rightmove   << 16 )
-						| ( (unsigned char)cmd->upmove      << 24 );
-
-			// Also override pm_type=2 (spectator) unconditionally so PM_Pmove
-			// runs PM_WalkMove instead of PM_SpectatorMove and viewheight stays +38.
-			if ( psCmdPs->pm_type == 2 ) {
-				if ( sof2PmTypeOverrideCount < 32 ) {
-					Com_Printf( "[SV fix] forcing pm_type 2->0 client=%d origin=(%.1f,%.1f,%.1f)\n",
-						clientNum, psCmdPs->origin[0], psCmdPs->origin[1], psCmdPs->origin[2] );
-					++sof2PmTypeOverrideCount;
+		static HMODULE s_hGameDll = NULL;
+		if ( !s_hGameDll )
+			s_hGameDll = GetModuleHandleA( "gamex86" );
+		if ( s_hGameDll ) {
+			// --- One-time code patch: PM_Pmove JL→JLE at RVA 0x2f04 ---
+			{
+				static bool s_pmovePatchApplied = false;
+				(void)s_pmovePatchApplied;
+				if ( false ) {
+					void *patchAddr = (void *)( (char *)s_hGameDll + 0x2f04 );
+					unsigned char currentByte = *(unsigned char *)patchAddr;
+					if ( currentByte == 0x7C ) { // JL — patch to JLE
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, 1, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							*(unsigned char *)patchAddr = 0x7E; // JLE
+							VirtualProtect( patchAddr, 1, oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] PM_Pmove patch applied: JL→JLE at RVA 0x2f04 (pm_type=2 no longer zeroes movement)\n" );
+							s_pmovePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] PM_Pmove patch FAILED: VirtualProtect error %lu at RVA 0x2f04\n", GetLastError() );
+						}
+					} else {
+						Com_Printf( "[SOF2 fix] PM_Pmove patch: unexpected byte 0x%02X at RVA 0x2f04 (already patched or wrong build?)\n", currentByte );
+						s_pmovePatchApplied = true; // don't retry
+					}
 				}
-				psCmdPs->pm_type = 0;
 			}
+			// --- Per-frame: clear g_skipSpawnTargets (dword at RVA 0x3100f4) ---
+			{
+				volatile int *g_skipSpawnTargets = (volatile int *)( (char *)s_hGameDll + 0x3100f4 );
+				if ( *g_skipSpawnTargets != 0 ) {
+					static int s_skipLogCount = 0;
+					if ( s_skipLogCount < 8 ) {
+						Com_Printf( "[SOF2 fix] cleared g_skipSpawnTargets (was %d)\n",
+							*g_skipSpawnTargets );
+						++s_skipLogCount;
+					}
+					*g_skipSpawnTargets = 0;
+				}
+			}
+			// --- Per-frame: clear CInvInst+0x74 (byte at RVA 0x31019c) ---
+			{
+				volatile char *worldControlFlag = (volatile char *)s_hGameDll + 0x310128 + 0x74;
+				if ( *worldControlFlag != 0 ) {
+					static int s_fixLogCount = 0;
+					if ( s_fixLogCount < 8 ) {
+						Com_Printf( "[SOF2 fix] cleared world CInvInst+0x74 (was %d)\n",
+							(int)(unsigned char)*worldControlFlag );
+						++s_fixLogCount;
+					}
+					*worldControlFlag = 0;
+				}
+			}
+			// --- Per-frame: clear camera entity active flag ---
+			// g_cameraEntityA is a pointer at gamex86+0x308cd4.
+			// When the pointed-to object's +0x5ee byte != 0, ClientThink
+			// drives the cinematic camera and completely skips G_ClientThink.
+			{
+				volatile int *g_cameraEntityAAddr = (volatile int *)( (char *)s_hGameDll + 0x308cd4 );
+				int camEnt = *g_cameraEntityAAddr;
+				if ( camEnt != 0 ) {
+					volatile char *camFlag = (volatile char *)( camEnt + 0x5ee );
+					if ( *camFlag != 0 ) {
+						static int s_camLogCount = 0;
+						if ( s_camLogCount < 8 ) {
+							Com_Printf( "[SOF2 fix] cleared camera entity active flag (was %d, camEnt=0x%08X)\n",
+								(int)(unsigned char)*camFlag, camEnt );
+							++s_camLogCount;
+						}
+						*camFlag = 0;
+					}
+				}
+			}
+			// ICARUS can also override movement directly through gclient forced-move bytes.
+			SV_ClearSOF2ForcedMove( g_sof2_dll_ps, "pre" );
+			SV_ClearSOF2ControlSlot( g_sof2_dll_ps, "pre" );
+			SV_ClearSOF2FlySwim( g_sof2_dll_ps, "pre" );
+		}
+	}
+
+	// Fix M: save DLL ps origin BEFORE ClientThink so we can detect ICARUS teleports.
+	// g_sof2_dll_ps is set by SV_GetUsercmd_SOF2 (gi[84]) which runs inside ClientThink
+	// wrapper. However for the save we need the pre-think state — capture via the engine ps
+	// which holds the last-synced position.
+	float preThinkOrigin[3] = { 0.f, 0.f, 0.f };
+	{
+		playerState_t *psPre = SV_GameClientNum( clientNum );
+		if ( psPre ) {
+			preThinkOrigin[0] = psPre->origin[0];
+			preThinkOrigin[1] = psPre->origin[1];
+			preThinkOrigin[2] = psPre->origin[2];
 		}
 	}
 
@@ -590,41 +774,158 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 		}
 	}
 
-	// SOF2 movement fix: clear world CInvInst "controller active" flag.
-	// gamex86.dll G_ClientThink checks world->vtable[10]() before deciding between
-	// PM_Pmove (player input movement) and CPlayer_Think (Ghoul2/script movement).
-	// vtable[10] reads field +0x74 of the world CInvInst singleton, which is set to 1
-	// by the no-arg constructor (G_GetWorldSingleton, first call). Clearing it here
-	// ensures PM_Pmove runs on subsequent frames, fixing frozen player after +map.
-	// World singleton RVA in gamex86.dll = 0x310128 (preferred base 0x20000000).
+	// Fix M (post-think): clear camera entity active flag AFTER ClientThink.
+	// ICARUS scripts re-set the camera flag during ClientThink (it runs inside G_ClientThink).
+	// Clearing it again after the fact prevents the flag from persisting into snapshot building
+	// and stops ICARUS from sustaining multi-frame camera takeover on air1.
 	{
-		static HMODULE s_hGameDll = NULL;
-		if ( !s_hGameDll )
-			s_hGameDll = GetModuleHandleA( "gamex86" );
-		if ( s_hGameDll ) {
-			volatile char *worldControlFlag = (volatile char *)s_hGameDll + 0x310128 + 0x74;
-			if ( *worldControlFlag != 0 ) {
-				static int s_fixLogCount = 0;
-				if ( s_fixLogCount < 4 ) {
-					Com_Printf( "[SOF2 fix] cleared world CInvInst+0x74 (was %d), base=%p\n",
-						(int)(unsigned char)*worldControlFlag, (void *)s_hGameDll );
-					++s_fixLogCount;
+		static HMODULE s_hGamePost = NULL;
+		if ( !s_hGamePost ) s_hGamePost = GetModuleHandleA( "gamex86" );
+		if ( s_hGamePost ) {
+			volatile int *g_cameraEntityAAddrPost = (volatile int *)( (char *)s_hGamePost + 0x308cd4 );
+			int camEntPost = *g_cameraEntityAAddrPost;
+			if ( camEntPost != 0 ) {
+				volatile char *camFlagPost = (volatile char *)( camEntPost + 0x5ee );
+				*camFlagPost = 0;
+			}
+		}
+	}
+	SV_ClearSOF2ForcedMove( g_sof2_dll_ps, "post" );
+	SV_ClearSOF2ControlSlot( g_sof2_dll_ps, "post" );
+	SV_ClearSOF2FlySwim( g_sof2_dll_ps, "post" );
+
+	// Fix K: sync DLL playerState → engine playerState.
+	// The DLL's PM_Pmove writes updated origin/velocity/viewangles into the DLL's own
+	// entity ps (a separate C++ object, not SV_GameClientNum). The engine's ps is what
+	// gets transmitted to the client for camera/rendering and used for PVS computation.
+	// Without this sync, the engine always thinks the player is at the spawn point:
+	//   - PVS stays at spawn → only spawn-area entities visible → map appears incomplete
+	//   - Camera never moves → player walks "offscreen"
+	//
+	// DLL ps offsets (confirmed from cgame PM_Pmove / PM_UpdateViewAngles disassembly):
+	//   origin[3]     : ps+0x14, +0x18, +0x1C
+	//   velocity[3]   : ps+0x2C, +0x30, +0x34
+	//   viewangles[3] : ps+0xB0, +0xB4, +0xB8  (Q3A convention: [0]=PITCH,[1]=YAW,[2]=ROLL)
+	//
+	// g_sof2_dll_ps is set in SV_GetUsercmd_SOF2 (gi[84]) which is called by the DLL's
+	// exported ClientThink wrapper before it calls the internal ClientThink.
+	if ( g_sof2_dll_ps ) {
+		playerState_t *engPs = SV_GameClientNum( clientNum );
+		if ( engPs ) {
+			float *dll_origin     = (float *)(g_sof2_dll_ps + 0x14);
+			float *dll_velocity   = (float *)(g_sof2_dll_ps + 0x2C);
+			int *dll_delta        = (int *)(g_sof2_dll_ps + 0x50);
+			int *dll_pm_type      = (int *)(g_sof2_dll_ps + 0x04);
+			int *dll_pm_flags     = (int *)(g_sof2_dll_ps + 0x0C);
+			int *dll_ground       = (int *)(g_sof2_dll_ps + 0x5C);
+			float *dll_viewangles = (float *)(g_sof2_dll_ps + 0xB0);
+			int *dll_viewheight   = (int *)(g_sof2_dll_ps + 0xBC);
+			int *dll_generic1     = (int *)(g_sof2_dll_ps + 0x150);
+			static vec3_t s_lastDllOrigin[MAX_CLIENTS];
+			static int s_noInputDriftFrames[MAX_CLIENTS];
+			static qboolean s_haveLastDllOrigin[MAX_CLIENTS];
+
+			if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
+				if ( !hasMovementInput && s_haveLastDllOrigin[clientNum] ) {
+					float dx = dll_origin[0] - s_lastDllOrigin[clientNum][0];
+					float dy = dll_origin[1] - s_lastDllOrigin[clientNum][1];
+					float planarDelta2 = dx * dx + dy * dy;
+					float planarSpeed2 = dll_velocity[0] * dll_velocity[0] + dll_velocity[1] * dll_velocity[1];
+
+					// Air1 can re-assert scripted motion without user input. Detect both
+					// fast velocity and persistent no-input XY translation.
+					if ( planarDelta2 > ( 0.5f * 0.5f ) || planarSpeed2 > ( 20.0f * 20.0f ) ) {
+						s_noInputDriftFrames[clientNum]++;
+					} else {
+						s_noInputDriftFrames[clientNum] = 0;
+					}
+
+					if ( s_noInputDriftFrames[clientNum] >= 2 ) {
+						if ( planarDelta2 > ( 0.25f * 0.25f ) || planarSpeed2 > ( 10.0f * 10.0f ) ) {
+							dll_origin[0] = s_lastDllOrigin[clientNum][0];
+							dll_origin[1] = s_lastDllOrigin[clientNum][1];
+							dll_velocity[0] = 0.0f;
+							dll_velocity[1] = 0.0f;
+							static int s_driftGuardLogCount = 0;
+							if ( s_driftGuardLogCount < 24 ) {
+								Com_Printf(
+									"[SV guard] blocked no-input drift client=%d dxy=%.2f speed2=%.1f keep=(%.1f,%.1f,%.1f)\n",
+									clientNum,
+									planarDelta2,
+									planarSpeed2,
+									s_lastDllOrigin[clientNum][0],
+									s_lastDllOrigin[clientNum][1],
+									s_lastDllOrigin[clientNum][2] );
+								s_driftGuardLogCount++;
+							}
+						}
+					}
+				} else {
+					s_noInputDriftFrames[clientNum] = 0;
 				}
-				*worldControlFlag = 0;
+			}
+
+			VectorCopy( dll_origin,   engPs->origin );
+			VectorCopy( dll_velocity, engPs->velocity );
+
+			// DLL uses standard Q3A viewangles convention ([0]=PITCH,[1]=YAW,[2]=ROLL)
+			// after Fix L revert. Direct copy — no swap needed.
+			VectorCopy( dll_viewangles, engPs->viewangles );
+			engPs->delta_angles[0] = dll_delta[0];
+			engPs->delta_angles[1] = dll_delta[1];
+			engPs->delta_angles[2] = dll_delta[2];
+			engPs->pm_type = *dll_pm_type;
+			engPs->pm_flags = *dll_pm_flags;
+			engPs->groundEntityNum = *dll_ground;
+			engPs->viewheight = *dll_viewheight;
+			engPs->generic1 = 0;
+			*dll_generic1 = 0;
+
+			// Normalize pm_type and viewheight after DLL may have set spectator state
+			if ( engPs->pm_type == 1 || engPs->pm_type == 2 ) {
+				engPs->pm_type = 0;
+			}
+			if ( engPs->viewheight < 0 ) {
+				engPs->viewheight = 38;
+			}
+			if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
+				VectorCopy( engPs->origin, s_lastDllOrigin[clientNum] );
+				s_haveLastDllOrigin[clientNum] = qtrue;
+			}
+
+			static int syncLogCount = 0;
+			if ( syncLogCount < 12 ) {
+				Com_Printf( "[SV sync] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) va=(%.1f,%.1f,%.1f) delta=(%d,%d,%d)\n",
+					syncLogCount + 1,
+					dll_origin[0], dll_origin[1], dll_origin[2],
+					dll_velocity[0], dll_velocity[1], dll_velocity[2],
+					dll_viewangles[0], dll_viewangles[1], dll_viewangles[2],
+					dll_delta[0], dll_delta[1], dll_delta[2] );
+				syncLogCount++;
+			}
+		}
+	} else {
+		// Fallback: g_sof2_dll_ps not set (gi[84] not called this frame)
+		playerState_t *psPostNorm = SV_GameClientNum( clientNum );
+		if ( psPostNorm && ( psPostNorm->pm_type == 1 || psPostNorm->pm_type == 2 ) ) {
+			psPostNorm->pm_type = 0;
+			if ( psPostNorm->viewheight < 0 ) {
+				psPostNorm->viewheight = 38;
 			}
 		}
 	}
 
-	// Post-ClientThink diagnostic: log playerState after DLL ran
-	if ( cmd->forwardmove || cmd->rightmove || cmd->upmove ) {
+	// Post-ClientThink diagnostic: log playerState after sync
+	if ( hasMovementInput ) {
 		static int postThinkLogCount = 0;
-		if ( postThinkLogCount < 16 ) {
+		if ( postThinkLogCount < 48 ) {
 			playerState_t *psPost = SV_GameClientNum( clientNum );
 			if ( psPost ) {
-				Com_Printf( "[SV post] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f)\n",
+				Com_Printf( "[SV post] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) va=(%.1f,%.1f,%.1f)\n",
 					postThinkLogCount + 1,
 					psPost->origin[0], psPost->origin[1], psPost->origin[2],
-					psPost->velocity[0], psPost->velocity[1], psPost->velocity[2] );
+					psPost->velocity[0], psPost->velocity[1], psPost->velocity[2],
+					psPost->viewangles[0], psPost->viewangles[1], psPost->viewangles[2] );
 			}
 			postThinkLogCount++;
 		}

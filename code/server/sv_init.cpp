@@ -580,6 +580,8 @@ void SV_Shutdown( const char *finalmsg ) {
 		return;
 	}
 
+	Com_Printf( "^3[SV shutdown] finalmsg='%s'\n", finalmsg ? finalmsg : "(null)" );
+
 	//Com_Printf( "----- Server Shutdown -----\n" );
 
 	if ( svs.clients && !com_errorEntered ) {

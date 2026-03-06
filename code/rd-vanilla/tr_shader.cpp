@@ -2433,6 +2433,19 @@ Ghoul2 Insert Start
 			continue;
 
 		}
+		// SOF2 material script compatibility:
+		// These metadata keys are used by game logic/tools and are not needed
+		// by the runtime renderer. Treat them as no-op so the shader still loads.
+		else if ( !Q_stricmp( token, "aliasShader" ) )
+		{
+			SkipRestOfLine( text );
+			continue;
+		}
+		else if ( !Q_stricmp( token, "damageShader" ) )
+		{
+			SkipRestOfLine( text );
+			continue;
+		}
 /*
 Ghoul2 Insert End
 */

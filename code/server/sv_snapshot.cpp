@@ -182,6 +182,26 @@ static void SV_WriteSnapshotToClient( client_t *client, msg_t *msg ) {
 	MSG_WriteByte (msg, frame->areabytes);
 	MSG_WriteData (msg, frame->areabits, frame->areabytes);
 
+	// SOF2 bridge fix: snapshots can stay in spectator-like pm state even after
+	// command-path overrides. Normalize outgoing playerstate so cgame predicts
+	// as an active player (proper eye height / player presentation paths).
+	{
+		static int s_snapFixLogCount = 0;
+		if ( frame->ps.pm_type == 1 || frame->ps.pm_type == 2 ) {
+			if ( s_snapFixLogCount < 24 ) {
+				Com_Printf( "[SV snapfix] forcing snapshot pm_type %d->0 client=%s origin=(%.1f,%.1f,%.1f)\n",
+					frame->ps.pm_type,
+					client->name,
+					frame->ps.origin[0], frame->ps.origin[1], frame->ps.origin[2] );
+				++s_snapFixLogCount;
+			}
+			frame->ps.pm_type = 0;
+		}
+		if ( frame->ps.viewheight < 0 ) {
+			frame->ps.viewheight = 38;
+		}
+	}
+
 	// delta encode the playerstate
 	if ( oldframe ) {
 		MSG_WriteDeltaPlayerstate( msg, &oldframe->ps, &frame->ps );
@@ -587,6 +607,11 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		state = &svs.snapshotEntities[svs.nextSnapshotEntities % svs.numSnapshotEntities];
 		// SOF2: entityState_t is 256 bytes at CEntity offset 8
 		memcpy( state, SOF2_ENT_S_PTR(ent), SOF2_ENTITYSTATE_SIZE );
+		// Guard invalid trType — DLL ICARUS scripts may spawn entities with
+		// uninitialized trajectory data. Invalid trType causes ERR_DROP in
+		// cgamex86.dll's BG_EvaluateTrajectory (switch default).
+		if ( (unsigned)state->pos.trType  > TR_GRAVITY ) state->pos.trType  = TR_STATIONARY;
+		if ( (unsigned)state->apos.trType > TR_GRAVITY ) state->apos.trType = TR_STATIONARY;
 		svs.nextSnapshotEntities++;
 		frame->num_entities++;
 	}

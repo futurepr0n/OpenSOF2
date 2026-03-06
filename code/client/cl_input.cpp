@@ -391,6 +391,39 @@ void CL_AdjustAngles( void ) {
 	}
 }
 
+static void CL_UnstickButtonIfReleased( kbutton_t *button, const char *name ) {
+	qboolean stillHeld = qfalse;
+	const int key0 = button->down[0];
+	const int key1 = button->down[1];
+
+	if ( !button->active ) {
+		return;
+	}
+
+	if ( key0 > 0 && Key_IsDown( key0 ) ) {
+		stillHeld = qtrue;
+	}
+	if ( key1 > 0 && Key_IsDown( key1 ) ) {
+		stillHeld = qtrue;
+	}
+	if ( stillHeld ) {
+		return;
+	}
+
+	button->down[0] = 0;
+	button->down[1] = 0;
+	button->active = qfalse;
+	button->wasPressed = qfalse;
+	button->downtime = 0;
+	button->msec = 0;
+
+	static int s_unstickLogCount = 0;
+	if ( s_unstickLogCount < 24 ) {
+		Com_Printf( "[CL key] unstick %s (k0=%d k1=%d)\n", name, key0, key1 );
+		++s_unstickLogCount;
+	}
+}
+
 /*
 ================
 CL_KeyMove
@@ -413,6 +446,17 @@ void CL_KeyMove( usercmd_t *cmd ) {
 	} else {
 		cmd->buttons |= BUTTON_WALKING;
 		movespeed = 64;
+	}
+
+	if ( cls.state == CA_ACTIVE && Key_GetCatcher() == 0 ) {
+		CL_UnstickButtonIfReleased( &in_forward, "forward" );
+		CL_UnstickButtonIfReleased( &in_back, "back" );
+		CL_UnstickButtonIfReleased( &in_moveleft, "moveleft" );
+		CL_UnstickButtonIfReleased( &in_moveright, "moveright" );
+		CL_UnstickButtonIfReleased( &in_up, "up" );
+		CL_UnstickButtonIfReleased( &in_down, "down" );
+		CL_UnstickButtonIfReleased( &in_left, "left" );
+		CL_UnstickButtonIfReleased( &in_right, "right" );
 	}
 
 	forward = 0;
@@ -621,6 +665,12 @@ CL_CmdButtons
 */
 void CL_CmdButtons( usercmd_t *cmd ) {
 	int		i;
+
+	if ( cls.state == CA_ACTIVE && Key_GetCatcher() == 0 ) {
+		for ( i = 0 ; i < 16 ; i++ ) {
+			CL_UnstickButtonIfReleased( &in_buttons[i], "button" );
+		}
+	}
 
 	//
 	// figure button bits

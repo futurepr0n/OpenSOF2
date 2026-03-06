@@ -682,12 +682,124 @@ typedef struct {
 	byte areamask[MAX_MAP_AREA_BYTES];
 } sof2_refdef_t;
 
-static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
-	refdef_t localRefdef;
+static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 	static int renderLogCount = 0;
 	static int forceViewLogCount = 0;
 	static int forceOriginLogCount = 0;
 	static int clientOriginLogCount = 0;
+	vec3_t forcedWorldAngles;
+
+	if ( !localRefdef ) {
+		CG_FileTrace( "CG_SubmitSOF2Refdef null refdef" );
+		return;
+	}
+
+	// Temporary SOF2 compatibility path:
+	// the active render camera is still decoupled from the client view.
+	// Force the submitted origin/axis from playerstate, but use the same
+	// world-space angle basis as movement:
+	//   worldAngle = SHORT2ANGLE( ANGLE2SHORT( cl.viewangles ) + delta_angles )
+	// Using raw cl.viewangles here was wrong because those are relative input
+	// angles during direct +map startup, while movement uses delta-adjusted
+	// world angles. That mismatch is exactly why W/A/S/D looked locked to the
+	// spawn orientation instead of the visible camera.
+	if ( cls.state == CA_ACTIVE && !( Key_GetCatcher() & KEYCATCH_UI ) ) {
+		const int forcedViewHeight = ( cl.frame.ps.viewheight > 0 ) ? cl.frame.ps.viewheight : 38;
+		for ( int i = 0; i < 3; ++i ) {
+			forcedWorldAngles[i] = SHORT2ANGLE(
+				(short)( ANGLE2SHORT( cl.viewangles[i] ) + cl.frame.ps.delta_angles[i] ) );
+		}
+		if ( clientOriginLogCount < 24 ) {
+			Com_Printf(
+				"[CL ps] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) pm_type=%d ground=%d viewheight=%d generic1=%d delta=(%d,%d,%d) psva=(%.1f,%.1f,%.1f)\n",
+				clientOriginLogCount + 1,
+				cl.frame.ps.origin[0],
+				cl.frame.ps.origin[1],
+				cl.frame.ps.origin[2],
+				cl.frame.ps.velocity[0],
+				cl.frame.ps.velocity[1],
+				cl.frame.ps.velocity[2],
+				cl.frame.ps.pm_type,
+				cl.frame.ps.groundEntityNum,
+				cl.frame.ps.viewheight,
+				cl.frame.ps.generic1,
+				cl.frame.ps.delta_angles[0],
+				cl.frame.ps.delta_angles[1],
+				cl.frame.ps.delta_angles[2],
+				cl.frame.ps.viewangles[0],
+				cl.frame.ps.viewangles[1],
+				cl.frame.ps.viewangles[2] );
+			++clientOriginLogCount;
+		}
+		VectorCopy( cl.frame.ps.origin, localRefdef->vieworg );
+		localRefdef->vieworg[2] += forcedViewHeight;
+		AnglesToAxis( forcedWorldAngles, localRefdef->viewaxis );
+		if ( forceOriginLogCount < 12 ) {
+			Com_Printf( "[SOF2 RS] forcing vieworg from ps.origin=(%.1f,%.1f,%.1f) vh=%d (raw=%d)\n",
+				cl.frame.ps.origin[0],
+				cl.frame.ps.origin[1],
+				cl.frame.ps.origin[2],
+				forcedViewHeight,
+				cl.frame.ps.viewheight );
+			++forceOriginLogCount;
+		}
+		if ( forceViewLogCount < 12 ) {
+			Com_Printf(
+				"[SOF2 RS] forcing viewaxis world=(%.1f,%.1f,%.1f) from cl=(%.1f,%.1f,%.1f) delta=(%d,%d,%d)\n",
+				forcedWorldAngles[0], forcedWorldAngles[1], forcedWorldAngles[2],
+				cl.viewangles[0], cl.viewangles[1], cl.viewangles[2],
+				cl.frame.ps.delta_angles[0], cl.frame.ps.delta_angles[1], cl.frame.ps.delta_angles[2] );
+			++forceViewLogCount;
+		}
+	}
+
+	if ( renderLogCount < 6 ) {
+		CG_FileTrace( "RS #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x",
+			renderLogCount + 1,
+			localRefdef->x,
+			localRefdef->y,
+			localRefdef->width,
+			localRefdef->height,
+			localRefdef->fov_x,
+			localRefdef->fov_y,
+			localRefdef->vieworg[0],
+			localRefdef->vieworg[1],
+			localRefdef->vieworg[2],
+			localRefdef->viewContents,
+			localRefdef->time,
+			localRefdef->rdflags );
+		Com_Printf(
+			"[SOF2 RS] #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x\n",
+			renderLogCount + 1,
+			localRefdef->x,
+			localRefdef->y,
+			localRefdef->width,
+			localRefdef->height,
+			localRefdef->fov_x,
+			localRefdef->fov_y,
+			localRefdef->vieworg[0],
+			localRefdef->vieworg[1],
+			localRefdef->vieworg[2],
+			localRefdef->viewContents,
+			localRefdef->time,
+			localRefdef->rdflags );
+			renderLogCount++;
+	}
+	__try {
+		re.RenderScene( localRefdef );
+		// Scene was successfully submitted — save it as the fallback.
+		s_renderSceneSubmitted = qtrue;
+		s_lastGoodRefdef = *localRefdef;
+		s_lastGoodRefdefValid = qtrue;
+	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
+		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
+		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
+	}
+}
+
+static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
+	refdef_t localRefdef;
+	static int legacySlotLogCount = 0;
 
 	if ( !sof2Refdef ) {
 		CG_FileTrace( "CG_R_RenderScene_Wrapper null refdef" );
@@ -705,90 +817,75 @@ static void CG_R_RenderScene_Wrapper( const sof2_refdef_t *sof2Refdef ) {
 	VectorCopy( sof2Refdef->viewaxis[0], localRefdef.viewaxis[0] );
 	VectorCopy( sof2Refdef->viewaxis[1], localRefdef.viewaxis[1] );
 	VectorCopy( sof2Refdef->viewaxis[2], localRefdef.viewaxis[2] );
-
-	// Temporary SOF2 compatibility path:
-	// the active render camera is still decoupled from the client view even
-	// though usercmd/viewangles are changing. Force the submitted view axis to
-	// match cl.viewangles so we can verify real mouse-look in-world.
-	if ( cls.state == CA_ACTIVE && !( Key_GetCatcher() & KEYCATCH_UI ) ) {
-		if ( clientOriginLogCount < 24 ) {
-			Com_Printf( "[CL ps] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) pm_type=%d ground=%d viewheight=%d\n",
-				clientOriginLogCount + 1,
-				cl.frame.ps.origin[0],
-				cl.frame.ps.origin[1],
-				cl.frame.ps.origin[2],
-				cl.frame.ps.velocity[0],
-				cl.frame.ps.velocity[1],
-				cl.frame.ps.velocity[2],
-				cl.frame.ps.pm_type,
-				cl.frame.ps.groundEntityNum,
-				cl.frame.ps.viewheight );
-			++clientOriginLogCount;
-		}
-		VectorCopy( cl.frame.ps.origin, localRefdef.vieworg );
-		localRefdef.vieworg[2] += cl.frame.ps.viewheight;
-		AnglesToAxis( cl.viewangles, localRefdef.viewaxis );
-		if ( forceOriginLogCount < 12 ) {
-			Com_Printf( "[SOF2 RS] forcing vieworg from ps.origin=(%.1f,%.1f,%.1f) vh=%d\n",
-				cl.frame.ps.origin[0],
-				cl.frame.ps.origin[1],
-				cl.frame.ps.origin[2],
-				cl.frame.ps.viewheight );
-			++forceOriginLogCount;
-		}
-		if ( forceViewLogCount < 12 ) {
-			Com_Printf( "[SOF2 RS] forcing viewaxis from cl.viewangles=(%.1f,%.1f,%.1f)\n",
-				cl.viewangles[0], cl.viewangles[1], cl.viewangles[2] );
-			++forceViewLogCount;
-		}
-	}
-
 	localRefdef.viewContents = 0;
 	localRefdef.time = sof2Refdef->time;
 	localRefdef.rdflags = sof2Refdef->rdflags;
 	memcpy( localRefdef.areamask, sof2Refdef->areamask, sizeof( localRefdef.areamask ) );
-	if ( renderLogCount < 6 ) {
-		CG_FileTrace( "RS #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x",
-			renderLogCount + 1,
+	if ( legacySlotLogCount < 8 ) {
+		Com_Printf( "[SOF2 RS138] #%d legacy render path x=%d y=%d w=%d h=%d time=%d rdflags=0x%x\n",
+			legacySlotLogCount + 1,
 			localRefdef.x,
 			localRefdef.y,
 			localRefdef.width,
 			localRefdef.height,
-			localRefdef.fov_x,
-			localRefdef.fov_y,
-			localRefdef.vieworg[0],
-			localRefdef.vieworg[1],
-			localRefdef.vieworg[2],
-			localRefdef.viewContents,
 			localRefdef.time,
 			localRefdef.rdflags );
+		++legacySlotLogCount;
+	}
+	CG_SubmitSOF2Refdef( &localRefdef );
+}
+
+static void CG_R_RenderScene_SOF2Main( int viewEntityNum, const vec3_t vieworg,
+	const vec3_t viewaxis[3], int viewContents ) {
+	refdef_t localRefdef;
+	const char *cgameBase = (const char *)cgameLibrary;
+	const float *sof2FovX = cgameBase ? (const float *)( cgameBase + 0x1D51B0 ) : NULL;
+	const float *sof2FovY = cgameBase ? (const float *)( cgameBase + 0x1D51B4 ) : NULL;
+	const int *sof2Time = cgameBase ? (const int *)( cgameBase + 0x1D51E8 ) : NULL;
+	const byte *sof2Areamask = cgameBase ? (const byte *)( cgameBase + 0x1D51F0 ) : NULL;
+	static int mainRenderLogCount = 0;
+
+	memset( &localRefdef, 0, sizeof( localRefdef ) );
+	localRefdef.x = 0;
+	localRefdef.y = 0;
+	localRefdef.width = cls.glconfig.vidWidth > 0 ? cls.glconfig.vidWidth : 640;
+	localRefdef.height = cls.glconfig.vidHeight > 0 ? cls.glconfig.vidHeight : 480;
+	localRefdef.fov_x = ( sof2FovX && *sof2FovX > 1.0f && *sof2FovX < 179.0f ) ? *sof2FovX : 90.0f;
+	localRefdef.fov_y = ( sof2FovY && *sof2FovY > 1.0f && *sof2FovY < 179.0f ) ? *sof2FovY : 75.0f;
+	localRefdef.viewContents = viewContents;
+	localRefdef.time = sof2Time ? *sof2Time : cl.serverTime;
+	localRefdef.rdflags = 0;
+
+	if ( vieworg ) {
+		VectorCopy( vieworg, localRefdef.vieworg );
+	}
+	if ( viewaxis ) {
+		VectorCopy( viewaxis[0], localRefdef.viewaxis[0] );
+		VectorCopy( viewaxis[1], localRefdef.viewaxis[1] );
+		VectorCopy( viewaxis[2], localRefdef.viewaxis[2] );
+	}
+	if ( sof2Areamask ) {
+		memcpy( localRefdef.areamask, sof2Areamask, sizeof( localRefdef.areamask ) );
+	}
+
+	if ( mainRenderLogCount < 12 ) {
 		Com_Printf(
-			"[SOF2 RS] #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x\n",
-			renderLogCount + 1,
-			localRefdef.x,
-			localRefdef.y,
-			localRefdef.width,
-			localRefdef.height,
+			"[SOF2 RS81] #%d viewEnt=%d contents=0x%x fov=(%.1f,%.1f) raworg=(%.1f,%.1f,%.1f) rawAxis0=(%.2f,%.2f,%.2f)\n",
+			mainRenderLogCount + 1,
+			viewEntityNum,
+			viewContents,
 			localRefdef.fov_x,
 			localRefdef.fov_y,
 			localRefdef.vieworg[0],
 			localRefdef.vieworg[1],
 			localRefdef.vieworg[2],
-			0,
-			localRefdef.time,
-			localRefdef.rdflags );
-			renderLogCount++;
+			localRefdef.viewaxis[0][0],
+			localRefdef.viewaxis[0][1],
+			localRefdef.viewaxis[0][2] );
+		++mainRenderLogCount;
 	}
-	__try {
-		re.RenderScene( &localRefdef );
-		// Scene was successfully submitted — save it as the fallback.
-		s_renderSceneSubmitted = qtrue;
-		s_lastGoodRefdef = localRefdef;
-		s_lastGoodRefdefValid = qtrue;
-	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
-		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
-		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
-	}
+
+	CG_SubmitSOF2Refdef( &localRefdef );
 }
 
 // ----- Slot 141: R_FillRect -----
@@ -1338,14 +1435,28 @@ static int CG_LogDrawInformationException( EXCEPTION_POINTERS *ep ) {
 static int CG_LogInitException( EXCEPTION_POINTERS *ep ) {
 	EXCEPTION_RECORD *rec = ep ? ep->ExceptionRecord : NULL;
 	CONTEXT *ctx = ep ? ep->ContextRecord : NULL;
+	void *stackRet = NULL;
+	char exceptionModule[512];
+	char returnModule[512];
+
+	exceptionModule[0] = '\0';
+	returnModule[0] = '\0';
+	if ( ctx && ctx->Esp ) {
+		stackRet = *(void **)ctx->Esp;
+	}
+	CG_FormatModuleForAddress( ctx ? (void *)ctx->Eip : NULL, exceptionModule, sizeof( exceptionModule ) );
+	CG_FormatModuleForAddress( stackRet, returnModule, sizeof( returnModule ) );
 	Com_Printf(
-		"^1[CG] exception 0x%08X in Init at %p accessType=%lu fault=%p eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
+		"^1[CG] exception 0x%08X in Init at %p (%s) accessType=%lu fault=%p ret=%p (%s) eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X\n",
 		rec ? (unsigned int)rec->ExceptionCode : 0U,
 		ctx ? (void *)ctx->Eip : NULL,
+		exceptionModule,
 		(rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 1)
 			? (unsigned long)rec->ExceptionInformation[0] : 0UL,
 		(rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
 			? (void *)rec->ExceptionInformation[1] : NULL,
+		stackRet,
+		returnModule,
 		ctx ? ctx->Eax : 0U,
 		ctx ? ctx->Ebx : 0U,
 		ctx ? ctx->Ecx : 0U,
@@ -1440,6 +1551,7 @@ Called from CL_InitCGame() when the map starts.
 qboolean CL_InitSOF2CGame( void ) {
 	typedef cgame_export_t *(__cdecl *GetCGameAPIProc)( int version, cgame_import_t *import );
 
+		Com_Printf( "[SOF2 build] 2026-03-06-corrupt-entity-drop\n" );
 	CG_FileTrace( "CL_InitSOF2CGame enter" );
 	cgameLibrary = Sys_LoadSPGameDll( "cgame", NULL );   // "cgame" + ARCH_STRING("x86") + DLL_EXT = "cgamex86.dll"
 	if ( !cgameLibrary ) {
@@ -1467,24 +1579,35 @@ qboolean CL_InitSOF2CGame( void ) {
 	// -----------------------------------------------------------------------
 	{
 		HMODULE hCgame = (HMODULE)cgameLibrary;
-		static const unsigned char retTrue8[] = { 0xB0, 0x01, 0xC2, 0x08, 0x00 };
+		static const unsigned char ret4[] = { 0xC2, 0x04, 0x00 };
+		static const unsigned char retFalse[] = { 0x31, 0xC0, 0xC3 };
 		CL_PatchDllRet( hCgame, 0x16BB0, "CGlassMgr::ResolveConstraints" );
 
-		// Temporary isolation patch set: short-circuit the SP/HUD overlay path after
-		// the world scene is built so we can verify that active map rendering survives.
+		// The retail UI/weapon pass is still unstable while the game import ABI is being
+		// corrected, so keep CG_DrawActive behind a hard guard for now.
 		CL_PatchDllRet( hCgame, 0x00A2D0, "CG_DrawSkyboxPortal" );
-		CL_PatchDllRet( hCgame, 0x00AC50, "CG_DrawRaindrops" );
+		CL_PatchDllRet( hCgame, 0x00AE90, "CG_DrawActive" );
+		// Direct +map loads still trigger the retail cinematic camera path inside cgame.
+		// That camera owns the rendered view, suppresses the first-person weapon, and
+		// explains why the server can move while the visible view does not match input.
+		CL_PatchDllBytes( hCgame, 0x009E40, ret4, sizeof( ret4 ), "CG_CamEnable" );
+		CL_PatchDllBytes( hCgame, 0x027D90, retFalse, sizeof( retFalse ), "CG_GetCameraMode" );
+		// Re-enable weather effects while keeping HUD/UI crash isolation.
+		// CL_PatchDllRet( hCgame, 0x00AC50, "CG_DrawRaindrops" );
 		CL_PatchDllRet( hCgame, 0x00B180, "CG_DrawFPS" );
 		CL_PatchDllRet( hCgame, 0x00B2E0, "CG_DrawTimerHUD" );
 		CL_PatchDllRet( hCgame, 0x00B3A0, "CG_DrawCrosshairHitMarker" );
 		CL_PatchDllRet( hCgame, 0x00B4F0, "CG_DrawScopeOverlay" );
 		CL_PatchDllRet( hCgame, 0x00BFA0, "CG_DrawCorpseMarkers" );
 		CL_PatchDllRet( hCgame, 0x040A70, "CG_Draw2DSprites" );
-		CL_PatchDllRet( hCgame, 0x0693C0, "CG_DrawWeaponHUD" );
+		// Re-enable weapon/HUD path incrementally.
+		// CL_PatchDllRet( hCgame, 0x0693C0, "CG_DrawWeaponHUD" );
 		CL_PatchDllRet( hCgame, 0x070750, "CG_DrawVehicleDirection" );
 		CL_PatchDllRet( hCgame, 0x0284F0, "CG_LoadInventoryMenus" );
-		CL_PatchDllRet( hCgame, 0x0301E0, "CG_SpawnEntitiesFromSpawnVars" );
-		CL_PatchDllBytes( hCgame, 0x068A10, retTrue8, sizeof( retTrue8 ), "CG_InitPlayerEntity" );
+		// Re-enable spawned world entities (props/crates/etc).
+		// CL_PatchDllRet( hCgame, 0x0301E0, "CG_SpawnEntitiesFromSpawnVars" );
+		// Re-enable player entity init (required for first-person presentation).
+		// CL_PatchDllBytes( hCgame, 0x068A10, retTrue8, sizeof( retTrue8 ), "CG_InitPlayerEntity" );
 	}
 
 	// -----------------------------------------------------------------------
@@ -1823,13 +1946,15 @@ qboolean CL_InitSOF2CGame( void ) {
 		// Must return CWraithStub* — the DLL calls through its 78-entry vtable.
 		slots[116] = (void *)CG_G2_InitWraithSurfaceMap;       // [116] G2_InitWraithSurfaceMap ← verified CRASH FIX
 
-		// --- Sound slots 78-82 ---
-		// SOF2 inserts S_AddRealLoopingSound at [78], shifting the block.
-		// All verified HIGH confidence via Ghidra xref analysis.
+		// --- Sound / scene crossover 78-82 ---
+		// Retail cgame uses slot 81 from CG_DrawInformation as the primary
+		// scene submit path. Earlier builds incorrectly treated [81] as
+		// S_Respatialize, which explains why the newer source tree stopped
+		// hitting the main RenderScene wrapper at all.
 		slots[78] = (void *)S_AddLoopingSound_SOF2;         // [78] S_AddRealLoopingSound ← verified
 		slots[79] = (void *)CG_S_StopLoopingSound;          // [79] S_StopLoopingSound ← verified
 		slots[80] = (void *)S_UpdateEntityPosition;          // [80] S_UpdateEntityPosition ← verified
-		slots[81] = (void *)S_Respatialize;                  // [81] S_Respatialize ← verified
+		slots[81] = (void *)CG_R_RenderScene_SOF2Main;       // [81] R_RenderScene ← verified from CG_DrawInformation
 		slots[82] = (void *)S_RegisterSound_SOF2;            // [82] S_RegisterSound ← verified
 
 		// --- Snapshot / command block 90-99 ---
@@ -1995,6 +2120,303 @@ void	CL_GetCurrentSnapshotNumber( int *snapshotNumber, int *serverTime ) {
 	*serverTime = cl.frame.serverTime;
 }
 
+#define SOF2_RETAIL_SOUND_TABLE_MAX 0x200
+#define SOF2_RETAIL_PRECACHE_SOUND_MAX MAX_SOUNDS
+#define SOF2_RETAIL_LOOPSET_BASE 0x46a
+#define SOF2_RETAIL_LOOPSET_MAX ( MAX_CONFIGSTRINGS - SOF2_RETAIL_LOOPSET_BASE )
+
+static unsigned int CL_SOF2_RawEvent( int event ) {
+	return (unsigned int)( event & ~EV_EVENT_BITS );
+}
+
+static qboolean CL_SOF2_IsRetailSoundEvent( unsigned int rawEvent ) {
+	switch ( rawEvent ) {
+	case 0x2d: // EV_GENERAL_SOUND
+	case 0x2e: // EV_GENERAL_SOUND_LONGDISTANCE
+	case 0x2f: // EV_GENERAL_SOUND_ON_ENT
+	case 0x32: // EV_GLOBAL_SOUND
+		return qtrue;
+	default:
+		return qfalse;
+	}
+}
+
+static qboolean CL_SOF2_IsRetailCameraEvent( unsigned int rawEvent ) {
+	switch ( rawEvent ) {
+	case 0x4b: // EV_CAM_ENABLE
+	case 0x4c: // EV_CAM_DISABLE
+	case 0x4d: // EV_CAM_ZOOM
+	case 0x4e: // EV_CAM_MOVE
+	case 0x4f: // EV_CAM_PAN
+	case 0x50: // EV_CAM_ROLL
+	case 0x51: // EV_CAM_TRACK
+	case 0x52: // EV_CAM_FOLLOW
+	case 0x53: // EV_CAM_DISTANCE
+	case 0x54: // EV_CAM_SHAKE
+	case 0x55: // EV_CAM_FADE
+	case 0x56: // EV_CAM_PATH
+	case 0x59: // EV_CAM_ROFFBEGIN
+	case 0x5a: // EV_CAM_ROFFEND
+		return qtrue;
+	default:
+		return qfalse;
+	}
+}
+
+static void CL_SOF2_DropCorruptEntity( int snapshotNumber, int entIndex, entityState_t *ent, const char *reason ) {
+	static int sof2CorruptEntityLogCount = 0;
+	int entNum;
+	int entType;
+	int eventValue;
+	int eventParmValue;
+	int loopSoundValue;
+	int modelIndexValue;
+	int g2RadiusValue;
+
+	if ( !ent ) {
+		return;
+	}
+
+	entNum = ent->number;
+	entType = ent->eType;
+	eventValue = ent->event;
+	eventParmValue = ent->eventParm;
+	loopSoundValue = ent->loopSound;
+	modelIndexValue = ent->modelindex;
+	g2RadiusValue = ent->g2radius;
+
+	if ( sof2CorruptEntityLogCount < 64 ) {
+		Com_Printf(
+			"[SNAP fix] dropped corrupt entity snap=%d idx=%d num=%d type=%d event=0x%X parm=%d loop=%d model=%d g2=%d why=%s\n",
+			snapshotNumber,
+			entIndex,
+			entNum,
+			entType,
+			eventValue,
+			eventParmValue,
+			loopSoundValue,
+			modelIndexValue,
+			g2RadiusValue,
+			reason ? reason : "unknown" );
+		++sof2CorruptEntityLogCount;
+	}
+
+	memset( ent, 0, sizeof( *ent ) );
+	ent->number = entNum;
+	ent->eType = ET_INVISIBLE;
+	ent->groundEntityNum = ENTITYNUM_NONE;
+}
+
+static void CL_SOF2_SanitizeLoopSound( int snapshotNumber, int entIndex, entityState_t *ent ) {
+	static int sof2LoopSoundLogCount = 0;
+	const int loopSoundMax = ( ent && ent->eType == ET_MOVER ) ? SOF2_RETAIL_SOUND_TABLE_MAX : SOF2_RETAIL_PRECACHE_SOUND_MAX;
+
+	if ( !ent || ent->loopSound == 0 ) {
+		return;
+	}
+
+	if ( ent->loopSound > 0 && ent->loopSound < loopSoundMax ) {
+		return;
+	}
+
+	if ( sof2LoopSoundLogCount < 96 ) {
+		Com_Printf(
+			"[SNAP fix] cleared bad loopSound snap=%d idx=%d num=%d type=%d loop=%d model=%d g2=%d soundSet=%d\n",
+			snapshotNumber,
+			entIndex,
+			ent->number,
+			ent->eType,
+			ent->loopSound,
+			ent->modelindex,
+			ent->g2radius,
+			ent->soundSetIndex );
+		++sof2LoopSoundLogCount;
+	}
+
+	ent->loopSound = 0;
+}
+
+static void CL_SOF2_SanitizeSpeakerSound( int snapshotNumber, int entIndex, entityState_t *ent ) {
+	static int sof2SpeakerSoundLogCount = 0;
+
+	if ( !ent || ent->eType != ET_SPEAKER || ent->eventParm == 0 ) {
+		return;
+	}
+
+	if ( ent->eventParm > 0 && ent->eventParm < SOF2_RETAIL_PRECACHE_SOUND_MAX ) {
+		return;
+	}
+
+	if ( sof2SpeakerSoundLogCount < 64 ) {
+		Com_Printf(
+			"[SNAP fix] cleared bad speaker sound snap=%d idx=%d num=%d parm=%d client=%d frame=%d\n",
+			snapshotNumber,
+			entIndex,
+			ent->number,
+			ent->eventParm,
+			ent->clientNum,
+			ent->frame );
+		++sof2SpeakerSoundLogCount;
+	}
+
+	ent->eventParm = 0;
+}
+
+static void CL_SOF2_SanitizeLoopSetIndex( int snapshotNumber, int entIndex, entityState_t *ent ) {
+	static int sof2LoopSetLogCount = 0;
+
+	if ( !ent || ent->g2radius == 0 ) {
+		return;
+	}
+
+	if ( ent->g2radius > 0 && ent->g2radius < SOF2_RETAIL_LOOPSET_MAX ) {
+		return;
+	}
+
+	if ( sof2LoopSetLogCount < 64 ) {
+		Com_Printf(
+			"[SNAP fix] cleared bad loop-set snap=%d idx=%d num=%d type=%d g2=%d loop=%d model=%d\n",
+			snapshotNumber,
+			entIndex,
+			ent->number,
+			ent->eType,
+			ent->g2radius,
+			ent->loopSound,
+			ent->modelindex );
+		++sof2LoopSetLogCount;
+	}
+
+	ent->g2radius = 0;
+}
+
+static void CL_SOF2_SanitizeEventField( const char *scope, int snapshotNumber, int ownerNum, int slot, int *eventField, int *parmField ) {
+	static int sof2BadEventLogCount = 0;
+	const unsigned int fullEvent = eventField ? (unsigned int)( *eventField ) : 0U;
+	const unsigned int rawEvent = CL_SOF2_RawEvent( fullEvent );
+
+	if ( rawEvent == 0 || rawEvent < EV_NUM_ENTITY_EVENTS ) {
+		return;
+	}
+
+	if ( sof2BadEventLogCount < 96 ) {
+		Com_Printf(
+			"[SNAP fix] cleared bad %s snap=%d owner=%d slot=%d full=0x%X raw=0x%X parm=%d\n",
+			scope ? scope : "(null)",
+			snapshotNumber,
+			ownerNum,
+			slot,
+			fullEvent,
+			rawEvent,
+			parmField ? *parmField : 0 );
+		++sof2BadEventLogCount;
+	}
+
+	if ( eventField ) {
+		*eventField = 0;
+	}
+	if ( parmField ) {
+		*parmField = 0;
+	}
+}
+
+static void CL_SOF2_SanitizeSnapshotPlayerState( int snapshotNumber, playerState_t *ps ) {
+	int i;
+
+	if ( !ps ) {
+		return;
+	}
+
+	CL_SOF2_SanitizeEventField( "ps.external", snapshotNumber, ps->clientNum, -1, &ps->externalEvent, &ps->externalEventParm );
+	for ( i = 0; i < MAX_PS_EVENTS; ++i ) {
+		CL_SOF2_SanitizeEventField( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
+	}
+}
+
+static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, entityState_t *ent ) {
+	static int sof2EventLogCount = 0;
+	static int sof2SoundDropLogCount = 0;
+	static int sof2CameraStripLogCount = 0;
+	unsigned int rawEvent;
+
+	if ( !ent ) {
+		return;
+	}
+
+	if ( ent->eType < ET_GENERAL || ent->eType > ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) {
+		CL_SOF2_DropCorruptEntity( snapshotNumber, entIndex, ent, "etype" );
+		return;
+	}
+
+	CL_SOF2_SanitizeLoopSound( snapshotNumber, entIndex, ent );
+	CL_SOF2_SanitizeSpeakerSound( snapshotNumber, entIndex, ent );
+	CL_SOF2_SanitizeLoopSetIndex( snapshotNumber, entIndex, ent );
+
+	CL_SOF2_SanitizeEventField( "entity.event", snapshotNumber, ent ? ent->number : -1, entIndex, ent ? &ent->event : NULL, ent ? &ent->eventParm : NULL );
+	rawEvent = CL_SOF2_RawEvent( ent->event );
+
+	if ( rawEvent == 0 ) {
+		return;
+	}
+
+	if ( CL_SOF2_IsRetailSoundEvent( rawEvent ) ) {
+		if ( sof2EventLogCount < 96 ) {
+			Com_Printf(
+				"[SNAP event] snap=%d idx=%d num=%d ev=0x%X parm=%d other=%d other2=%d g2=%d ang2=%.2f\n",
+				snapshotNumber,
+				entIndex,
+				ent->number,
+				rawEvent,
+				ent->eventParm,
+				ent->otherEntityNum,
+				ent->otherEntityNum2,
+				ent->g2radius,
+				ent->angles[2] );
+			++sof2EventLogCount;
+		}
+
+		if ( ent->eventParm < 0 || ent->eventParm >= SOF2_RETAIL_SOUND_TABLE_MAX ) {
+			if ( sof2SoundDropLogCount < 64 ) {
+				Com_Printf(
+					"[SNAP fix] dropped bad sound event snap=%d idx=%d num=%d ev=0x%X parm=%d other=%d other2=%d g2=%d\n",
+					snapshotNumber,
+					entIndex,
+					ent->number,
+					rawEvent,
+					ent->eventParm,
+					ent->otherEntityNum,
+					ent->otherEntityNum2,
+					ent->g2radius );
+				++sof2SoundDropLogCount;
+			}
+
+			ent->event = 0;
+			ent->eventParm = 0;
+		}
+
+		return;
+	}
+
+	if ( CL_SOF2_IsRetailCameraEvent( rawEvent ) ) {
+		if ( sof2CameraStripLogCount < 64 ) {
+			Com_Printf(
+				"[SNAP fix] stripped camera event snap=%d idx=%d num=%d ev=0x%X parm=%d time=%d time2=%d other=%d other2=%d\n",
+				snapshotNumber,
+				entIndex,
+				ent->number,
+				rawEvent,
+				ent->eventParm,
+				ent->time,
+				ent->time2,
+				ent->otherEntityNum,
+				ent->otherEntityNum2 );
+			++sof2CameraStripLogCount;
+		}
+
+		ent->event = 0;
+		ent->eventParm = 0;
+	}
+}
+
 /*
 ====================
 CL_GetSnapshot
@@ -2032,6 +2454,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	snapshot->ping = clSnap->ping;
 	memcpy( snapshot->areamask, clSnap->areamask, sizeof( snapshot->areamask ) );
 	snapshot->ps = clSnap->ps;
+	CL_SOF2_SanitizeSnapshotPlayerState( snapshotNumber, &snapshot->ps );
 	snapshot->pad_204 = 0;
 	snapshot->serverCommandSequence = clSnap->serverCommandNum;
 	count = clSnap->numEntities;
@@ -2045,6 +2468,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	{
 		int entNum =  ( clSnap->parseEntitiesNum + i ) & (MAX_PARSE_ENTITIES-1) ;
 		snapshot->entities[i] = cl.parseEntities[ entNum ];
+		CL_SOF2_SanitizeSnapshotEntity( snapshotNumber, i, &snapshot->entities[i] );
 	}
 
 	if ( snapshotLogCount < 12 ) {
@@ -2059,6 +2483,31 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 			clSnap->parseEntitiesNum,
 			snapshot->numEntities > 0 ? snapshot->entities[0].number : -1 );
 		snapshotLogCount++;
+	}
+
+	static int snapshotEntityLogCount = 0;
+	if ( snapshotEntityLogCount < 18 ) {
+		const int detailCount = snapshot->numEntities < 3 ? snapshot->numEntities : 3;
+		for ( i = 0; i < detailCount && snapshotEntityLogCount < 18; ++i ) {
+			const entityState_t *ent = &snapshot->entities[i];
+			Com_Printf(
+				"[SNAP ent] log=%d snap=%d idx=%d num=%d type=%d flags=0x%x model=%d model2=%d client=%d solid=0x%x event=%d weapon=%d skin=%d sound=%d\n",
+				snapshotEntityLogCount + 1,
+				snapshotNumber,
+				i,
+				ent->number,
+				ent->eType,
+				ent->eFlags,
+				ent->modelindex,
+				ent->modelindex2,
+				ent->clientNum,
+				ent->solid,
+				ent->event,
+				ent->weapon,
+				ent->skinIndex,
+				ent->soundSetIndex );
+			++snapshotEntityLogCount;
+		}
 	}
 
 	// FIXME: configstring changes and server commands!!!
@@ -3271,7 +3720,7 @@ void CL_InitCGame( void ) {
 		cge->Init( sof2ProcessedSnapshotNum, clc.serverCommandSequence, cl.frame.ps.clientNum, sof2InitWeapon );
 	}
 	__except ( CG_LogInitException( GetExceptionInformation() ) ) {
-		Com_Error( ERR_DROP, "cgame Init crashed" );
+		Com_Printf( "^3[CG] continuing after Init exception; cgame init is incomplete\n" );
 	}
 
 	// reset any CVAR_CHEAT cvars registered by cgame

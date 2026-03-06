@@ -371,6 +371,7 @@ do the apropriate things.
 =============
 */
 void NORETURN Com_Quit_f( void ) {
+	Com_Printf( "^3[COM_QUIT] requested\n" );
 	// don't try to shutdown if we are in a recursive error
 	if ( !com_errorEntered ) {
 		SV_Shutdown ("Server quit\n");
@@ -1080,6 +1081,7 @@ Handles freeing up of resources when Com_Error is called.
 void SG_WipeSavegame(const char *name);	// pretty sucky, but that's how SoF did it...<g>
 static void Com_CatchError ( int code )
 {
+	Com_Printf( "^3[COM_CATCH] code=%s msg='%s'\n", Com_ErrorString( code ), com_errorMessage );
 	if ( code == ERR_DISCONNECT ) {
 		SV_Shutdown( "Server disconnected" );
 		CL_Disconnect( );
