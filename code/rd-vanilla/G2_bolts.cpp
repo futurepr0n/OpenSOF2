@@ -241,7 +241,10 @@ int G2_Add_Bolt(CGhoul2Info *ghlInfo, boltInfo_v &bltlist, surfaceInfo_v &slist,
 // Given a model handle, and a bone name, we want to remove this bone from the bone override list
 qboolean G2_Remove_Bolt (boltInfo_v &bltlist, int index)
 {
-	assert(index>=0&&index<(int)bltlist.size());
+	if ( index < 0 || index >= (int)bltlist.size() )
+	{
+		return qfalse;
+	}
 	// did we find it?
 	if (index != -1)
 	{

@@ -2361,8 +2361,8 @@ static void CG_DrawStats( void )
 		CG_DrawCustomHealthHud( cent );
 		return;
 	}
-
-	cgi_UI_MenuPaintAll();
+	// Gameplay HUD pieces are painted explicitly below. Repainting every loaded
+	// UI menu here leaks stray menu widgets into the world view.
 
 	qboolean drawHud = qtrue;
 

@@ -236,6 +236,7 @@ static refEntity_t s_cgFrameRefEntities[MAX_REFENTITIES];
 static int         s_cgFrameRefEntityCount = 0;
 static refEntity_t s_cgLastRefEntities[MAX_REFENTITIES];
 static int         s_cgLastRefEntityCount = 0;
+static int         s_polyLogThisScene = 0;
 
 // Flicker fix: track whether DrawInformation submitted a scene this frame.
 // If it crashes before calling R_RenderScene, we submit a fallback scene
@@ -243,6 +244,40 @@ static int         s_cgLastRefEntityCount = 0;
 static qboolean    s_renderSceneSubmitted = qfalse;
 static refdef_t    s_lastGoodRefdef;        // last successfully submitted refdef
 static qboolean    s_lastGoodRefdefValid = qfalse;
+static refdef_t    s_firstSubmittedRefdef;
+static qboolean    s_firstSubmittedRefdefValid = qfalse;
+static int         s_sceneSubmitsThisFrame = 0;
+
+static void CL_LogPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, const char *source ) {
+	if ( cls.state != CA_ACTIVE || !verts || numVerts <= 0 ) {
+		return;
+	}
+	if ( s_polyLogThisScene >= 6 ) {
+		return;
+	}
+
+	float minX = verts[0].xyz[0], minY = verts[0].xyz[1], minZ = verts[0].xyz[2];
+	float maxX = minX, maxY = minY, maxZ = minZ;
+	for ( int i = 1; i < numVerts; ++i ) {
+		minX = Q_min( minX, verts[i].xyz[0] );
+		minY = Q_min( minY, verts[i].xyz[1] );
+		minZ = Q_min( minZ, verts[i].xyz[2] );
+		maxX = Q_max( maxX, verts[i].xyz[0] );
+		maxY = Q_max( maxY, verts[i].xyz[1] );
+		maxZ = Q_max( maxZ, verts[i].xyz[2] );
+	}
+
+	Com_Printf(
+		"[POLY %s] #%d shader=%d verts=%d v0=(%.1f,%.1f,%.1f) bounds=[(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)]\n",
+		source,
+		s_polyLogThisScene + 1,
+		hShader,
+		numVerts,
+		verts[0].xyz[0], verts[0].xyz[1], verts[0].xyz[2],
+		minX, minY, minZ, maxX, maxY, maxZ
+	);
+	++s_polyLogThisScene;
+}
 
 static void CG_SOF2_SyncCvar( int idx ) {
 	cvar_t *real = s_sof2CgCvarReal[idx];
@@ -402,12 +437,52 @@ static void CG_CL_SetLastBoneIndex( int /*boneIndexBits*/ ) {
 static const char *cl_entityParsePoint = NULL;
 
 static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
+	static int s_entityTokenLogCount = 0;
+	static int s_entityTokenEntityIndex = -1;
+	static qboolean s_entityTokenAwaitClassname = qfalse;
+	static qboolean s_entityTokenAwaitModel = qfalse;
+
 	if ( !cl_entityParsePoint ) {
 		cl_entityParsePoint = CM_EntityString();
+		s_entityTokenLogCount = 0;
+		s_entityTokenEntityIndex = -1;
+		s_entityTokenAwaitClassname = qfalse;
+		s_entityTokenAwaitModel = qfalse;
 	}
 	const char *s = COM_Parse( &cl_entityParsePoint );
 	Q_strncpyz( buffer, s, bufferSize );
+
+	if ( s[0] == '{' ) {
+		++s_entityTokenEntityIndex;
+		s_entityTokenAwaitClassname = qfalse;
+		s_entityTokenAwaitModel = qfalse;
+		if ( s_entityTokenLogCount < 48 ) {
+			Com_Printf( "[ENTITYSTR] begin #%d\n", s_entityTokenEntityIndex );
+			++s_entityTokenLogCount;
+		}
+	} else if ( s_entityTokenAwaitClassname ) {
+		if ( s_entityTokenLogCount < 48 ) {
+			Com_Printf( "[ENTITYSTR] #%d classname='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitClassname = qfalse;
+	} else if ( s_entityTokenAwaitModel ) {
+		if ( s_entityTokenLogCount < 48 ) {
+			Com_Printf( "[ENTITYSTR] #%d model='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitModel = qfalse;
+	} else if ( !Q_stricmp( s, "classname" ) ) {
+		s_entityTokenAwaitClassname = qtrue;
+	} else if ( !Q_stricmp( s, "model" ) ) {
+		s_entityTokenAwaitModel = qtrue;
+	}
+
 	if ( !cl_entityParsePoint && !s[0] ) {
+		if ( s_entityTokenLogCount < 56 ) {
+			Com_Printf( "[ENTITYSTR] end totalEntities=%d\n", s_entityTokenEntityIndex + 1 );
+			++s_entityTokenLogCount;
+		}
 		return qfalse;
 	}
 	return qtrue;
@@ -562,6 +637,7 @@ static void CG_R_ClearScene_Wrapper( void ) {
 		clearSceneLogCount++;
 	}
 	s_cgFrameRefEntityCount = 0;
+	s_polyLogThisScene = 0;
 	s_renderSceneSubmitted = qfalse;  // scene cleared — will need a new RenderScene call
 	re.ClearScene();
 }
@@ -648,13 +724,17 @@ static void CG_R_SetColor_SOF2( const void *colorOrPacked ) {
 
 static qboolean CG_SOF2_RefEntitySeemsValid( const unsigned char *raw ) {
 	if ( !raw ) return qfalse;
+	const int sof2ReType = *(const int *)( raw + 0x00 );
 	const int sof2hModel = *(const int *)( raw + 0x08 );
+	const void *sof2Ghoul2 = *(void * const *)( raw + 0xCC );
 	const float *sof2Origin = (const float *)( raw + 0x34 );
-	return ( sof2hModel > 0 &&
-		sof2hModel < 32768 &&
+	return ( sof2ReType >= RT_MODEL &&
+		sof2ReType <= RT_MAX_REF_ENTITY_TYPE &&
+		( ( sof2hModel > 0 && sof2hModel < 32768 ) || sof2Ghoul2 != NULL ) &&
 		( fabsf( sof2Origin[0] ) > 0.01f ||
 		  fabsf( sof2Origin[1] ) > 0.01f ||
-		  fabsf( sof2Origin[2] ) > 0.01f ) ) ? qtrue : qfalse;
+		  fabsf( sof2Origin[2] ) > 0.01f ||
+		  sof2Ghoul2 != NULL ) ) ? qtrue : qfalse;
 }
 
 static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out ) {
@@ -662,20 +742,43 @@ static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out 
 	const int sof2Renderfx = *(const int *)( raw + 0x04 );
 	const float *sof2Axis = (const float *)( raw + 0x0C );
 	const float *sof2Origin = (const float *)( raw + 0x34 );
+	const float *sof2OldOrigin = (const float *)( raw + 0x40 );
+	const float *sof2Angles = (const float *)( raw + 0x88 );
+	const float *sof2Scale = (const float *)( raw + 0x6C );
 	const int sof2hModel = *(const int *)( raw + 0x08 );
+	const int sof2Frame = *(const int *)( raw + 0x68 );
+	const void *sof2Ghoul2 = *(void * const *)( raw + 0xCC );
 
 	memset( out, 0, sizeof( *out ) );
 	out->reType = (refEntityType_t)sof2ReType;
 	out->renderfx = sof2Renderfx;
 	out->hModel = (qhandle_t)sof2hModel;
 	VectorCopy( sof2Origin, out->origin );
-	VectorCopy( sof2Origin, out->oldorigin );
 	VectorCopy( sof2Origin, out->lightingOrigin );
+	if ( fabsf( sof2OldOrigin[0] ) > 0.01f ||
+		fabsf( sof2OldOrigin[1] ) > 0.01f ||
+		fabsf( sof2OldOrigin[2] ) > 0.01f ) {
+		VectorCopy( sof2OldOrigin, out->oldorigin );
+	} else {
+		VectorCopy( sof2Origin, out->oldorigin );
+	}
 	VectorCopy( sof2Axis + 0, out->axis[0] );
 	VectorCopy( sof2Axis + 3, out->axis[1] );
 	VectorCopy( sof2Axis + 6, out->axis[2] );
+	VectorCopy( sof2Angles, out->angles );
+	out->frame = sof2Frame;
+	out->oldframe = sof2Frame;
+	out->backlerp = 0.0f;
+	out->ghoul2 = (CGhoul2Info_v *)sof2Ghoul2;
 	out->shaderRGBA[0] = out->shaderRGBA[1] = out->shaderRGBA[2] = out->shaderRGBA[3] = 255;
-	out->modelScale[0] = out->modelScale[1] = out->modelScale[2] = 1.0f;
+	out->modelScale[0] = ( sof2Scale[0] != 0.0f ) ? sof2Scale[0] : 1.0f;
+	out->modelScale[1] = ( sof2Scale[1] != 0.0f ) ? sof2Scale[1] : 1.0f;
+	out->modelScale[2] = ( sof2Scale[2] != 0.0f ) ? sof2Scale[2] : 1.0f;
+	if ( out->modelScale[0] != 1.0f ||
+		out->modelScale[1] != 1.0f ||
+		out->modelScale[2] != 1.0f ) {
+		out->nonNormalizedAxes = qtrue;
+	}
 }
 
 static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
@@ -689,17 +792,12 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	const unsigned char *raw = (const unsigned char *)ent;
 	const int sof2hModel = *(const int *)( raw + 0x08 );
 	const float *sof2Origin = (const float *)( raw + 0x34 );
-	const qboolean openjkLooksDegenerate = (
-		fabsf( ent->origin[0] ) < 0.01f &&
-		fabsf( ent->origin[1] ) < 0.01f &&
-		fabsf( ent->origin[2] ) < 0.01f &&
-		( (int)ent->customSkin == 0x3F800000 || (int)ent->customSkin == 0 || (int)ent->hModel == 121 ) )
-		? qtrue : qfalse;
-	const qboolean useSOF2Layout = ( openjkLooksDegenerate && CG_SOF2_RefEntitySeemsValid( raw ) ) ? qtrue : qfalse;
+	const void *sof2Ghoul2 = *(void * const *)( raw + 0xCC );
+	const qboolean useSOF2Layout = CG_SOF2_RefEntitySeemsValid( raw );
 
 	if ( addRefEntityLogCount < 16 ) {
 		Com_Printf(
-			"[CG scene] AddRefEntity #%d mode=%s openjk{type=%d org=(%.1f,%.1f,%.1f) hModel=%d skin=%d fx=0x%x} sof2{org=(%.1f,%.1f,%.1f) hModel=%d fx=0x%x}\n",
+			"[CG scene] AddRefEntity #%d mode=%s openjk{type=%d org=(%.1f,%.1f,%.1f) hModel=%d skin=%d fx=0x%x} sof2{type=%d org=(%.1f,%.1f,%.1f) hModel=%d scale=(%.2f,%.2f,%.2f) ghoul2=%p fx=0x%x}\n",
 			addRefEntityLogCount + 1,
 			useSOF2Layout ? "sof2" : "openjk",
 			(int)ent->reType,
@@ -707,8 +805,13 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 			(int)ent->hModel,
 			(int)ent->customSkin,
 			(unsigned int)ent->renderfx,
+			*(const int *)( raw + 0x00 ),
 			sof2Origin[0], sof2Origin[1], sof2Origin[2],
 			sof2hModel,
+			*(const float *)( raw + 0x6C ),
+			*(const float *)( raw + 0x70 ),
+			*(const float *)( raw + 0x74 ),
+			sof2Ghoul2,
 			*(const int *)( raw + 0x04 ) );
 		addRefEntityLogCount++;
 	}
@@ -752,26 +855,35 @@ typedef struct {
 	byte areamask[MAX_MAP_AREA_BYTES];
 } sof2_refdef_t;
 
+static qboolean CG_SameCameraSubmit( const refdef_t *a, const refdef_t *b ) {
+	float dx, dy, dz;
+
+	if ( !a || !b ) {
+		return qfalse;
+	}
+
+	dx = a->vieworg[0] - b->vieworg[0];
+	dy = a->vieworg[1] - b->vieworg[1];
+	dz = a->vieworg[2] - b->vieworg[2];
+	if ( ( dx * dx + dy * dy + dz * dz ) > 4.0f ) {
+		return qfalse;
+	}
+
+	for ( int i = 0; i < 3; ++i ) {
+		float dot = DotProduct( a->viewaxis[i], b->viewaxis[i] );
+		if ( dot < 0.999f ) {
+			return qfalse;
+		}
+	}
+
+	return qtrue;
+}
+
 static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 	int replayedRefEntities = 0;
 
 	if ( !localRefdef ) {
 		CG_FileTrace( "CG_SubmitSOF2Refdef null refdef" );
-		return;
-	}
-
-	// In active play SOF2 can issue multiple RenderScene calls in one draw pass.
-	// Keep only the first submit in-frame to prevent camera ping-pong.
-	if ( s_renderSceneSubmitted && s_cgRenderDepth > 0 && cls.state == CA_ACTIVE ) {
-		static int duplicateSubmitLogCount = 0;
-		if ( duplicateSubmitLogCount < 8 ) {
-			Com_Printf(
-				"[SOF2 RS] dropped duplicate scene submit in render frame serial=%d time=%d rdflags=0x%x\n",
-				s_cgRenderSerial,
-				localRefdef->time,
-				localRefdef->rdflags );
-			duplicateSubmitLogCount++;
-		}
 		return;
 	}
 
@@ -787,9 +899,38 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		VectorCopy( cl.frame.ps.origin, localRefdef->vieworg );
 		localRefdef->vieworg[2] += forcedViewHeight;
 		AnglesToAxis( forcedAngles, localRefdef->viewaxis );
-		// 0xFF = all area bits set = all areas connected to viewer = everything visible.
-		// 0x00 would cull all areas → no BSP geometry renders (walls disappear).
-		memset( localRefdef->areamask, 0xFF, sizeof( localRefdef->areamask ) );
+		// Renderer treats 1 bits as hidden areas. Zero means "all areas visible".
+		memset( localRefdef->areamask, 0x00, sizeof( localRefdef->areamask ) );
+	}
+
+	// In active play SOF2 can issue multiple RenderScene calls in one draw pass.
+	// Compare submits after forcing the gameplay camera so equivalent passes are
+	// not discarded just because retail provided a transient alternate controller.
+	if ( s_renderSceneSubmitted && s_cgRenderDepth > 0 && cls.state == CA_ACTIVE ) {
+		static int duplicateSubmitLogCount = 0;
+		if ( s_firstSubmittedRefdefValid && !CG_SameCameraSubmit( &s_firstSubmittedRefdef, localRefdef ) ) {
+			if ( duplicateSubmitLogCount < 12 ) {
+				Com_Printf(
+					"[SOF2 RS] dropped different-camera submit serial=%d time=%d rdflags=0x%x vieworg=(%.1f,%.1f,%.1f)\n",
+					s_cgRenderSerial,
+					localRefdef->time,
+					localRefdef->rdflags,
+					localRefdef->vieworg[0],
+					localRefdef->vieworg[1],
+					localRefdef->vieworg[2] );
+				duplicateSubmitLogCount++;
+			}
+			return;
+		}
+		if ( duplicateSubmitLogCount < 12 ) {
+			Com_Printf(
+				"[SOF2 RS] allowing same-camera duplicate submit serial=%d time=%d rdflags=0x%x submits=%d\n",
+				s_cgRenderSerial,
+				localRefdef->time,
+				localRefdef->rdflags,
+				s_sceneSubmitsThisFrame + 1 );
+			duplicateSubmitLogCount++;
+		}
 	}
 
 	if ( cls.state == CA_ACTIVE &&
@@ -813,9 +954,14 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 	}
 
 	__try {
+		if ( !s_firstSubmittedRefdefValid ) {
+			s_firstSubmittedRefdef = *localRefdef;
+			s_firstSubmittedRefdefValid = qtrue;
+		}
 		re.RenderScene( localRefdef );
 		// Scene was successfully submitted — save it as the fallback.
 		s_renderSceneSubmitted = qtrue;
+		s_sceneSubmitsThisFrame++;
 		s_lastGoodRefdef = *localRefdef;
 		s_lastGoodRefdefValid = qtrue;
 		if ( s_cgFrameRefEntityCount > 0 ) {
@@ -826,6 +972,10 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		else if ( replayedRefEntities > 0 ) {
 			s_cgLastRefEntityCount = replayedRefEntities;
 		}
+		// Renderer scene buffers are consumed by RenderScene. Reset the client-side
+		// ref-entity accumulation here so same-frame duplicate submits can detect
+		// that no fresh entities were added and trigger cached replay.
+		s_cgFrameRefEntityCount = 0;
 	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
 		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
 		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
@@ -1385,6 +1535,7 @@ static int R_LerpTag_SOF2( orientation_t *tag, qhandle_t handle, int startFrame,
 
 // slot 135: R_AddPolyToScene — SOF2 has extra 'num' param; OpenJK takes 3 args
 static void R_AddPolyToScene_SOF2( qhandle_t hShader, int numVerts, const polyVert_t *verts, int /*num*/ ) {
+	CL_LogPolyToScene( hShader, numVerts, verts, "slot133" );
 	re.AddPolyToScene( hShader, numVerts, verts );
 }
 
@@ -2832,7 +2983,19 @@ CL_GetSnapshot
 qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	clSnapshot_t	*clSnap;
 	int				i, count;
+	static int snapshotEntryLogCount = 0;
+	static int snapshotRejectLogCount = 0;
 	static int snapshotLogCount = 0;
+
+	if ( snapshotEntryLogCount < 16 ) {
+		Com_Printf(
+			"[SNAP] CL_GetSnapshot enter #%d req=%d latest=%d parseEntitiesNum=%d\n",
+			snapshotEntryLogCount + 1,
+			snapshotNumber,
+			cl.frame.messageNum,
+			cl.parseEntitiesNum );
+		++snapshotEntryLogCount;
+	}
 
 	if ( snapshotNumber > cl.frame.messageNum ) {
 		Com_Error( ERR_DROP, "CL_GetSnapshot: snapshotNumber > cl.frame.messageNum" );
@@ -2840,18 +3003,48 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 
 	// if the frame has fallen out of the circular buffer, we can't return it
 	if ( cl.frame.messageNum - snapshotNumber >= PACKET_BACKUP ) {
+		if ( snapshotRejectLogCount < 16 ) {
+			Com_Printf(
+				"[SNAP] CL_GetSnapshot reject #%d req=%d reason=packet_backup latest=%d delta=%d limit=%d\n",
+				snapshotRejectLogCount + 1,
+				snapshotNumber,
+				cl.frame.messageNum,
+				cl.frame.messageNum - snapshotNumber,
+				PACKET_BACKUP );
+			++snapshotRejectLogCount;
+		}
 		return qfalse;
 	}
 
 	// if the frame is not valid, we can't return it
 	clSnap = &cl.frames[snapshotNumber & PACKET_MASK];
 	if ( !clSnap->valid ) {
+		if ( snapshotRejectLogCount < 16 ) {
+			Com_Printf(
+				"[SNAP] CL_GetSnapshot reject #%d req=%d reason=invalid_frame slot=%d serverTime=%d\n",
+				snapshotRejectLogCount + 1,
+				snapshotNumber,
+				snapshotNumber & PACKET_MASK,
+				clSnap->serverTime );
+			++snapshotRejectLogCount;
+		}
 		return qfalse;
 	}
 
 	// if the entities in the frame have fallen out of their
 	// circular buffer, we can't return it
 	if ( cl.parseEntitiesNum - clSnap->parseEntitiesNum >= MAX_PARSE_ENTITIES ) {
+		if ( snapshotRejectLogCount < 16 ) {
+			Com_Printf(
+				"[SNAP] CL_GetSnapshot reject #%d req=%d reason=parse_entities parseNow=%d parseBase=%d delta=%d limit=%d\n",
+				snapshotRejectLogCount + 1,
+				snapshotNumber,
+				cl.parseEntitiesNum,
+				clSnap->parseEntitiesNum,
+				cl.parseEntitiesNum - clSnap->parseEntitiesNum,
+				MAX_PARSE_ENTITIES );
+			++snapshotRejectLogCount;
+		}
 		return qfalse;
 	}
 
@@ -2879,7 +3072,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	}
 
 	if ( snapshotLogCount < 12 ) {
-		Com_DPrintf(
+		Com_Printf(
 			"[SNAP] CL_GetSnapshot #%d req=%d serverTime=%d snapFlags=0x%x ping=%d numEntities=%d parseBase=%d firstEntity=%d\n",
 			snapshotLogCount + 1,
 			snapshotNumber,
@@ -2897,7 +3090,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 		const int detailCount = snapshot->numEntities < 3 ? snapshot->numEntities : 3;
 		for ( i = 0; i < detailCount && snapshotEntityLogCount < 18; ++i ) {
 			const entityState_t *ent = &snapshot->entities[i];
-			Com_DPrintf(
+			Com_Printf(
 				"[SNAP ent] log=%d snap=%d idx=%d num=%d type=%d flags=0x%x model=%d model2=%d client=%d solid=0x%x event=%d weapon=%d skin=%d sound=%d\n",
 				snapshotEntityLogCount + 1,
 				snapshotNumber,
@@ -2917,9 +3110,103 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 		}
 	}
 
+	static int snapshotInterestingSummaryCount = 0;
+	static int snapshotInterestingEntityLogCount = 0;
+	if ( snapshotInterestingSummaryCount < 8 ) {
+		int moverCount = 0;
+		int modeledCount = 0;
+		int solidBmodelCount = 0;
+		int interestingCount = 0;
+
+		for ( i = 0; i < snapshot->numEntities; ++i ) {
+			const entityState_t *ent = &snapshot->entities[i];
+			const qboolean isMover = ( ent->eType == ET_MOVER ) ? qtrue : qfalse;
+			const qboolean hasModel = ( ent->modelindex != 0 || ent->modelindex2 != 0 ) ? qtrue : qfalse;
+			const qboolean solidBmodel = ( ent->solid == SOLID_BMODEL ) ? qtrue : qfalse;
+
+			if ( isMover ) {
+				++moverCount;
+			}
+			if ( hasModel ) {
+				++modeledCount;
+			}
+			if ( solidBmodel ) {
+				++solidBmodelCount;
+			}
+			if ( isMover || hasModel || solidBmodel ) {
+				++interestingCount;
+			}
+
+			if ( snapshotInterestingEntityLogCount < 96 && ( isMover || hasModel || solidBmodel ) ) {
+				Com_Printf(
+					"[SNAP interesting] snap=%d idx=%d num=%d type=%d model=%d model2=%d solid=0x%x flags=0x%x event=%d client=%d weapon=%d skin=%d\n",
+					snapshotNumber,
+					i,
+					ent->number,
+					ent->eType,
+					ent->modelindex,
+					ent->modelindex2,
+					ent->solid,
+					ent->eFlags,
+					ent->event,
+					ent->clientNum,
+					ent->weapon,
+					ent->skinIndex );
+				++snapshotInterestingEntityLogCount;
+			}
+		}
+
+		Com_Printf(
+			"[SNAP summary] snap=%d numEntities=%d movers=%d modeled=%d solidBmodels=%d interesting=%d\n",
+			snapshotNumber,
+			snapshot->numEntities,
+			moverCount,
+			modeledCount,
+			solidBmodelCount,
+			interestingCount );
+		++snapshotInterestingSummaryCount;
+	}
+
 	// FIXME: configstring changes and server commands!!!
 
 	return qtrue;
+}
+
+// Retail SOF2 uses a different configstring layout than JKA/OpenJK.
+// For diagnostics here we want the live SOF2 model table, not the JKA slot base.
+#define SOF2_CS_MODELS 32
+static const char *CL_SOF2_ModelNameForBaseline( int modelIndex ) {
+	const int csIndex = SOF2_CS_MODELS + modelIndex;
+
+	if ( modelIndex <= 0 ) {
+		return "(none)";
+	}
+	if ( csIndex < 0 || csIndex >= MAX_CONFIGSTRINGS ) {
+		return "(bad-cs)";
+	}
+	if ( cl.gameState.stringOffsets[csIndex] <= 0 ) {
+		return "(unset)";
+	}
+
+	return cl.gameState.stringData + cl.gameState.stringOffsets[csIndex];
+}
+
+static qboolean CL_SOF2_IsRenderableBaselineModel( int modelIndex ) {
+	const char *name = CL_SOF2_ModelNameForBaseline( modelIndex );
+
+	if ( modelIndex <= 0 || !name || !name[0] ) {
+		return qfalse;
+	}
+
+	if ( name[0] == '*' ) {
+		return qtrue;
+	}
+
+	if ( !Q_stricmpn( name, "models/", 7 ) ) {
+		return qtrue;
+	}
+
+	return qfalse;
 }
 
 //bg_public.h won't cooperate in here
@@ -2927,20 +3214,82 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 
 qboolean CL_GetDefaultState(int index, entityState_t *state)
 {
+	static int baselineRequestLogCount = 0;
+	static int baselineRejectLogCount = 0;
+	static int baselineAcceptLogCount = 0;
+	const entityState_t *baseline;
+	qboolean acceptBaseline;
+
 	if (index < 0 || index >= MAX_GENTITIES)
 	{
 		return qfalse;
 	}
 
-	// Is this safe? I think so. But it's still ugly as sin.
-	if (!(sv.svEntities[index].baseline.eFlags & EF_PERMANENT))
-//	if (!(cl.entityBaselines[index].eFlags & EF_PERMANENT))
+	baseline = &sv.svEntities[index].baseline;
+
+	if ( baselineRequestLogCount < 32 ) {
+		Com_Printf(
+			"[BASELINE] req=%d num=%d type=%d flags=0x%x model=%d('%s') model2=%d('%s') solid=0x%x weapon=%d skin=%d\n",
+			baselineRequestLogCount + 1,
+			index,
+			baseline->eType,
+			baseline->eFlags,
+			baseline->modelindex,
+			CL_SOF2_ModelNameForBaseline( baseline->modelindex ),
+			baseline->modelindex2,
+			CL_SOF2_ModelNameForBaseline( baseline->modelindex2 ),
+			baseline->solid,
+			baseline->weapon,
+			baseline->skinIndex );
+		++baselineRequestLogCount;
+	}
+
+	acceptBaseline = qfalse;
+	if ( baseline->eFlags & EF_PERMANENT ) {
+		acceptBaseline = qtrue;
+	} else if ( CL_SOF2_IsRenderableBaselineModel( baseline->modelindex ) ||
+		CL_SOF2_IsRenderableBaselineModel( baseline->modelindex2 ) ) {
+		acceptBaseline = qtrue;
+	}
+
+	if ( !acceptBaseline )
 	{
+		if ( baselineRejectLogCount < 24 &&
+			( baseline->modelindex != 0 || baseline->modelindex2 != 0 || baseline->solid == SOLID_BMODEL ) ) {
+			Com_Printf(
+				"[BASELINE] reject num=%d type=%d flags=0x%x model=%d('%s') model2=%d('%s') solid=0x%x renderable=(%d,%d)\n",
+				index,
+				baseline->eType,
+				baseline->eFlags,
+				baseline->modelindex,
+				CL_SOF2_ModelNameForBaseline( baseline->modelindex ),
+				baseline->modelindex2,
+				CL_SOF2_ModelNameForBaseline( baseline->modelindex2 ),
+				baseline->solid,
+				(int)CL_SOF2_IsRenderableBaselineModel( baseline->modelindex ),
+				(int)CL_SOF2_IsRenderableBaselineModel( baseline->modelindex2 ) );
+			++baselineRejectLogCount;
+		}
 		return qfalse;
 	}
 
-	*state = sv.svEntities[index].baseline;
-//	*state = cl.entityBaselines[index];
+	*state = *baseline;
+
+	if ( baselineAcceptLogCount < 24 ) {
+		Com_Printf(
+			"[BASELINE] accept num=%d type=%d flags=0x%x model=%d('%s') model2=%d('%s') solid=0x%x renderable=(%d,%d)\n",
+			index,
+			state->eType,
+			state->eFlags,
+			state->modelindex,
+			CL_SOF2_ModelNameForBaseline( state->modelindex ),
+			state->modelindex2,
+			CL_SOF2_ModelNameForBaseline( state->modelindex2 ),
+			state->solid,
+			(int)CL_SOF2_IsRenderableBaselineModel( state->modelindex ),
+			(int)CL_SOF2_IsRenderableBaselineModel( state->modelindex2 ) );
+		++baselineAcceptLogCount;
+	}
 
 	return qtrue;
 }
@@ -3686,6 +4035,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		*(re.tr_distortionNegate()) = (qboolean)args[4];
 		return 0;
 	case CG_R_CLEARSCENE:
+		s_polyLogThisScene = 0;
 		re.ClearScene();
 		return 0;
 	case CG_R_ADDREFENTITYTOSCENE:
@@ -3698,6 +4048,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 	case CG_R_GETLIGHTING:
 		return re.GetLighting( (const float * ) VMA(1), (float *) VMA(2), (float *) VMA(3), (float *) VMA(4) );
 	case CG_R_ADDPOLYTOSCENE:
+		CL_LogPolyToScene( args[1], args[2], (const polyVert_t *) VMA(3), "syscall" );
 		re.AddPolyToScene( args[1], args[2], (const polyVert_t *) VMA(3) );
 		return 0;
 	case CG_R_ADDLIGHTTOSCENE:
@@ -4222,6 +4573,8 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 	}
 	s_cgRenderDepth++;
 	s_renderSceneSubmitted = qfalse;
+	s_firstSubmittedRefdefValid = qfalse;
+	s_sceneSubmitsThisFrame = 0;
 	__try {
 		cge->DrawInformation( timei );
 	} __except ( CG_LogDrawInformationException( GetExceptionInformation() ) ) {
@@ -4245,7 +4598,7 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		VectorCopy( cl.frame.ps.origin, s_lastGoodRefdef.vieworg );
 		s_lastGoodRefdef.vieworg[2] += forcedViewHeight;
 		AnglesToAxis( fallbackAngles, s_lastGoodRefdef.viewaxis );
-		memset( s_lastGoodRefdef.areamask, 0xFF, sizeof( s_lastGoodRefdef.areamask ) );
+		memset( s_lastGoodRefdef.areamask, 0x00, sizeof( s_lastGoodRefdef.areamask ) );
 		if ( s_cgLastRefEntityCount > 0 ) {
 			static int fallbackReplayLogCount = 0;
 			for ( int i = 0; i < s_cgLastRefEntityCount; ++i ) {

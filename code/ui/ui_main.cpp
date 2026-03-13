@@ -1165,7 +1165,7 @@ void _UI_Refresh( int realtime )
 
 	// draw cursor
 	UI_SetColor( NULL );
-	if (Menu_Count() > 0)
+	if ((Key_GetCatcher() & KEYCATCH_UI) && Menu_Count() > 0)
 	{
 		if (uiInfo.uiDC.cursorShow == qtrue)
 		{

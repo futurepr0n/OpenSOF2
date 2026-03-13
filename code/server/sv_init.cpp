@@ -272,6 +272,10 @@ baseline will be transmitted
 void SV_CreateBaseline( void ) {
 	gentity_t			*svent;
 	int				entnum;
+	int				permanentCount = 0;
+	int				modeledCount = 0;
+	int				solidBmodelCount = 0;
+	int				loggedCount = 0;
 
 	for ( entnum = 0; entnum < MAX_GENTITIES ; entnum++ ) {
 		svent = SV_GentityNum(entnum);
@@ -288,7 +292,40 @@ void SV_CreateBaseline( void ) {
 		// SOF2: entityState_t is 256 bytes at offset 8, not JKA's 272-byte struct at offset 0
 		//
 		memcpy( &sv.svEntities[entnum].baseline, SOF2_ENT_S_PTR(svent), SOF2_ENTITYSTATE_SIZE );
+
+		if ( sv.svEntities[entnum].baseline.eFlags & EF_PERMANENT ) {
+			++permanentCount;
+		}
+		if ( sv.svEntities[entnum].baseline.modelindex != 0 || sv.svEntities[entnum].baseline.modelindex2 != 0 ) {
+			++modeledCount;
+		}
+		if ( sv.svEntities[entnum].baseline.solid == SOLID_BMODEL ) {
+			++solidBmodelCount;
+		}
+		if ( loggedCount < 32 &&
+			( ( sv.svEntities[entnum].baseline.eFlags & EF_PERMANENT ) ||
+			  sv.svEntities[entnum].baseline.modelindex != 0 ||
+			  sv.svEntities[entnum].baseline.modelindex2 != 0 ||
+			  sv.svEntities[entnum].baseline.solid == SOLID_BMODEL ) ) {
+			Com_Printf(
+				"[SV baseline] num=%d type=%d flags=0x%x model=%d model2=%d solid=0x%x linked=%d svflags=0x%x\n",
+				entnum,
+				sv.svEntities[entnum].baseline.eType,
+				sv.svEntities[entnum].baseline.eFlags,
+				sv.svEntities[entnum].baseline.modelindex,
+				sv.svEntities[entnum].baseline.modelindex2,
+				sv.svEntities[entnum].baseline.solid,
+				(int)SOF2_ENT_LINKED(svent),
+				SOF2_ENT_SVFLAGS(svent) );
+			++loggedCount;
+		}
 	}
+
+	Com_Printf(
+		"[SV baseline] summary permanent=%d modeled=%d solidBmodels=%d\n",
+		permanentCount,
+		modeledCount,
+		solidBmodelCount );
 }
 
 

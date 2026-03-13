@@ -1624,7 +1624,10 @@ qboolean G2API_RemoveBolt(CGhoul2Info *ghlInfo, const int index)
 	qboolean ret=qfalse;
 	if (G2_SetupModelPointers(ghlInfo))
 	{
- 		ret=G2_Remove_Bolt( ghlInfo->mBltlist, index);
+		if ( index >= 0 && index < (int)ghlInfo->mBltlist.size() )
+		{
+ 			ret=G2_Remove_Bolt( ghlInfo->mBltlist, index);
+		}
 	}
 	G2WARNING(ret,"G2API_RemoveBolt Failed");
 	return ret;
@@ -1661,8 +1664,7 @@ qboolean G2API_AttachG2Model(CGhoul2Info *ghlInfo, CGhoul2Info *ghlInfoTo, int t
 	{
 		G2ERROR(toBoltIndex>=0&&toBoltIndex<(int)ghlInfoTo->mBltlist.size(),"Invalid Bolt Index");
 		G2ERROR(ghlInfoTo->mBltlist.size()>0,"Empty Bolt List");
-		assert( toBoltIndex >= 0 );
-		if ( toBoltIndex >= 0 && ghlInfoTo->mBltlist.size())
+		if ( toBoltIndex >= 0 && toBoltIndex < (int)ghlInfoTo->mBltlist.size() && ghlInfoTo->mBltlist.size())
 		{
 			// make sure we have a model to attach, a model to attach to, and a bolt on that model
 			if (((ghlInfoTo->mBltlist[toBoltIndex].boneNumber != -1) || (ghlInfoTo->mBltlist[toBoltIndex].surfaceNumber != -1)))
@@ -1745,6 +1747,10 @@ qboolean G2API_GetBoltMatrix(CGhoul2Info_v &ghoul2, const int modelIndex, const 
 			int frameNum=G2API_GetTime(AframeNum);
 			CGhoul2Info *ghlInfo = &ghoul2[modelIndex];
 			G2ERROR(boltIndex >= 0 && (boltIndex < (int)ghlInfo->mBltlist.size()),va("Invalid Bolt Index (%d:%s)",boltIndex,ghlInfo->mFileName));
+			if ( boltIndex < 0 || boltIndex >= (int)ghlInfo->mBltlist.size() )
+			{
+				return qfalse;
+			}
 
 			if (boltIndex >= 0 && ghlInfo && (boltIndex < (int)ghlInfo->mBltlist.size()) )
 			{

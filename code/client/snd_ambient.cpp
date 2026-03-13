@@ -835,6 +835,13 @@ void AS_ParseSets( void )
 		ambientSet_t *aSet = aSets->GetSet( str );
 		if (!aSet)
 		{
+			if ( !Q_stricmp( str, "default" ) )
+			{
+				aSets->AddSet( str );
+				Com_Printf( "[SND] Ambient fallback: created empty soundset \"%s\"\n", str );
+				continue;
+			}
+
 			// I print these red instead of yellow because they're going to cause an ERR_DROP if they occur
 			Com_Printf( S_COLOR_RED"ERROR: AS_ParseSets: Unable to find ambient soundset \"%s\"!\n",str);
 			iErrorsOccured++;

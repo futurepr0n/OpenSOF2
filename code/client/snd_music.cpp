@@ -100,6 +100,7 @@ typedef std::map <sstring_t, MusicFile_t>	MusicData_t;			// string is "explore",
 sstring_t	gsLevelNameForLoad;		// eg "kejim_base", formed from literal BSP name, but also used as dir name for music paths
 sstring_t	gsLevelNameForCompare;	// eg "kejim_base", formed from literal BSP name, but also used as dir name for music paths
 sstring_t	gsLevelNameForBossLoad;	// eg "kejim_base', special case for enabling boss music to come from a different dir - sigh....
+extern sstring_t gsLevelNameFromServer;
 
 void Music_Free(void)
 {
@@ -130,6 +131,95 @@ static std::string build_string( Tail... tail )
 	std::ostringstream os;
 	detail::build_string( os, tail... );
 	return os.str();
+}
+
+static qboolean Music_NormalizeLevelName( const char *psRequestedLevelName, char *outLevelName, int outLevelNameSize )
+{
+	char rawLevelName[MAX_QPATH];
+
+	if ( !outLevelName || outLevelNameSize <= 0 ) {
+		return qfalse;
+	}
+
+	outLevelName[0] = '\0';
+
+	if ( psRequestedLevelName && psRequestedLevelName[0] ) {
+		Q_strncpyz( rawLevelName, COM_SkipPath( const_cast<char *>( psRequestedLevelName ) ), sizeof( rawLevelName ) );
+		COM_StripExtension( rawLevelName, outLevelName, outLevelNameSize );
+	}
+
+	if ( !outLevelName[0] && gsLevelNameFromServer.c_str()[0] ) {
+		Q_strncpyz( rawLevelName, COM_SkipPath( const_cast<char *>( gsLevelNameFromServer.c_str() ) ), sizeof( rawLevelName ) );
+		COM_StripExtension( rawLevelName, outLevelName, outLevelNameSize );
+	}
+
+	if ( !outLevelName[0] ) {
+		return qfalse;
+	}
+
+	Q_strlwr( outLevelName );
+	return qtrue;
+}
+
+static qboolean Music_TrySOF2FallbackLeveldata( const char *psLevelName )
+{
+	static const char *const musicDirs[] = {
+		"airport",
+		"arm2",
+		"colombia",
+		"finca",
+		"hongkong",
+		"hospital",
+		"kamchatka",
+		"liner",
+		"misc",
+		"prague",
+		"shop"
+	};
+
+	if ( !MusicData || !psLevelName || !psLevelName[0] ) {
+		return qfalse;
+	}
+
+	for ( size_t i = 0; i < sizeof( musicDirs ) / sizeof( musicDirs[0] ); ++i ) {
+		const char *dir = musicDirs[i];
+		const std::string slowPath = build_string( "music/", dir, "/", psLevelName, "_slow.mp3" );
+		const std::string fastPath = build_string( "music/", dir, "/", psLevelName, "_fast.mp3" );
+		const qboolean hasSlow = S_FileExists( slowPath.c_str() );
+		const qboolean hasFast = S_FileExists( fastPath.c_str() );
+
+		if ( !hasSlow && !hasFast ) {
+			continue;
+		}
+
+		MusicFile_t exploreMusic;
+		MusicFile_t actionMusic;
+		MusicFile_t deathMusic;
+		const std::string exploreBase = hasSlow ? build_string( psLevelName, "_slow" ) : build_string( psLevelName, "_fast" );
+		const std::string actionBase = hasFast ? build_string( psLevelName, "_fast" ) : exploreBase;
+
+		exploreMusic.sFileNameBase = exploreBase.c_str();
+		actionMusic.sFileNameBase = actionBase.c_str();
+		deathMusic.sFileNameBase = "death_music";
+
+		MusicData->clear();
+		( *MusicData )[ Music_BaseStateToString( eBGRNDTRACK_EXPLORE ) ] = exploreMusic;
+		( *MusicData )[ Music_BaseStateToString( eBGRNDTRACK_ACTION ) ] = actionMusic;
+		( *MusicData )[ Music_BaseStateToString( eBGRNDTRACK_DEATH ) ] = deathMusic;
+
+		gsLevelNameForLoad = dir;
+		gsLevelNameForBossLoad = dir;
+
+		Com_Printf(
+			"[SND] Music fallback: level='%s' dir='%s' explore='%s' action='%s'\n",
+			psLevelName,
+			dir,
+			exploreMusic.sFileNameBase.c_str(),
+			actionMusic.sFileNameBase.c_str() );
+		return qtrue;
+	}
+
+	return qfalse;
 }
 
 // some sort of error in the music data...
@@ -364,12 +454,19 @@ static qboolean Music_ParseMusic( gsl::czstring filename, const CGenericParser2&
 sstring_t gsLevelNameFromServer;
 void Music_SetLevelName(const char *psLevelName)
 {
-	gsLevelNameFromServer = psLevelName;
+	char sLevelName[MAX_QPATH];
+
+	if ( Music_NormalizeLevelName( psLevelName, sLevelName, sizeof( sLevelName ) ) ) {
+		gsLevelNameFromServer = sLevelName;
+	} else {
+		gsLevelNameFromServer = "";
+	}
 }
 
 static qboolean Music_ParseLeveldata( gsl::czstring psLevelName )
 {
 	qboolean bReturn = qfalse;
+	char sLevelName[MAX_QPATH];
 
 	if (MusicData == NULL)
 	{
@@ -378,18 +475,19 @@ static qboolean Music_ParseLeveldata( gsl::czstring psLevelName )
 		MusicData = &singleton;
 	}
 
+	if ( !Music_NormalizeLevelName( psLevelName, sLevelName, sizeof( sLevelName ) ) )
+	{
+		return qfalse;
+	}
+
 	// already got this data?
 	//
-	if (MusicData->size() && !Q_stricmp(psLevelName,gsLevelNameForCompare.c_str()))
+	if (MusicData->size() && !Q_stricmp(sLevelName,gsLevelNameForCompare.c_str()))
 	{
 		return qtrue;
 	}
 
 	MusicData->clear();
-
-	// shorten level name to MAX_QPATH so sstring's assignment assertion is satisfied.
-	char sLevelName[MAX_QPATH];
-	Q_strncpyz(sLevelName,psLevelName,sizeof(sLevelName));
 
 	gsLevelNameForLoad		= sLevelName;	// harmless to init here even if we fail to parse dms.dat file
 	gsLevelNameForCompare	= sLevelName;	// harmless to init here even if we fail to parse dms.dat file
@@ -399,6 +497,10 @@ static qboolean Music_ParseLeveldata( gsl::czstring psLevelName )
 	CGenericParser2 Parser;
 	if( !Parser.Parse( filename ) )
 	{
+		if ( Music_TrySOF2FallbackLeveldata( sLevelName ) )
+		{
+			return qtrue;
+		}
 		Music_Parse_Error( filename, "Error using GP to parse file\n" );
 	}
 	else
@@ -627,6 +729,11 @@ static qboolean Music_ParseLeveldata( gsl::czstring psLevelName )
 		}
 	}
 
+	if ( !bReturn && Music_TrySOF2FallbackLeveldata( sLevelName ) )
+	{
+		return qtrue;
+	}
+
 	return bReturn;
 }
 
@@ -662,10 +769,8 @@ static MusicFile_t *Music_GetBaseMusicFile( MusicState_e eMusicState )
 qboolean Music_DynamicDataAvailable(const char *psDynamicMusicLabel)
 {
 	char sLevelName[MAX_QPATH];
-	Q_strncpyz(sLevelName,COM_SkipPath( const_cast<char*>( (psDynamicMusicLabel&&psDynamicMusicLabel[0])?psDynamicMusicLabel:gsLevelNameFromServer.c_str() ) ),sizeof(sLevelName));
-	Q_strlwr(sLevelName);
 
-	if (strlen(sLevelName))	// avoid error messages when there's no music waiting to be played and we try and restart it...
+	if (Music_NormalizeLevelName( psDynamicMusicLabel, sLevelName, sizeof( sLevelName ) ))	// avoid error messages when there's no music waiting to be played and we try and restart it...
 	{
 		if (Music_ParseLeveldata(sLevelName))
 		{
