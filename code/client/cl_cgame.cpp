@@ -3247,6 +3247,9 @@ qboolean CL_GetDefaultState(int index, entityState_t *state)
 	acceptBaseline = qfalse;
 	if ( baseline->eFlags & EF_PERMANENT ) {
 		acceptBaseline = qtrue;
+	} else if ( baseline->solid == SOLID_BMODEL &&
+		( baseline->modelindex > 0 || baseline->modelindex2 > 0 ) ) {
+		acceptBaseline = qtrue;
 	} else if ( CL_SOF2_IsRenderableBaselineModel( baseline->modelindex ) ||
 		CL_SOF2_IsRenderableBaselineModel( baseline->modelindex2 ) ) {
 		acceptBaseline = qtrue;
