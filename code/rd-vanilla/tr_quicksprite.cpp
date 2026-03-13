@@ -101,6 +101,12 @@ void CQuickSpriteSystem::Flush(void)
 	R_BindAnimatedImage( mTexBundle );
 	GL_State(mGLStateBits);
 
+	// Push sprite quads slightly toward the camera to prevent z-fighting with the
+	// underlying surface geometry (sprite bottom vertices sit at exactly the same
+	// depth as the surface they grow from).
+	qglEnable( GL_POLYGON_OFFSET_FILL );
+	qglPolygonOffset( -1.0f, -1.0f );
+
 	//
 	// set arrays and lock
 	//
@@ -119,6 +125,8 @@ void CQuickSpriteSystem::Flush(void)
 	}
 
 	qglDrawArrays(GL_QUADS, 0, mNextVert);
+
+	qglDisable( GL_POLYGON_OFFSET_FILL );
 
 	backEnd.pc.c_vertexes += mNextVert;
 	backEnd.pc.c_indexes += mNextVert;

@@ -27,8 +27,10 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "server.h"
 #include <windows.h>
+#include <stdint.h>
 
 extern char *g_sof2_dll_ps;
+static const int SOF2_PMF_NOCLIPMOVE = 0x100;
 
 static void SV_ClearSOF2ForcedMove( char *dllPs, const char *phase ) {
 	// Verified with a source-layout probe:
@@ -117,13 +119,58 @@ static void SV_ClearSOF2FlySwim( char *dllPs, const char *phase ) {
 	*moveType = 2; // MT_RUNJUMP
 }
 
+static void SV_ClearSOF2NoClip( char *dllPs, const char *phase ) {
+	// Verified from g_shared.h layout:
+	//   offsetof(gclient_t, noclip) = 1701
+	// G_Active re-derives ps.pm_type from this boolean every ClientThink:
+	//   noclip != 0 -> PM_NOCLIP
+	// Retail Pmove also branches into PM_NoclipMove when ps.pm_flags has bit
+	// 0x100 set, so clearing the boolean alone is not sufficient.
+	if ( !dllPs ) {
+		return;
+	}
+
+	volatile unsigned char *noclip = (volatile unsigned char *)( dllPs + 1701 );
+	volatile int *pmFlags = (volatile int *)( dllPs + 0x0C );
+	const unsigned int originalNoClip = (unsigned int)( *noclip );
+	const unsigned int originalPmFlags = (unsigned int)( *pmFlags );
+	if ( originalNoClip == 0 && ( originalPmFlags & SOF2_PMF_NOCLIPMOVE ) == 0 ) {
+		return;
+	}
+
+	static int s_noclipLogCount = 0;
+	if ( s_noclipLogCount < 24 ) {
+		Com_Printf(
+			"[SOF2 fix] cleared noclip (%s) value=%u pm_flags=0x%X->0x%X\n",
+			phase,
+			originalNoClip,
+			originalPmFlags,
+			originalPmFlags & ~SOF2_PMF_NOCLIPMOVE );
+		++s_noclipLogCount;
+	}
+
+	*noclip = 0;
+	*pmFlags &= ~SOF2_PMF_NOCLIPMOVE;
+}
+
 static int SV_ClientThinkExceptionFilter( EXCEPTION_POINTERS *ep, int clientNum ) {
 	static int thinkCrashDetailCount = 0;
 	if ( ep && ep->ContextRecord && thinkCrashDetailCount < 8 ) {
 		CONTEXT *ctx = ep->ContextRecord;
 		const usercmd_t *cmd = NULL;
+		unsigned long stack0 = 0UL;
+		HMODULE gameMod = GetModuleHandleA( "gamex86" );
+		unsigned long gameBase = (unsigned long)(uintptr_t)gameMod;
 		if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
 			cmd = &svs.clients[clientNum].lastUsercmd;
+		}
+		__try {
+			if ( ctx->Esp ) {
+				unsigned long *sp = (unsigned long *)ctx->Esp;
+				stack0 = sp[0];
+			}
+		} __except( EXCEPTION_EXECUTE_HANDLER ) {
+			stack0 = 0UL;
 		}
 		fprintf( stderr,
 			"[SV_ClientThink] crash #%d client=%d code=0x%08lX EIP=%08lX EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX cmdTime=%d buttons=0x%08X move=(%d,%d,%d) weapon=%u gcmd=%u\n",
@@ -144,6 +191,31 @@ static int SV_ClientThinkExceptionFilter( EXCEPTION_POINTERS *ep, int clientNum 
 			fprintf( stderr, "[SV_ClientThink]   AV %s addr=%08lX\n",
 				ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
 				(unsigned long)ep->ExceptionRecord->ExceptionInformation[1] );
+		}
+		Com_Printf(
+			"^1SV_ClientThink crash #%d client=%d code=0x%08lX EIP=%08lX ECX=%08lX EDX=%08lX ESP=%08lX stack0=%08lX cmd=(%d,%d,%d)\n",
+			thinkCrashDetailCount + 1,
+			clientNum,
+			(unsigned long)ep->ExceptionRecord->ExceptionCode,
+			ctx->Eip,
+			ctx->Ecx,
+			ctx->Edx,
+			ctx->Esp,
+			stack0,
+			cmd ? (int)cmd->forwardmove : 0,
+			cmd ? (int)cmd->rightmove : 0,
+			cmd ? (int)cmd->upmove : 0 );
+		if ( ctx->Eip == 0 && stack0 ) {
+			if ( gameBase && stack0 >= gameBase ) {
+				Com_Printf(
+					"^1SV_ClientThink: probable caller=%08lX (gamex86+0x%08lX)\n",
+					stack0,
+					stack0 - gameBase );
+			} else {
+				Com_Printf(
+					"^1SV_ClientThink: probable caller=%08lX\n",
+					stack0 );
+			}
 		}
 		fflush( stderr );
 		thinkCrashDetailCount++;
@@ -565,6 +637,8 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	static int startupThinkLogs = 0;
 	static int sof2MoveLogCount = 0;
 	static int sof2OriginLogCount = 0;
+	const qboolean sof2VerboseSvLogs = qfalse;
+	const qboolean sof2VerboseGuardLogs = qfalse;
 	const int clientNum = (int)(cl - svs.clients);
 	gentity_t *ent = cl->gentity;
 	const qboolean hasMovementInput = ( cmd->forwardmove || cmd->rightmove || cmd->upmove || cmd->buttons ) ? qtrue : qfalse;
@@ -574,7 +648,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	if ( cl->state != CS_ACTIVE ) {
 		return;		// may have been kicked during the last usercmd
 	}
-	if ( startupThinkLogs < 8 && ent ) {
+	if ( sof2VerboseSvLogs && startupThinkLogs < 8 && ent ) {
 		playerState_t *ps = SV_GameClientNum( clientNum );
 		Com_Printf(
 			"[DBG] SV_ClientThink pre DLL: client=%d ent=%p serverIndex=%d entNum=%d s.clientNum=%d ps=%p cmdTime=%d buttons=0x%08X move=(%d,%d,%d) weapon=%u gcmd=%u\n",
@@ -593,7 +667,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			(unsigned int)cmd->generic_cmd );
 		startupThinkLogs++;
 	}
-	if ( sof2MoveLogCount < 256 && hasMovementInput ) {
+	if ( sof2VerboseSvLogs && sof2MoveLogCount < 2048 && hasMovementInput ) {
 		Com_Printf(
 			"[SV cmd] #%d client=%d move=(%d,%d,%d) ang=(%d,%d,%d) btn=0x%08X weapon=%u gcmd=%u cmdTime=%d\n",
 			sof2MoveLogCount + 1,
@@ -608,7 +682,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			cmd->serverTime );
 		++sof2MoveLogCount;
 	}
-	if ( sof2OriginLogCount < 256 && hasMovementInput ) {
+	if ( sof2VerboseSvLogs && sof2OriginLogCount < 2048 && hasMovementInput ) {
 		playerState_t *ps = SV_GameClientNum( clientNum );
 		if ( ps ) {
 			Com_Printf(
@@ -668,16 +742,153 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	//   camera sequence at map load, causing "scripted" automatic movement
 	//   and no player control. CCameraEntity_Create initializes this to 0;
 	//   map/script logic sets it to 1 to start a cutscene.
+	const qboolean sof2UnsafeRuntimePatches = qfalse;
+	const qboolean sof2CriticalStabilityPatches = qtrue;
 	{
 		static HMODULE s_hGameDll = NULL;
 		if ( !s_hGameDll )
 			s_hGameDll = GetModuleHandleA( "gamex86" );
-		if ( s_hGameDll ) {
+		if ( sof2CriticalStabilityPatches && s_hGameDll ) {
+			// Keep direct +map out of script/intermission camera takeover paths.
+			// These are lightweight state clears (no code patching) and are applied
+			// each frame because scripts can re-enable them.
+			{
+				volatile int *g_skipSpawnTargets = (volatile int *)( (char *)s_hGameDll + 0x3100F4 );
+				if ( *g_skipSpawnTargets != 0 ) {
+					*g_skipSpawnTargets = 0;
+				}
+
+				volatile int *g_cameraEntityAAddr = (volatile int *)( (char *)s_hGameDll + 0x308CD4 );
+				int camEnt = *g_cameraEntityAAddr;
+				if ( camEnt != 0 ) {
+					__try {
+						volatile unsigned char *camFlag = (volatile unsigned char *)( (uintptr_t)camEnt + 0x5EE );
+						*camFlag = 0;
+					} __except( EXCEPTION_EXECUTE_HANDLER ) {
+					}
+				}
+			}
+
+			// One-time safety patch:
+			// gamex86+0xDEDF8 crashes on invalid weapon ptr deref inside
+			// CWeaponSystem_IsWeaponInFireState(). Force a safe "not firing"
+			// return for this helper to avoid cascading faults.
+			{
+				static bool s_weaponFireStatePatchApplied = false;
+				if ( !s_weaponFireStatePatchApplied ) {
+					unsigned char *patchAddr = (unsigned char *)( (char *)s_hGameDll + 0xDEDF0 );
+					const unsigned char retFalsePatch[5] = { 0x33, 0xC0, 0xC2, 0x04, 0x00 }; // xor eax,eax; ret 4
+					if ( memcmp( patchAddr, retFalsePatch, sizeof( retFalsePatch ) ) == 0 ) {
+						Com_Printf( "[SOF2 fix] CWeaponSystem_IsWeaponInFireState patch already active at RVA 0xDEDF0\n" );
+						s_weaponFireStatePatchApplied = true;
+					} else {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, sizeof( retFalsePatch ), PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							memcpy( patchAddr, retFalsePatch, sizeof( retFalsePatch ) );
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, sizeof( retFalsePatch ) );
+							VirtualProtect( patchAddr, sizeof( retFalsePatch ), oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched CWeaponSystem_IsWeaponInFireState to return false at RVA 0xDEDF0\n" );
+							s_weaponFireStatePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] weapon fire-state patch FAILED: VirtualProtect error %lu at RVA 0xDEDF0\n", GetLastError() );
+						}
+					}
+				}
+			}
+
+			// One-time safety patch:
+			// gamex86+0xE07F2 reads [this->curWeapon + 0x40] and crashes when
+			// this->curWeapon is stale/invalid. This helper is called from the
+			// weapon-state handler at gamex86+0xD7895 and returns a bool in AL.
+			// Force safe false to avoid repeated SV_ClientThink exceptions.
+			{
+				static bool s_weaponAuxStatePatchApplied = false;
+				if ( !s_weaponAuxStatePatchApplied ) {
+					unsigned char *patchAddr = (unsigned char *)( (char *)s_hGameDll + 0xE07D0 );
+					const unsigned char retFalsePatch[3] = { 0x33, 0xC0, 0xC3 }; // xor eax,eax; ret
+					if ( memcmp( patchAddr, retFalsePatch, sizeof( retFalsePatch ) ) == 0 ) {
+						Com_Printf( "[SOF2 fix] weapon aux-state patch already active at RVA 0xE07D0\n" );
+						s_weaponAuxStatePatchApplied = true;
+					} else {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, sizeof( retFalsePatch ), PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							memcpy( patchAddr, retFalsePatch, sizeof( retFalsePatch ) );
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, sizeof( retFalsePatch ) );
+							VirtualProtect( patchAddr, sizeof( retFalsePatch ), oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched weapon aux-state helper to return false at RVA 0xE07D0\n" );
+							s_weaponAuxStatePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] weapon aux-state patch FAILED: VirtualProtect error %lu at RVA 0xE07D0\n", GetLastError() );
+						}
+					}
+				}
+			}
+
+			// One-time safety patch:
+			// ClientThink @ RVA 0x4D026 sets pm_type=2 for direct +map paths when
+			// player health/init state has not been fully established yet.
+			// Patch JG->JMP so this assignment is skipped consistently.
+			{
+				static bool s_clientThinkPmTypePatchApplied = false;
+				if ( !s_clientThinkPmTypePatchApplied ) {
+					unsigned char *patchAddr = (unsigned char *)( (char *)s_hGameDll + 0x4D026 );
+					unsigned char curByte = *patchAddr;
+					if ( curByte == 0xEB ) {
+						Com_Printf( "[SOF2 fix] ClientThink pm_type patch already active at RVA 0x4D026\n" );
+						s_clientThinkPmTypePatchApplied = true;
+					} else if ( curByte == 0x7F ) {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, 1, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							*patchAddr = 0xEB; // JMP
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, 1 );
+							VirtualProtect( patchAddr, 1, oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched ClientThink pm_type branch JG->JMP at RVA 0x4D026\n" );
+							s_clientThinkPmTypePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] ClientThink pm_type patch FAILED: VirtualProtect error %lu at RVA 0x4D026\n", GetLastError() );
+						}
+					} else {
+						Com_Printf( "[SOF2 fix] ClientThink pm_type patch: unexpected byte 0x%02X at RVA 0x4D026\n", curByte );
+						s_clientThinkPmTypePatchApplied = true;
+					}
+				}
+			}
+
+			// One-time safety patch:
+			// gamex86+0x4D5E1 crashes on stale index deref in ClientThink path.
+			// Convert JZ->JMP at 0x4D5D9 to skip the stale index branch unconditionally.
+			{
+				static bool s_clientThinkLookupPatchApplied = false;
+				if ( !s_clientThinkLookupPatchApplied ) {
+					unsigned char *patchAddr = (unsigned char *)( (char *)s_hGameDll + 0x4D5D9 );
+					unsigned char curByte = *patchAddr;
+					if ( curByte == 0xEB ) {
+						Com_Printf( "[SOF2 fix] ClientThink lookup patch already active at RVA 0x4D5D9\n" );
+						s_clientThinkLookupPatchApplied = true;
+					} else if ( curByte == 0x74 ) {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, 1, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							*patchAddr = 0xEB;
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, 1 );
+							VirtualProtect( patchAddr, 1, oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched ClientThink stale lookup branch JZ->JMP at RVA 0x4D5D9\n" );
+							s_clientThinkLookupPatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] ClientThink lookup patch FAILED: VirtualProtect error %lu at RVA 0x4D5D9\n", GetLastError() );
+						}
+					} else {
+						Com_Printf( "[SOF2 fix] ClientThink lookup patch: unexpected byte 0x%02X at RVA 0x4D5D9\n", curByte );
+						s_clientThinkLookupPatchApplied = true; // don't retry forever on unknown build
+					}
+				}
+			}
+		}
+		if ( sof2UnsafeRuntimePatches && s_hGameDll ) {
 			// --- One-time code patch: PM_Pmove JL→JLE at RVA 0x2f04 ---
 			{
 				static bool s_pmovePatchApplied = false;
 				(void)s_pmovePatchApplied;
-				if ( false ) {
+				if ( !s_pmovePatchApplied ) {
 					void *patchAddr = (void *)( (char *)s_hGameDll + 0x2f04 );
 					unsigned char currentByte = *(unsigned char *)patchAddr;
 					if ( currentByte == 0x7C ) { // JL — patch to JLE
@@ -690,9 +901,43 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 						} else {
 							Com_Printf( "[SOF2 fix] PM_Pmove patch FAILED: VirtualProtect error %lu at RVA 0x2f04\n", GetLastError() );
 						}
+					} else if ( currentByte == 0x7E ) {
+						Com_Printf( "[SOF2 fix] PM_Pmove patch already active at RVA 0x2f04\n" );
+						s_pmovePatchApplied = true;
 					} else {
 						Com_Printf( "[SOF2 fix] PM_Pmove patch: unexpected byte 0x%02X at RVA 0x2f04 (already patched or wrong build?)\n", currentByte );
 						s_pmovePatchApplied = true; // don't retry
+					}
+				}
+			}
+			// --- One-time patch: ClientThink JG→JMP at RVA 0x4d026 ---
+			// ClientThink @ RVA 0x4d026: "JG 0x4d031" (7F 09) — only skips pm_type=2
+			// assignment when CPlayer health > 0. With a direct +map load, CPlayer entity
+			// health = 0 (no save game / mission init). The first vtable[1] call at RVA
+			// 0x4cfe8 INSIDE ClientThink overwrites ps+0xD0 with the real entity health,
+			// defeating our health=100 write in SV_GetUsercmd_SOF2. Patching JG→JMP
+			// unconditionally skips the pm_type=2 assignment regardless of CPlayer health.
+			{
+				static bool s_pmtype2PatchApplied = false;
+				if ( !s_pmtype2PatchApplied ) {
+					void *patchAddr2 = (void *)( (char *)s_hGameDll + 0x4d026 );
+					unsigned char curByte2 = *(unsigned char *)patchAddr2;
+					if ( curByte2 == 0x7F ) { // JG — patch to JMP (unconditional)
+						DWORD oldProtect2 = 0;
+						if ( VirtualProtect( patchAddr2, 1, PAGE_EXECUTE_READWRITE, &oldProtect2 ) ) {
+							*(unsigned char *)patchAddr2 = 0xEB; // JMP
+							VirtualProtect( patchAddr2, 1, oldProtect2, &oldProtect2 );
+							Com_Printf( "[SOF2 fix] ClientThink pm_type=2 patch applied: JG→JMP at RVA 0x4d026\n" );
+							s_pmtype2PatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] ClientThink pm_type=2 patch FAILED: VirtualProtect error %lu at RVA 0x4d026\n", GetLastError() );
+						}
+					} else if ( curByte2 == 0xEB ) {
+						Com_Printf( "[SOF2 fix] ClientThink pm_type=2 patch already active at RVA 0x4d026\n" );
+						s_pmtype2PatchApplied = true;
+					} else {
+						Com_Printf( "[SOF2 fix] ClientThink pm_type=2 patch: unexpected byte 0x%02X at RVA 0x4d026\n", curByte2 );
+						s_pmtype2PatchApplied = true; // don't retry
 					}
 				}
 			}
@@ -746,6 +991,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			SV_ClearSOF2ForcedMove( g_sof2_dll_ps, "pre" );
 			SV_ClearSOF2ControlSlot( g_sof2_dll_ps, "pre" );
 			SV_ClearSOF2FlySwim( g_sof2_dll_ps, "pre" );
+			SV_ClearSOF2NoClip( g_sof2_dll_ps, "pre" );
 		}
 	}
 
@@ -781,18 +1027,24 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	{
 		static HMODULE s_hGamePost = NULL;
 		if ( !s_hGamePost ) s_hGamePost = GetModuleHandleA( "gamex86" );
-		if ( s_hGamePost ) {
+		if ( ( sof2UnsafeRuntimePatches || sof2CriticalStabilityPatches ) && s_hGamePost ) {
 			volatile int *g_cameraEntityAAddrPost = (volatile int *)( (char *)s_hGamePost + 0x308cd4 );
 			int camEntPost = *g_cameraEntityAAddrPost;
 			if ( camEntPost != 0 ) {
-				volatile char *camFlagPost = (volatile char *)( camEntPost + 0x5ee );
-				*camFlagPost = 0;
+				__try {
+					volatile char *camFlagPost = (volatile char *)( (uintptr_t)camEntPost + 0x5ee );
+					*camFlagPost = 0;
+				} __except( EXCEPTION_EXECUTE_HANDLER ) {
+				}
 			}
 		}
 	}
-	SV_ClearSOF2ForcedMove( g_sof2_dll_ps, "post" );
-	SV_ClearSOF2ControlSlot( g_sof2_dll_ps, "post" );
-	SV_ClearSOF2FlySwim( g_sof2_dll_ps, "post" );
+	if ( sof2UnsafeRuntimePatches ) {
+		SV_ClearSOF2ForcedMove( g_sof2_dll_ps, "post" );
+		SV_ClearSOF2ControlSlot( g_sof2_dll_ps, "post" );
+		SV_ClearSOF2FlySwim( g_sof2_dll_ps, "post" );
+		SV_ClearSOF2NoClip( g_sof2_dll_ps, "post" );
+	}
 
 	// Fix K: sync DLL playerState → engine playerState.
 	// The DLL's PM_Pmove writes updated origin/velocity/viewangles into the DLL's own
@@ -817,41 +1069,78 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			int *dll_delta        = (int *)(g_sof2_dll_ps + 0x50);
 			int *dll_pm_type      = (int *)(g_sof2_dll_ps + 0x04);
 			int *dll_pm_flags     = (int *)(g_sof2_dll_ps + 0x0C);
+			int *dll_pm_time      = (int *)(g_sof2_dll_ps + 0x10);
 			int *dll_ground       = (int *)(g_sof2_dll_ps + 0x5C);
 			float *dll_viewangles = (float *)(g_sof2_dll_ps + 0xB0);
 			int *dll_viewheight   = (int *)(g_sof2_dll_ps + 0xBC);
 			int *dll_generic1     = (int *)(g_sof2_dll_ps + 0x150);
+			int *dll_moveType     = (int *)(g_sof2_dll_ps + 2212);
+			unsigned char *dll_noclip = (unsigned char *)(g_sof2_dll_ps + 1701);
 			static vec3_t s_lastDllOrigin[MAX_CLIENTS];
 			static int s_noInputDriftFrames[MAX_CLIENTS];
+			static int s_freeFlyGuardFrames[MAX_CLIENTS];
+			static int s_inputStuckFrames[MAX_CLIENTS];
 			static qboolean s_haveLastDllOrigin[MAX_CLIENTS];
 
 			if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
 				if ( !hasMovementInput && s_haveLastDllOrigin[clientNum] ) {
 					float dx = dll_origin[0] - s_lastDllOrigin[clientNum][0];
 					float dy = dll_origin[1] - s_lastDllOrigin[clientNum][1];
+					float dz = dll_origin[2] - s_lastDllOrigin[clientNum][2];
+					float absDz = ( dz < 0.0f ) ? -dz : dz;
 					float planarDelta2 = dx * dx + dy * dy;
 					float planarSpeed2 = dll_velocity[0] * dll_velocity[0] + dll_velocity[1] * dll_velocity[1];
+					const qboolean abnormalNoInputMode =
+						( *dll_pm_type != 0 ||
+						  *dll_noclip != 0 ||
+						  ( *dll_pm_flags & SOF2_PMF_NOCLIPMOVE ) != 0 ||
+						  *dll_moveType != 2 ) ? qtrue : qfalse;
+					const qboolean suspiciousNoInputDrift =
+						( planarDelta2 > ( 1.5f * 1.5f ) ||
+						  planarSpeed2 > ( 60.0f * 60.0f ) ||
+						  absDz > 12.0f ||
+						  dll_velocity[2] > 120.0f ||
+						  dll_velocity[2] < -120.0f ) ? qtrue : qfalse;
 
-					// Air1 can re-assert scripted motion without user input. Detect both
-					// fast velocity and persistent no-input XY translation.
-					if ( planarDelta2 > ( 0.5f * 0.5f ) || planarSpeed2 > ( 20.0f * 20.0f ) ) {
+					// Only accumulate drift while movement mode looks abnormal and movement
+					// remains suspicious without any input for sustained frames.
+					if ( abnormalNoInputMode && suspiciousNoInputDrift ) {
 						s_noInputDriftFrames[clientNum]++;
 					} else {
 						s_noInputDriftFrames[clientNum] = 0;
 					}
 
-					if ( s_noInputDriftFrames[clientNum] >= 2 ) {
-						if ( planarDelta2 > ( 0.25f * 0.25f ) || planarSpeed2 > ( 10.0f * 10.0f ) ) {
-							dll_origin[0] = s_lastDllOrigin[clientNum][0];
-							dll_origin[1] = s_lastDllOrigin[clientNum][1];
+					if ( s_noInputDriftFrames[clientNum] >= 10 ) {
+						if ( suspiciousNoInputDrift ) {
+							// Clamp script-driven drift without hard-freezing valid physics.
+							if ( planarDelta2 > ( 48.0f * 48.0f ) ) {
+								dll_origin[0] = s_lastDllOrigin[clientNum][0];
+								dll_origin[1] = s_lastDllOrigin[clientNum][1];
+							}
 							dll_velocity[0] = 0.0f;
 							dll_velocity[1] = 0.0f;
+							if ( absDz > 48.0f || dll_velocity[2] > 220.0f || dll_velocity[2] < -220.0f ) {
+								dll_origin[2] = s_lastDllOrigin[clientNum][2];
+								dll_velocity[2] = 0.0f;
+							}
+							*dll_pm_type = 0;
+							*dll_noclip = 0;
+							*dll_pm_time = 0;
+							*dll_pm_flags &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
+							if ( *dll_moveType != 2 ) {
+								*dll_moveType = 2;
+							}
 							static int s_driftGuardLogCount = 0;
 							if ( s_driftGuardLogCount < 24 ) {
 								Com_Printf(
-									"[SV guard] blocked no-input drift client=%d dxy=%.2f speed2=%.1f keep=(%.1f,%.1f,%.1f)\n",
+									"[SV guard] blocked no-input drift client=%d mode=(pm=%d flags=0x%X noclip=%u mt=%d) dxy=%.2f dz=%.1f speed2=%.1f keep=(%.1f,%.1f,%.1f)\n",
 									clientNum,
+									*dll_pm_type,
+									(unsigned int)( *dll_pm_flags ),
+									(unsigned int)( *dll_noclip ),
+									*dll_moveType,
 									planarDelta2,
+									dz,
 									planarSpeed2,
 									s_lastDllOrigin[clientNum][0],
 									s_lastDllOrigin[clientNum][1],
@@ -862,6 +1151,124 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 					}
 				} else {
 					s_noInputDriftFrames[clientNum] = 0;
+				}
+
+				// Input is active but the DLL reports no planar displacement and no planar speed:
+				// clear lock-style pm fields so PM_Pmove can resume.
+				if ( hasMovementInput && ( cmd->forwardmove || cmd->rightmove ) && s_haveLastDllOrigin[clientNum] ) {
+					float dx = dll_origin[0] - s_lastDllOrigin[clientNum][0];
+					float dy = dll_origin[1] - s_lastDllOrigin[clientNum][1];
+					float planarDelta2 = dx * dx + dy * dy;
+					float planarSpeed2 = dll_velocity[0] * dll_velocity[0] + dll_velocity[1] * dll_velocity[1];
+
+					if ( planarDelta2 < ( 0.05f * 0.05f ) && planarSpeed2 < ( 1.0f * 1.0f ) ) {
+						s_inputStuckFrames[clientNum]++;
+					} else {
+						s_inputStuckFrames[clientNum] = 0;
+					}
+
+					if ( s_inputStuckFrames[clientNum] >= 3 ) {
+						const int originalPmType = *dll_pm_type;
+						const int originalPmFlags = *dll_pm_flags;
+						const int originalPmTime = *dll_pm_time;
+						const int originalMoveType = *dll_moveType;
+
+						*dll_pm_type = 0;
+						*dll_pm_time = 0;
+						*dll_pm_flags &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
+						*dll_moveType = 2;
+						*dll_noclip = 0;
+
+						static int s_inputStuckLogCount = 0;
+						if ( sof2VerboseGuardLogs && s_inputStuckLogCount < 48 ) {
+							Com_Printf(
+								"[SV guard] cleared input-stuck locks client=%d pm_type=%d->%d pm_time=%d->%d pm_flags=0x%X->0x%X moveType=%d->%d\n",
+								clientNum,
+								originalPmType,
+								*dll_pm_type,
+								originalPmTime,
+								*dll_pm_time,
+								(unsigned int)originalPmFlags,
+								(unsigned int)*dll_pm_flags,
+								originalMoveType,
+								*dll_moveType );
+							s_inputStuckLogCount++;
+						}
+					}
+				} else {
+					s_inputStuckFrames[clientNum] = 0;
+				}
+
+				// If movement is active but jump is not pressed, the player should not
+				// gain strong positive Z velocity from look-direction alone.
+				if ( hasMovementInput && cmd->upmove <= 0 && s_haveLastDllOrigin[clientNum] ) {
+					const qboolean hasPlanarInput = ( cmd->forwardmove || cmd->rightmove ) ? qtrue : qfalse;
+					const float dz = dll_origin[2] - s_lastDllOrigin[clientNum][2];
+					// Treat only explicit noclip/flyswim state as hard-invalid movement mode.
+					// PM type drift alone is recovered by normalization without freezing origin.
+					const qboolean hardNoClipOrFly =
+						( *dll_noclip != 0 ||
+						  ( *dll_pm_flags & SOF2_PMF_NOCLIPMOVE ) != 0 ||
+						  *dll_moveType == 3 ) ? qtrue : qfalse;
+					const qboolean suspiciousVertical =
+						( hasPlanarInput && dz > 12.0f && dll_velocity[2] > 140.0f ) ? qtrue : qfalse;
+					const qboolean spectatorStuck = qfalse;
+
+					if ( hardNoClipOrFly || suspiciousVertical ) {
+						s_freeFlyGuardFrames[clientNum]++;
+					} else {
+						s_freeFlyGuardFrames[clientNum] = 0;
+					}
+
+					if ( s_freeFlyGuardFrames[clientNum] >= 2 ) {
+						const int originalPmType = *dll_pm_type;
+						const unsigned int originalPmFlags = (unsigned int)( *dll_pm_flags );
+						const unsigned int originalNoClip = (unsigned int)( *dll_noclip );
+						const int originalMoveType = *dll_moveType;
+						const float originalVz = dll_velocity[2];
+
+						if ( hardNoClipOrFly ) {
+							// Mode drift into spectator/noclip/flyswim: reject this frame.
+							VectorCopy( s_lastDllOrigin[clientNum], dll_origin );
+							VectorClear( dll_velocity );
+						} else if ( suspiciousVertical ) {
+							// Keep planar movement, but block unintended upward free-flight.
+							dll_origin[2] = s_lastDllOrigin[clientNum][2];
+							if ( dll_velocity[2] > 0.0f ) {
+								dll_velocity[2] = 0.0f;
+							}
+						}
+
+						*dll_pm_type = 0;
+						*dll_pm_time = 0;
+						*dll_pm_flags &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
+						*dll_noclip = 0;
+						if ( *dll_moveType == 3 ) {
+							*dll_moveType = 2;
+						}
+
+						static int s_freeFlyGuardLogCount = 0;
+						if ( sof2VerboseGuardLogs && s_freeFlyGuardLogCount < 32 ) {
+							Com_Printf(
+								"[SV guard] blocked disembody/freefly client=%d mode=(pm=%d flags=0x%X noclip=%u mt=%d) reason=(mode=%d z=%d spec=%d) dz=%.1f vz=%.1f keep=(%.1f,%.1f,%.1f)\n",
+								clientNum,
+								originalPmType,
+								(unsigned int)originalPmFlags,
+								originalNoClip,
+								originalMoveType,
+								hardNoClipOrFly ? 1 : 0,
+								suspiciousVertical ? 1 : 0,
+								spectatorStuck ? 1 : 0,
+								dz,
+								originalVz,
+								s_lastDllOrigin[clientNum][0],
+								s_lastDllOrigin[clientNum][1],
+								s_lastDllOrigin[clientNum][2] );
+							s_freeFlyGuardLogCount++;
+						}
+					}
+				} else {
+					s_freeFlyGuardFrames[clientNum] = 0;
 				}
 			}
 
@@ -876,17 +1283,43 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			engPs->delta_angles[2] = dll_delta[2];
 			engPs->pm_type = *dll_pm_type;
 			engPs->pm_flags = *dll_pm_flags;
+			engPs->pm_time = *dll_pm_time;
 			engPs->groundEntityNum = *dll_ground;
 			engPs->viewheight = *dll_viewheight;
-			engPs->generic1 = 0;
-			*dll_generic1 = 0;
+			engPs->generic1 = *dll_generic1;
 
 			// Normalize pm_type and viewheight after DLL may have set spectator state
 			if ( engPs->pm_type == 1 || engPs->pm_type == 2 ) {
 				engPs->pm_type = 0;
+				*dll_pm_type = 0;
 			}
+			if ( engPs->pm_time != 0 ) {
+				engPs->pm_time = 0;
+				*dll_pm_time = 0;
+			}
+			engPs->pm_flags &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
+			*dll_pm_flags &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
 			if ( engPs->viewheight < 0 ) {
 				engPs->viewheight = 38;
+				*dll_viewheight = 38;
+			}
+			if ( *dll_noclip != 0 ) {
+				*dll_noclip = 0;
+			}
+			if ( *dll_moveType != 2 ) {
+				*dll_moveType = 2;
+			}
+			if ( *dll_generic1 != 0 || engPs->generic1 != 0 ) {
+				static int sof2ControlSlotSyncLogCount = 0;
+				if ( sof2ControlSlotSyncLogCount < 24 ) {
+					Com_Printf(
+						"[SOF2 fix] cleared synced control slot client=%d generic1/viewEntity=%d\n",
+						clientNum,
+						engPs->generic1 );
+					++sof2ControlSlotSyncLogCount;
+				}
+				*dll_generic1 = 0;
+				engPs->generic1 = 0;
 			}
 			if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
 				VectorCopy( engPs->origin, s_lastDllOrigin[clientNum] );
@@ -894,7 +1327,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			}
 
 			static int syncLogCount = 0;
-			if ( syncLogCount < 12 ) {
+			if ( sof2VerboseSvLogs && syncLogCount < 12 ) {
 				Com_Printf( "[SV sync] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) va=(%.1f,%.1f,%.1f) delta=(%d,%d,%d)\n",
 					syncLogCount + 1,
 					dll_origin[0], dll_origin[1], dll_origin[2],
@@ -916,9 +1349,9 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	}
 
 	// Post-ClientThink diagnostic: log playerState after sync
-	if ( hasMovementInput ) {
+	if ( sof2VerboseSvLogs && hasMovementInput ) {
 		static int postThinkLogCount = 0;
-		if ( postThinkLogCount < 48 ) {
+		if ( postThinkLogCount < 512 ) {
 			playerState_t *psPost = SV_GameClientNum( clientNum );
 			if ( psPost ) {
 				Com_Printf( "[SV post] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) va=(%.1f,%.1f,%.1f)\n",
@@ -1137,4 +1570,3 @@ void SV_FreeClient(client_t *client)
 		}
 	}
 }
-

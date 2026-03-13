@@ -194,6 +194,15 @@ static void R_SurfaceSpriteFrameUpdate(void)
 		curWeatherAmount = r_surfaceWeather->value;
 	}
 
+	// Diagnostic: log when curWeatherAmount is 0 (suppresses WEATHERFX sprites)
+	static int lastWarnTime = -999999;
+	if (curWeatherAmount < 0.01f && (backEnd.refdef.time - lastWarnTime) > 5000)
+	{
+		lastWarnTime = backEnd.refdef.time;
+		Com_DPrintf("SS: curWeatherAmount=0 (IsRaining=%d r_surfaceWeather=%.2f) — WEATHERFX suppressed\n",
+			R_IsRaining() ? 1 : 0, r_surfaceWeather->value);
+	}
+
 	if (R_GetWindSpeed(targetspeed, NULL))
 	{	// We successfully got a speed from the rain system.
 		// Set the windgust to 5, since that looks pretty good.
@@ -313,6 +322,20 @@ static void R_SurfaceSpriteFrameUpdate(void)
 	if (r_surfaceSprites->integer >= 2)
 	{
 		Com_Printf("Surfacesprites Drawn: %d, on %d surfaces\n", totalsurfsprites, sssurfaces);
+	}
+
+	// Diagnostic: log when sprite count changes (e.g. alternating 0/N = generation issue; constant N but invisible = GL state issue)
+	{
+		static int dbgPrevSprites = -1;
+		static int dbgPrevSurfaces = -1;
+		if (totalsurfsprites != dbgPrevSprites || sssurfaces != dbgPrevSurfaces)
+		{
+			Com_DPrintf("SS DIAG t=%d sprites=%d surfaces=%d fov=%.1f rangescale=%.3f\n",
+				lastSSUpdateTime, totalsurfsprites, sssurfaces,
+				backEnd.refdef.fov_x, rangescalefactor);
+			dbgPrevSprites  = totalsurfsprites;
+			dbgPrevSurfaces = sssurfaces;
+		}
 	}
 
 	totalsurfsprites=0;
@@ -544,6 +567,7 @@ static void RB_VerticalSurfaceSpriteWindPoint(vec3_t loc, float width, float hei
 static void RB_DrawVerticalSurfaceSprites( shaderStage_t *stage, shaderCommands_t *input)
 {
 	int curindex, curvert;
+	const int dbgSpritesBefore = totalsurfsprites; // track how many this call adds
  	vec3_t dist;
 	float triarea;
 	vec2_t vec1to2, vec1to3;
@@ -835,6 +859,20 @@ static void RB_DrawVerticalSurfaceSprites( shaderStage_t *stage, shaderCommands_
 					totalsurfsprites++;
 				}
 			}
+		}
+	}
+
+	// Diagnostic: log per-call sprite count when it changes (0 means all sprites skipped)
+	{
+		const int addedThisCall = totalsurfsprites - dbgSpritesBefore;
+		static int dbgPrevAdded = -1;
+		if (addedThisCall != dbgPrevAdded)
+		{
+			Com_DPrintf("SS VERTICAL call: added=%d numVerts=%d numIdx=%d cutdist=%.0f fadedist=%.0f\n",
+				addedThisCall, input->numVertexes, input->numIndexes,
+				stage->ss->fadeMax * rangescalefactor,
+				stage->ss->fadeDist * rangescalefactor);
+			dbgPrevAdded = addedThisCall;
 		}
 	}
 }
@@ -1441,6 +1479,29 @@ void RB_DrawSurfaceSprites( shaderStage_t *stage, shaderCommands_t *input)
 {
 	uint32_t	glbits=stage->stateBits;
 
+	// Update view vectors BEFORE R_SurfaceSpriteFrameUpdate so ssrightvectors
+	// are computed from this frame's camera orientation (eliminates 1-frame lag
+	// that can cause sprites to alternate between facing toward/away from geometry).
+	if (backEnd.currentEntity != ssLastEntityDrawn)
+	{
+		if (backEnd.currentEntity == &tr.worldEntity)
+		{	// Drawing the world, so our job is dead-easy, in the viewparms
+			VectorCopy(backEnd.viewParms.ori.origin, ssViewOrigin);
+			VectorCopy(backEnd.viewParms.ori.axis[1], ssViewRight);
+			VectorCopy(backEnd.viewParms.ori.axis[2], ssViewUp);
+		}
+		else
+		{	// Drawing an entity, so we need to transform the viewparms to the model's coordinate system
+//			R_WorldPointToEntity (backEnd.viewParms.ori.origin, ssViewOrigin);
+			R_WorldNormalToEntity (backEnd.viewParms.ori.axis[1], ssViewRight);
+			R_WorldNormalToEntity (backEnd.viewParms.ori.axis[2], ssViewUp);
+			VectorCopy(backEnd.ori.viewOrigin, ssViewOrigin);
+//			R_WorldToLocal(backEnd.viewParms.ori.axis[1], ssViewRight);
+//			R_WorldToLocal(backEnd.viewParms.ori.axis[2], ssViewUp);
+		}
+		ssLastEntityDrawn = backEnd.currentEntity;
+	}
+
 	R_SurfaceSpriteFrameUpdate();
 
 	//
@@ -1465,28 +1526,6 @@ void RB_DrawSurfaceSprites( shaderStage_t *stage, shaderCommands_t *input)
 	else
 	{
 		SSAdditiveTransparency=qfalse;
-	}
-
-
-	//Check if this is a new entity transformation (incl. world entity), and update the appropriate vectors if so.
-	if (backEnd.currentEntity != ssLastEntityDrawn)
-	{
-		if (backEnd.currentEntity == &tr.worldEntity)
-		{	// Drawing the world, so our job is dead-easy, in the viewparms
-			VectorCopy(backEnd.viewParms.ori.origin, ssViewOrigin);
-			VectorCopy(backEnd.viewParms.ori.axis[1], ssViewRight);
-			VectorCopy(backEnd.viewParms.ori.axis[2], ssViewUp);
-		}
-		else
-		{	// Drawing an entity, so we need to transform the viewparms to the model's coordinate system
-//			R_WorldPointToEntity (backEnd.viewParms.ori.origin, ssViewOrigin);
-			R_WorldNormalToEntity (backEnd.viewParms.ori.axis[1], ssViewRight);
-			R_WorldNormalToEntity (backEnd.viewParms.ori.axis[2], ssViewUp);
-			VectorCopy(backEnd.ori.viewOrigin, ssViewOrigin);
-//			R_WorldToLocal(backEnd.viewParms.ori.axis[1], ssViewRight);
-//			R_WorldToLocal(backEnd.viewParms.ori.axis[2], ssViewUp);
-		}
-		ssLastEntityDrawn = backEnd.currentEntity;
 	}
 
 	switch(stage->ss->surfaceSpriteType)

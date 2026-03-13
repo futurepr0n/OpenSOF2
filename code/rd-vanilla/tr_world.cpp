@@ -801,8 +801,16 @@ void R_AddWorldSurfaces (void) {
 	tr.currentEntityNum = REFENTITYNUM_WORLD;
 	tr.shiftedEntityNum = tr.currentEntityNum << QSORT_REFENTITYNUM_SHIFT;
 
-	// determine which leaves are in the PVS / areamask
-	R_MarkLeaves ();
+	// SOF2 SP compatibility: the retail cgame currently reaches the renderer
+	// with broken PVS/areamask state often enough to punch persistent holes in
+	// the world. Prefer overdraw to missing walls while the real integration is
+	// still incomplete.
+	tr.visCount++;
+	for ( i = 0 ; i < tr.world->numnodes ; i++ ) {
+		if ( tr.world->nodes[i].contents != CONTENTS_SOLID ) {
+			tr.world->nodes[i].visframe = tr.visCount;
+		}
+	}
 
 	// clear out the visible min/max
 	ClearBounds( tr.viewParms.visBounds[0], tr.viewParms.visBounds[1] );
@@ -814,22 +822,11 @@ void R_AddWorldSurfaces (void) {
 
 	R_RecursiveWorldNode( tr.world->nodes, 31, ( 1 << tr.refdef.num_dlights ) - 1 );
 
-	// SOF2 compatibility: if the first traversal produces no world surfaces,
-	// treat it as a broken PVS/areamask result and force all nodes visible.
+	// Keep the old recovery log in place so regressions still show up clearly.
 	if ( tr.refdef.numDrawSurfs == drawSurfBase ) {
-		tr.visCount++;
-		for ( i = 0 ; i < tr.world->numnodes ; i++ ) {
-			if ( tr.world->nodes[i].contents != CONTENTS_SOLID ) {
-				tr.world->nodes[i].visframe = tr.visCount;
-			}
-		}
-
-		ClearBounds( tr.viewParms.visBounds[0], tr.viewParms.visBounds[1] );
-		R_RecursiveWorldNode( tr.world->nodes, 31, ( 1 << tr.refdef.num_dlights ) - 1 );
-
 		if ( worldFallbackLogCount < 8 ) {
 			ri.Printf( PRINT_ALL,
-				"[WORLD draw] fallback #%d forced-all-visible drawSurfs=%d (+%d)\n",
+				"[WORLD draw] fallback #%d compat-all-visible drawSurfs=%d (+%d)\n",
 				worldFallbackLogCount + 1,
 				tr.refdef.numDrawSurfs,
 				tr.refdef.numDrawSurfs - drawSurfBase );
@@ -839,7 +836,7 @@ void R_AddWorldSurfaces (void) {
 
 	if ( worldLogCount < 8 ) {
 		ri.Printf( PRINT_ALL,
-			"[WORLD draw] #%d rdflags=0x%x noworld=%d drawSurfs=%d (+%d) entities=%d dlights=%d\n",
+			"[WORLD draw] #%d compat-all-visible rdflags=0x%x noworld=%d drawSurfs=%d (+%d) entities=%d dlights=%d\n",
 			worldLogCount + 1,
 			tr.refdef.rdflags,
 			(tr.refdef.rdflags & RDF_NOWORLDMODEL) ? 1 : 0,

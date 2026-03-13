@@ -69,6 +69,9 @@ extern void UI_MainMenu(void);
 extern void UI_InGameMenu(const char*holoFlag);
 extern void AssetCache(void);
 extern void UI_DataPadMenu(void);
+extern qboolean UI_HandleSOF2NativeSetActiveMenu( const char *menuname, const char *menuID );
+extern void UI_CloseSOF2NativeMenu( qboolean clearCatcher );
+extern qboolean UI_IsSOF2NativeMenuActive( void );
 
 //
 // ui_connect.c

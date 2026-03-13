@@ -26,6 +26,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "client.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "client_ui.h"
 
 #ifndef _WIN32
@@ -36,6 +39,7 @@ unsigned	frame_msec;
 int			old_com_frameTime;
 float cl_mPitchOverride = 0.0f;
 float cl_mYawOverride = 0.0f;
+static const qboolean clVerboseInputDebug = qfalse;
 
 /*
 ===============================================================================
@@ -69,6 +73,7 @@ kbutton_t	in_buttons[32];
 qboolean	in_mlooking;
 
 extern cvar_t	*in_joystick;
+extern keyGlobals_t kg;
 
 static void IN_UseGivenForce(void)
 {
@@ -153,6 +158,7 @@ void IN_MLookUp( void ) {
 void IN_KeyDown( kbutton_t *b ) {
 	int		k;
 	const char	*c;
+	static int s_inKeyDownLogCount = 0;
 
 	c = Cmd_Argv(1);
 	if ( c[0] ) {
@@ -184,12 +190,25 @@ void IN_KeyDown( kbutton_t *b ) {
 
 	b->active = qtrue;
 	b->wasPressed = qtrue;
+
+	if ( clVerboseInputDebug && s_inKeyDownLogCount < 128 ) {
+		Com_Printf(
+			"[IN key] down #%d cmd='%s' key=%d t=%u catcher=%d state=%d\n",
+			s_inKeyDownLogCount + 1,
+			Cmd_Argv(0),
+			k,
+			b->downtime,
+			Key_GetCatcher(),
+			cls.state );
+		++s_inKeyDownLogCount;
+	}
 }
 
 void IN_KeyUp( kbutton_t *b ) {
 	int		k;
 	const char	*c;
 	unsigned	uptime;
+	static int s_inKeyUpLogCount = 0;
 
 	c = Cmd_Argv(1);
 	if ( c[0] ) {
@@ -224,6 +243,18 @@ void IN_KeyUp( kbutton_t *b ) {
 	}
 
 	b->active = qfalse;
+
+	if ( clVerboseInputDebug && s_inKeyUpLogCount < 128 ) {
+		Com_Printf(
+			"[IN key] up   #%d cmd='%s' key=%d t=%u catcher=%d state=%d\n",
+			s_inKeyUpLogCount + 1,
+			Cmd_Argv(0),
+			k,
+			uptime,
+			Key_GetCatcher(),
+			cls.state );
+		++s_inKeyUpLogCount;
+	}
 }
 
 
@@ -391,6 +422,82 @@ void CL_AdjustAngles( void ) {
 	}
 }
 
+static void CL_ClearStaleKeyState( int keynum ) {
+	int i;
+
+	if ( keynum <= 0 || keynum >= MAX_KEYS ) {
+		return;
+	}
+
+	if ( kg.keys[keynum].down ) {
+		kg.keys[keynum].down = qfalse;
+		kg.keys[keynum].repeats = 0;
+		if ( kg.keyDownCount > 0 ) {
+			kg.keyDownCount--;
+		}
+		if ( kg.keyDownCount <= 0 ) {
+			kg.keyDownCount = 0;
+			kg.anykeydown = qfalse;
+		}
+	}
+
+	for ( i = 0; i < ARRAY_LEN( in_buttons ); ++i ) {
+		kbutton_t *button = &in_buttons[i];
+
+		if ( button->down[0] == keynum ) {
+			button->down[0] = 0;
+		}
+		if ( button->down[1] == keynum ) {
+			button->down[1] = 0;
+		}
+		if ( !button->down[0] && !button->down[1] ) {
+			button->active = qfalse;
+			button->wasPressed = qfalse;
+			button->downtime = 0;
+			button->msec = 0;
+		}
+	}
+}
+
+#ifdef _WIN32
+static int CL_HardwareKeyDown( int keynum ) {
+	if ( keynum >= 'a' && keynum <= 'z' ) {
+		keynum = keynum - 'a' + 'A';
+	}
+	if ( ( keynum >= 'A' && keynum <= 'Z' ) || ( keynum >= '0' && keynum <= '9' ) ) {
+		return ( GetAsyncKeyState( keynum ) & 0x8000 ) != 0;
+	}
+
+	switch ( keynum ) {
+	case A_SPACE:     return ( GetAsyncKeyState( VK_SPACE ) & 0x8000 ) != 0;
+	case A_ENTER:     return ( GetAsyncKeyState( VK_RETURN ) & 0x8000 ) != 0;
+	case A_ESCAPE:    return ( GetAsyncKeyState( VK_ESCAPE ) & 0x8000 ) != 0;
+	case A_TAB:       return ( GetAsyncKeyState( VK_TAB ) & 0x8000 ) != 0;
+	case A_BACKSPACE: return ( GetAsyncKeyState( VK_BACK ) & 0x8000 ) != 0;
+	case A_SHIFT:     return ( GetAsyncKeyState( VK_SHIFT ) & 0x8000 ) != 0;
+	case A_CTRL:      return ( GetAsyncKeyState( VK_CONTROL ) & 0x8000 ) != 0;
+	case A_ALT:       return ( GetAsyncKeyState( VK_MENU ) & 0x8000 ) != 0;
+	case A_CURSOR_UP:   return ( GetAsyncKeyState( VK_UP ) & 0x8000 ) != 0;
+	case A_CURSOR_DOWN: return ( GetAsyncKeyState( VK_DOWN ) & 0x8000 ) != 0;
+	case A_CURSOR_LEFT: return ( GetAsyncKeyState( VK_LEFT ) & 0x8000 ) != 0;
+	case A_CURSOR_RIGHT:return ( GetAsyncKeyState( VK_RIGHT ) & 0x8000 ) != 0;
+	case A_INSERT:      return ( GetAsyncKeyState( VK_INSERT ) & 0x8000 ) != 0;
+	case A_DELETE:      return ( GetAsyncKeyState( VK_DELETE ) & 0x8000 ) != 0;
+	case A_HOME:      return ( GetAsyncKeyState( VK_HOME ) & 0x8000 ) != 0;
+	case A_END:       return ( GetAsyncKeyState( VK_END ) & 0x8000 ) != 0;
+	case A_PAGE_UP:   return ( GetAsyncKeyState( VK_PRIOR ) & 0x8000 ) != 0;
+	case A_PAGE_DOWN: return ( GetAsyncKeyState( VK_NEXT ) & 0x8000 ) != 0;
+	case A_MOUSE1:    return ( GetAsyncKeyState( VK_LBUTTON ) & 0x8000 ) != 0;
+	case A_MOUSE2:    return ( GetAsyncKeyState( VK_RBUTTON ) & 0x8000 ) != 0;
+	case A_MOUSE3:    return ( GetAsyncKeyState( VK_MBUTTON ) & 0x8000 ) != 0;
+	case A_MOUSE4:    return ( GetAsyncKeyState( VK_XBUTTON1 ) & 0x8000 ) != 0;
+	case A_MOUSE5:    return ( GetAsyncKeyState( VK_XBUTTON2 ) & 0x8000 ) != 0;
+	default:
+		return -1;
+	}
+}
+#endif
+
 static void CL_UnstickButtonIfReleased( kbutton_t *button, const char *name ) {
 	qboolean stillHeld = qfalse;
 	const int key0 = button->down[0];
@@ -406,6 +513,39 @@ static void CL_UnstickButtonIfReleased( kbutton_t *button, const char *name ) {
 	if ( key1 > 0 && Key_IsDown( key1 ) ) {
 		stillHeld = qtrue;
 	}
+#ifdef _WIN32
+	// SOF2 SP compatibility: both mouse and keyboard inputs can get latched as
+	// "down" in our internal key state even when the OS reports them released.
+	// If that happens, clear the stale state and allow normal unstick to proceed.
+	if ( stillHeld ) {
+		const int hw0 = CL_HardwareKeyDown( key0 );
+		const int hw1 = CL_HardwareKeyDown( key1 );
+		const qboolean key0Mismatch = (qboolean)( hw0 == 0 && key0 > 0 && Key_IsDown( key0 ) );
+		const qboolean key1Mismatch = (qboolean)( hw1 == 0 && key1 > 0 && Key_IsDown( key1 ) );
+
+		if ( ( hw0 >= 0 || hw1 >= 0 ) && !(( hw0 > 0 ) || ( hw1 > 0 )) ) {
+			if ( key0Mismatch ) {
+				CL_ClearStaleKeyState( key0 );
+			}
+			if ( key1Mismatch ) {
+				CL_ClearStaleKeyState( key1 );
+			}
+			stillHeld = qfalse;
+
+			static int s_mouseMismatchLogCount = 0;
+			if ( clVerboseInputDebug && ( key0Mismatch || key1Mismatch ) && s_mouseMismatchLogCount < 48 ) {
+				Com_Printf(
+					"[CL key] hardware mismatch cleared %s (k0=%d hw0=%d k1=%d hw1=%d)\n",
+					name,
+					key0,
+					hw0,
+					key1,
+					hw1 );
+				++s_mouseMismatchLogCount;
+			}
+		}
+	}
+#endif
 	if ( stillHeld ) {
 		return;
 	}
@@ -418,7 +558,7 @@ static void CL_UnstickButtonIfReleased( kbutton_t *button, const char *name ) {
 	button->msec = 0;
 
 	static int s_unstickLogCount = 0;
-	if ( s_unstickLogCount < 24 ) {
+	if ( clVerboseInputDebug && s_unstickLogCount < 24 ) {
 		Com_Printf( "[CL key] unstick %s (k0=%d k1=%d)\n", name, key0, key1 );
 		++s_unstickLogCount;
 	}
@@ -491,7 +631,7 @@ CL_MouseEvent
 */
 void CL_MouseEvent( int dx, int dy, int time ) {
 	static int s_mouseProbeCount = 0;
-	if ( s_mouseProbeCount < 24 ) {
+	if ( clVerboseInputDebug && s_mouseProbeCount < 24 ) {
 		Com_Printf( "[CL mouse] #%d catcher=%d dx=%d dy=%d time=%d index=%d\n",
 			s_mouseProbeCount + 1,
 			Key_GetCatcher(),
@@ -723,6 +863,10 @@ void CL_FinishMove( usercmd_t *cmd ) {
 	// can be determined without allowing cheating
 	cmd->serverTime = cl.serverTime;
 
+	// Clamp pitch to prevent flipping upside-down (SOF2 retail DLL doesn't clamp for us)
+	if (cl.viewangles[PITCH] > 89.0f)  cl.viewangles[PITCH] = 89.0f;
+	if (cl.viewangles[PITCH] < -89.0f) cl.viewangles[PITCH] = -89.0f;
+
 	for (i=0 ; i<3 ; i++) {
 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
 	}
@@ -759,7 +903,7 @@ usercmd_t CL_CreateCmd( void ) {
 	// get basic movement from joystick
 	CL_JoystickMove( &cmd );
 
-	if ( cls.state == CA_ACTIVE && s_moveProbeCount < 128 &&
+	if ( clVerboseInputDebug && cls.state == CA_ACTIVE && s_moveProbeCount < 128 &&
 		( in_forward.active || in_back.active || in_moveleft.active || in_moveright.active ||
 		  in_left.active || in_right.active || cmd.forwardmove || cmd.rightmove || cmd.upmove ) ) {
 		Com_Printf( "[CL move] #%d active f=%d b=%d ml=%d mr=%d left=%d right=%d cmd=(%d,%d,%d) frame_msec=%u\n",
@@ -792,7 +936,7 @@ usercmd_t CL_CreateCmd( void ) {
 	// store out the final values
 	CL_FinishMove( &cmd );
 
-	if ( cls.state == CA_ACTIVE && s_cmdProbeCount < 160 ) {
+	if ( clVerboseInputDebug && cls.state == CA_ACTIVE && s_cmdProbeCount < 160 ) {
 		Com_Printf( "[CL cmd] #%d catcher=%d svt=%d btn=0x%08X move=(%d,%d,%d) weapon=%d gcmd=%d ang=(%d,%d,%d) view=(%.1f,%.1f,%.1f) mouse=(%d,%d) sens=%.3f\n",
 			s_cmdProbeCount + 1,
 			Key_GetCatcher(),

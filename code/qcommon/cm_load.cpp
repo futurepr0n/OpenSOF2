@@ -782,34 +782,34 @@ static void CM_LoadMap_Actual( const char *name, qboolean clientload, int *check
 
 		cmod_base = (byte *)buf;
 
-		Com_Printf( "[DBG] CM_LoadMap: BSP ident=0x%x version=%d, loading lumps\n", header.ident, header.version );
+		Com_DPrintf( "[DBG] CM_LoadMap: BSP ident=0x%x version=%d, loading lumps\n", header.ident, header.version );
 
 		// load into heap
-		Com_Printf( "[DBG] CMod_LoadShaders\n" );
+		Com_DPrintf( "[DBG] CMod_LoadShaders\n" );
 		CMod_LoadShaders( &header.lumps[LUMP_SHADERS], cm );
-		Com_Printf( "[DBG] CMod_LoadLeafs\n" );
+		Com_DPrintf( "[DBG] CMod_LoadLeafs\n" );
 		CMod_LoadLeafs (&header.lumps[LUMP_LEAFS], cm);
-		Com_Printf( "[DBG] CMod_LoadLeafBrushes\n" );
+		Com_DPrintf( "[DBG] CMod_LoadLeafBrushes\n" );
 		CMod_LoadLeafBrushes (&header.lumps[LUMP_LEAFBRUSHES], cm);
-		Com_Printf( "[DBG] CMod_LoadLeafSurfaces\n" );
+		Com_DPrintf( "[DBG] CMod_LoadLeafSurfaces\n" );
 		CMod_LoadLeafSurfaces (&header.lumps[LUMP_LEAFSURFACES], cm);
-		Com_Printf( "[DBG] CMod_LoadPlanes\n" );
+		Com_DPrintf( "[DBG] CMod_LoadPlanes\n" );
 		CMod_LoadPlanes (&header.lumps[LUMP_PLANES], cm);
-		Com_Printf( "[DBG] CMod_LoadBrushSides\n" );
+		Com_DPrintf( "[DBG] CMod_LoadBrushSides\n" );
 		CMod_LoadBrushSides (&header.lumps[LUMP_BRUSHSIDES], cm);
-		Com_Printf( "[DBG] CMod_LoadBrushes\n" );
+		Com_DPrintf( "[DBG] CMod_LoadBrushes\n" );
 		CMod_LoadBrushes (&header.lumps[LUMP_BRUSHES], cm);
-		Com_Printf( "[DBG] CMod_LoadSubmodels\n" );
+		Com_DPrintf( "[DBG] CMod_LoadSubmodels\n" );
 		CMod_LoadSubmodels (&header.lumps[LUMP_MODELS], cm);
-		Com_Printf( "[DBG] CMod_LoadNodes\n" );
+		Com_DPrintf( "[DBG] CMod_LoadNodes\n" );
 		CMod_LoadNodes (&header.lumps[LUMP_NODES], cm);
-		Com_Printf( "[DBG] CMod_LoadEntityString\n" );
+		Com_DPrintf( "[DBG] CMod_LoadEntityString\n" );
 		CMod_LoadEntityString (&header.lumps[LUMP_ENTITIES], cm, name );
-		Com_Printf( "[DBG] CMod_LoadVisibility\n" );
+		Com_DPrintf( "[DBG] CMod_LoadVisibility\n" );
 		CMod_LoadVisibility( &header.lumps[LUMP_VISIBILITY], cm );
-		Com_Printf( "[DBG] CMod_LoadPatches\n" );
+		Com_DPrintf( "[DBG] CMod_LoadPatches\n" );
 		CMod_LoadPatches( &header.lumps[LUMP_SURFACES], &header.lumps[LUMP_DRAWVERTS], cm );
-		Com_Printf( "[DBG] CM_LoadMap: all lumps loaded, numSubModels=%d\n", cm.numSubModels );
+		Com_DPrintf( "[DBG] CM_LoadMap: all lumps loaded, numSubModels=%d\n", cm.numSubModels );
 
 		TotalSubModels += cm.numSubModels;
 

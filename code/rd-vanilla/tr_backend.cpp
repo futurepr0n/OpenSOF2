@@ -239,6 +239,11 @@ void GL_State( uint32_t stateBits )
 	{
 		GLenum srcFactor, dstFactor;
 
+		// Track whether we're leaving a depth-only (GL_ZERO,GL_ZERO) state so we
+		// can restore the color mask.  glState.glStateBits still holds the OLD state here.
+		const bool wasDepthOnly = ( glState.glStateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) ) ==
+		                          ( GLS_SRCBLEND_ZERO | GLS_DSTBLEND_ZERO );
+
 		if ( stateBits & ( GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS ) )
 		{
 			switch ( stateBits & GLS_SRCBLEND_BITS )
@@ -308,11 +313,24 @@ void GL_State( uint32_t stateBits )
 				break;
 			}
 
-			qglEnable( GL_BLEND );
-			qglBlendFunc( srcFactor, dstFactor );
+			// GL_ZERO,GL_ZERO = depth-only prepass: write depth with alpha-test but
+			// suppress all color writes.  Stages following with depthFunc equal then
+			// modulate the existing framebuffer color (background) by lightmap/texture.
+			if ( srcFactor == GL_ZERO && dstFactor == GL_ZERO )
+			{
+				qglDisable( GL_BLEND );
+				qglColorMask( GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE );
+			}
+			else
+			{
+				if ( wasDepthOnly ) qglColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+				qglEnable( GL_BLEND );
+				qglBlendFunc( srcFactor, dstFactor );
+			}
 		}
 		else
 		{
+			if ( wasDepthOnly ) qglColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
 			qglDisable( GL_BLEND );
 		}
 	}
@@ -1026,45 +1044,8 @@ const void *RB_StretchPic ( const void *data ) {
 	const stretchPicCommand_t	*cmd;
 	shader_t *shader;
 	int		numVerts, numIndexes;
-	static int largeStretchLogCount = 0;
 
 	cmd = (const stretchPicCommand_t *)data;
-
-	if ( ( cmd->w > 900.0f || cmd->h > 500.0f ) && largeStretchLogCount < 64 ) {
-		const char *shaderName = "<null>";
-		FILE *probeFile;
-		if ( cmd->shader && cmd->shader->name[0] ) {
-			shaderName = cmd->shader->name;
-		}
-
-		ri.Printf( PRINT_ALL,
-			"[2D] large StretchPic #%d x=%.1f y=%.1f w=%.1f h=%.1f s1=%.3f t1=%.3f s2=%.3f t2=%.3f shader=%s rgba=(%u,%u,%u,%u)\n",
-			largeStretchLogCount + 1,
-			cmd->x, cmd->y, cmd->w, cmd->h,
-			cmd->s1, cmd->t1, cmd->s2, cmd->t2,
-			shaderName,
-			(unsigned int)backEnd.color2D[0],
-			(unsigned int)backEnd.color2D[1],
-			(unsigned int)backEnd.color2D[2],
-			(unsigned int)backEnd.color2D[3] );
-
-		probeFile = fopen( "stretchpic_probe.log", "a" );
-		if ( probeFile ) {
-			fprintf( probeFile,
-				"[2D] large StretchPic #%d x=%.1f y=%.1f w=%.1f h=%.1f s1=%.3f t1=%.3f s2=%.3f t2=%.3f shader=%s rgba=(%u,%u,%u,%u)\n",
-				largeStretchLogCount + 1,
-				cmd->x, cmd->y, cmd->w, cmd->h,
-				cmd->s1, cmd->t1, cmd->s2, cmd->t2,
-				shaderName,
-				(unsigned int)backEnd.color2D[0],
-				(unsigned int)backEnd.color2D[1],
-				(unsigned int)backEnd.color2D[2],
-				(unsigned int)backEnd.color2D[3] );
-			fclose( probeFile );
-		}
-
-		largeStretchLogCount++;
-	}
 
 	if ( !backEnd.projection2D ) {
 		RB_SetGL2D();

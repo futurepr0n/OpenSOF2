@@ -1,1 +1,5 @@
 M1: before ge->Init
+M2: after ge->Init
+M3: after InitNavigation
+M4: after InitSquads
+M5: after InitWeaponSystem

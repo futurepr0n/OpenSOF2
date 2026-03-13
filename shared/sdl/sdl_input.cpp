@@ -26,6 +26,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "sys/sys_local.h"
 
 static cvar_t *in_keyboardDebug     = NULL;
+static cvar_t *in_forceMovementPoll = NULL;
 
 static SDL_Joystick *stick = NULL;
 
@@ -621,6 +622,7 @@ void IN_Init( void *windowData )
 
 	// joystick variables
 	in_keyboardDebug = Cvar_Get( "in_keyboardDebug", "0", CVAR_ARCHIVE_ND );
+	in_forceMovementPoll = Cvar_Get( "in_forceMovementPoll", "0", CVAR_ARCHIVE_ND );
 
 	in_joystick = Cvar_Get( "in_joystick", "0", CVAR_ARCHIVE_ND|CVAR_LATCH );
 
@@ -959,9 +961,9 @@ static void IN_ProcessEvents( void )
 		}
 	}
 
-	// Movement-key fallback: track physical key transitions for WASD/arrows.
-	// This keeps movement reliable if event delivery becomes inconsistent.
-	{
+	if ( in_forceMovementPoll && in_forceMovementPoll->integer ) {
+		// Optional movement-key fallback for debugging inconsistent SDL delivery.
+		// Disabled by default because it duplicates normal SDL key events.
 		int i;
 		const uint8_t *state = SDL_GetKeyboardState( NULL );
 		if ( !s_polledMovementInit ) {
@@ -976,6 +978,9 @@ static void IN_ProcessEvents( void )
 				s_polledMovementDown[i] = downNow;
 			}
 		}
+	} else {
+		s_polledMovementInit = qfalse;
+		memset( s_polledMovementDown, 0, sizeof( s_polledMovementDown ) );
 	}
 }
 

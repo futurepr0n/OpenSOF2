@@ -350,6 +350,12 @@ static shader_t *ShaderForShaderNum( int shaderNum, const int *lightmapNum, cons
 
 	// if the shader had errors, just use default shader
 	if ( shader->defaultShader ) {
+		static int s_shaderFallbackCount = 0;
+		if ( s_shaderFallbackCount < 64 ) {
+			ri.Printf( PRINT_ALL, "[BSP shader] fallback to default for '%s' (lm=%d) #%d\n",
+				dsh->shader, lightmapNum[0], s_shaderFallbackCount + 1 );
+			++s_shaderFallbackCount;
+		}
 		return tr.defaultShader;
 	}
 
@@ -1458,9 +1464,23 @@ void RE_LoadWorldMap_Actual( const char *name, world_t &worldData, int index ) {
 
 // new wrapper used for convenience to tell z_malloc()-fail recovery code whether it's safe to dump the cached-bsp or not.
 //
+extern color4ub_t styleColors[];
 void RE_LoadWorldMap( const char *name )
 {
 	ri.Printf( PRINT_ALL, "[WORLD] RE_LoadWorldMap( '%s' ) enter\n", name ? name : "(null)" );
+
+	// SOF2 cgame never calls trap_R_SetLightStyle to update the renderer's styleColors array.
+	// Initialize ALL styles to full white so every vertex-lit surface renders at its BSP-baked
+	// brightness regardless of which light style index (0..MAX_LIGHT_STYLES-1) it uses.
+	// Without this, any surface whose baked vertex colors reference a non-zero style renders
+	// completely black (styleColors[k] == 0 → vertex_color * 0 / 256 == 0).
+	for ( int si = 0; si < MAX_LIGHT_STYLES; si++ ) {
+		styleColors[si][0] = 255;
+		styleColors[si][1] = 255;
+		styleColors[si][2] = 255;
+		styleColors[si][3] = 255;
+	}
+
 	*(ri.gbUsingCachedMapDataRightNow()) = qtrue;	// !!!!!!!!!!!!
 
 		RE_LoadWorldMap_Actual( name, s_worldData, 0 );

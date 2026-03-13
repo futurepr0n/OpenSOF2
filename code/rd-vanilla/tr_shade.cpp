@@ -2171,7 +2171,8 @@ void RB_StageIteratorGeneric( void )
 	}
 
 	// Now check for surfacesprites.
-	if (r_surfaceSprites->integer)
+	// Skip during glow pass to prevent double-rendering artifacts.
+	if (r_surfaceSprites->integer && !g_bRenderGlowingObjects)
 	{
 		for ( stage = 1; stage < tess.shader->numUnfoggedPasses; stage++ )
 		{

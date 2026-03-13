@@ -1828,6 +1828,50 @@ void S_StopSounds(void)
 
 /*
 ==================
+S_StopEntityChannel
+Stop the sound playing on a specific entity/channel pair.
+Used to clean up looping footstep sounds when movement stops.
+==================
+*/
+void S_StopEntityChannel( int entityNum, soundChannel_t channel )
+{
+	if ( !s_soundStarted ) {
+		return;
+	}
+
+#ifdef USE_OPENAL
+	if ( s_UseOpenAL )
+	{
+		channel_t *ch = s_channels;
+		for ( int i = 0; i < s_numChannels; i++, ch++ )
+		{
+			if ( ch->entnum == entityNum && ch->entchannel == channel && ch->thesfx )
+			{
+				alSourceStop( ch->alSource );
+				alSourcei( ch->alSource, AL_BUFFER, NULL );
+				ch->thesfx = NULL;
+				ch->bPlaying = false;
+				break;
+			}
+		}
+	}
+	else
+#endif
+	{
+		channel_t *ch = s_channels;
+		for ( int i = 0; i < MAX_CHANNELS; i++, ch++ )
+		{
+			if ( ch->entnum == entityNum && ch->entchannel == channel && ch->thesfx )
+			{
+				ch->thesfx = NULL;
+				break;
+			}
+		}
+	}
+}
+
+/*
+==================
 S_StopAllSounds
  and music
 ==================

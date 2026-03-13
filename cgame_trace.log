@@ -1,0 +1,17 @@
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2181 frameServerTime=2150 newSnapshots=0
+CGameRender #4 state=7 serverTime=2183 frameServerTime=2150 newSnapshots=0
+CGameRender #5 state=7 serverTime=2187 frameServerTime=2150 newSnapshots=0
+CGameRender #6 state=7 serverTime=2195 frameServerTime=2200 newSnapshots=0
+CGameRender #7 state=7 serverTime=2201 frameServerTime=2200 newSnapshots=0
+CGameRender #8 state=7 serverTime=2209 frameServerTime=2200 newSnapshots=0
+CGameRender #9 state=7 serverTime=2217 frameServerTime=2200 newSnapshots=0
+CGameRender #10 state=7 serverTime=2225 frameServerTime=2200 newSnapshots=0
+CGameRender #11 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
+CGameRender #12 state=7 serverTime=2241 frameServerTime=2200 newSnapshots=0

@@ -22,6 +22,10 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "../server/exe_headers.h"
+#if defined( _WIN32 )
+#include <windows.h>
+#endif
+#include <stdint.h>
 
 #include "server.h"
 /*
@@ -50,6 +54,86 @@ cvar_t	*sv_mapChecksum;
 cvar_t	*sv_serverid;
 cvar_t	*sv_testsave;			// Run the savegame enumeration every game frame
 cvar_t	*sv_compress_saved_games;	// compress the saved games on the way out (only affect saver, loader can read both)
+
+static int SV_RunFrameExceptionFilter( EXCEPTION_POINTERS *ep, int svTime ) {
+	static int s_runFrameCrashDetailCount = 0;
+	if ( ep && ep->ContextRecord && s_runFrameCrashDetailCount < 24 ) {
+		CONTEXT *ctx = ep->ContextRecord;
+		unsigned long code = ep->ExceptionRecord ? (unsigned long)ep->ExceptionRecord->ExceptionCode : 0UL;
+		void *addr = ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL;
+		unsigned long stack0 = 0UL;
+		unsigned long stack1 = 0UL;
+		unsigned long stack2 = 0UL;
+		unsigned long stack3 = 0UL;
+		HMODULE gameMod = GetModuleHandleA( "gamex86" );
+		unsigned long gameBase = (unsigned long)(uintptr_t)gameMod;
+		__try {
+			if ( ctx->Esp ) {
+				unsigned long *sp = (unsigned long *)ctx->Esp;
+				stack0 = sp[0];
+				stack1 = sp[1];
+				stack2 = sp[2];
+				stack3 = sp[3];
+			}
+		} __except( EXCEPTION_EXECUTE_HANDLER ) {
+			stack0 = stack1 = stack2 = stack3 = 0UL;
+		}
+		Com_Printf(
+			"^1SV_Frame: EXCEPTION in ge->RunFrame(time=%d) code=0x%08lX addr=%p EIP=%08lX EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX\n",
+			svTime,
+			code,
+			addr,
+			ctx->Eip,
+			ctx->Eax,
+			ctx->Ebx,
+			ctx->Ecx,
+			ctx->Edx,
+			ctx->Esi,
+			ctx->Edi,
+			ctx->Ebp,
+			ctx->Esp );
+		Com_Printf(
+			"^1SV_Frame:   stack0=%08lX stack1=%08lX stack2=%08lX stack3=%08lX\n",
+			stack0, stack1, stack2, stack3 );
+		if ( ctx->Eip == 0 && stack0 ) {
+			if ( gameBase && stack0 >= gameBase ) {
+				Com_Printf(
+					"^1SV_Frame:   probable caller=%08lX (gamex86+0x%08lX)\n",
+					stack0,
+					stack0 - gameBase );
+			} else {
+				Com_Printf(
+					"^1SV_Frame:   probable caller=%08lX\n",
+					stack0 );
+			}
+		}
+		if ( ctx->Ecx ) {
+			unsigned long ecx0 = 0UL, ecx4 = 0UL, ecx8 = 0UL, ecxC = 0UL;
+			__try {
+				unsigned long *p = (unsigned long *)ctx->Ecx;
+				ecx0 = p[0];
+				ecx4 = p[1];
+				ecx8 = p[2];
+				ecxC = p[3];
+			} __except( EXCEPTION_EXECUTE_HANDLER ) {
+				ecx0 = ecx4 = ecx8 = ecxC = 0UL;
+			}
+			Com_Printf(
+				"^1SV_Frame:   [ECX]=%08lX %08lX %08lX %08lX\n",
+				ecx0, ecx4, ecx8, ecxC );
+		}
+		if ( ep->ExceptionRecord &&
+			 ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+			 ep->ExceptionRecord->NumberParameters >= 2 ) {
+			Com_Printf(
+				"^1SV_Frame:   AV %s addr=%08lX\n",
+				ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
+				(unsigned long)ep->ExceptionRecord->ExceptionInformation[1] );
+		}
+		++s_runFrameCrashDetailCount;
+	}
+	return EXCEPTION_EXECUTE_HANDLER;
+}
 
 /*
 =============================================================================
@@ -539,7 +623,7 @@ void SV_Frame( int msec,float fractionMsec ) {
 		// let everything in the world think and move
 		__try {
 			ge->RunFrame( sv.time );
-		} __except( 1 ) {
+		} __except( SV_RunFrameExceptionFilter( GetExceptionInformation(), sv.time ) ) {
 			static int runFrameCrashCount = 0;
 			if ( runFrameCrashCount < 5 ) {
 				Com_Printf( "^1SV_Frame: EXCEPTION in ge->RunFrame(time=%d), skipping\n", sv.time );

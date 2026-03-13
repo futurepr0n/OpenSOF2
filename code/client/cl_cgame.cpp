@@ -49,6 +49,7 @@ vm_t	cgvm;
 static cgame_export_t *cge          = NULL;
 static void           *cgameLibrary = NULL;
 static void CG_FileTrace( const char *fmt, ... );
+extern uiExport_t     *uie;
 
 // Forward declarations needed by wrapper helpers / import table below
 extern qboolean CL_GetDefaultState( int index, entityState_t *state );
@@ -132,12 +133,36 @@ static void Cmd_ArgsBuffer_SOF2( int /*start*/, char *buf, int bufsize ) {
 // slot 77: S_AddLoopingSound — SOF2 passes 4 args; OpenJK has 5th soundChannel_t
 static void S_AddLoopingSound_SOF2( int entityNum, const vec3_t origin, const vec3_t velocity,
 		sfxHandle_t sfx ) {
+	static int s_loopSoundLogCount = 0;
+	if ( s_loopSoundLogCount < 32 ) {
+		Com_Printf( "[SND loop] S_AddLoopingSound ent=%d sfx=%d origin=(%.1f,%.1f,%.1f)\n",
+			entityNum, sfx,
+			origin ? origin[0] : 0.0f,
+			origin ? origin[1] : 0.0f,
+			origin ? origin[2] : 0.0f );
+		++s_loopSoundLogCount;
+	}
 	S_AddLoopingSound( entityNum, origin, velocity, sfx );
 }
 
 // slot 80: S_RegisterSound — SOF2 passes (name, compressed, streamed); OpenJK takes (name) only
-static sfxHandle_t S_RegisterSound_SOF2( const char *name, int /*compressed*/, int /*streamed*/ ) {
+static sfxHandle_t S_RegisterSoundSafe_SOF2( const char *name, const char *source ) {
+	static int s_emptySoundDrops = 0;
+
+	if ( !name || !name[0] ) {
+		if ( s_emptySoundDrops < 16 ) {
+			Com_Printf( "[SOF2 fix] dropped empty sound registration via %s (#%d)\n",
+				source ? source : "unknown", s_emptySoundDrops + 1 );
+		}
+		++s_emptySoundDrops;
+		return 0;
+	}
+
 	return S_RegisterSound( name );
+}
+
+static sfxHandle_t S_RegisterSound_SOF2( const char *name, int /*compressed*/, int /*streamed*/ ) {
+	return S_RegisterSoundSafe_SOF2( name, "import" );
 }
 
 // slot 83: S_StartBackgroundTrack — SOF2 passes fadeupTime (int); OpenJK takes qboolean
@@ -207,6 +232,10 @@ static int         s_sof2CgCvarCount = 0;
 static int         s_cgRenderSerial = 0;
 static int         s_cgCvarUpdatesThisRender = 0;
 static int         s_cgRenderDepth = 0;
+static refEntity_t s_cgFrameRefEntities[MAX_REFENTITIES];
+static int         s_cgFrameRefEntityCount = 0;
+static refEntity_t s_cgLastRefEntities[MAX_REFENTITIES];
+static int         s_cgLastRefEntityCount = 0;
 
 // Flicker fix: track whether DrawInformation submitted a scene this frame.
 // If it crashes before calling R_RenderScene, we submit a fallback scene
@@ -297,14 +326,7 @@ static void CG_Cvar_SetValue_SOF2( const char *name, float value ) {
 }
 
 static void CG_Cvar_Update_SOF2( vmCvar_t *vmCvar ) {
-	static int cgCvarUpdateCount = 0;
-	static qboolean loggedCaller = qfalse;
-	const int callIndex = ++cgCvarUpdateCount;
-	void *caller = _ReturnAddress();
-
 	if ( !vmCvar ) {
-		Com_Printf( "^1[CG CVAR] Update #%d with NULL vmCvar caller=%p draw=%d\n",
-			callIndex, caller, s_cgRenderSerial );
 		return;
 	}
 
@@ -312,28 +334,11 @@ static void CG_Cvar_Update_SOF2( vmCvar_t *vmCvar ) {
 
 #ifdef _WIN32
 	__try {
-		if ( !loggedCaller ) {
-			Com_Printf( "[CG CVAR] first caller=%p vmCvar=%p draw=%d\n",
-				caller, vmCvar, s_cgRenderSerial );
-			loggedCaller = qtrue;
-		}
-
-		if ( callIndex <= 32 || ( callIndex % 1024 ) == 0 ) {
-			Com_Printf( "[CG CVAR] Update #%d vmCvar=%p handle=%d mod=%d draw=%d drawCount=%d caller=%p\n",
-				callIndex,
-				vmCvar,
-				vmCvar->handle,
-				vmCvar->modificationCount,
-				s_cgRenderSerial,
-				s_cgCvarUpdatesThisRender,
-				caller );
-		}
-
 		Cvar_Update( vmCvar );
 	}
 	__except ( EXCEPTION_EXECUTE_HANDLER ) {
-		Com_Printf( "^1[CG CVAR] exception 0x%08x in Cvar_Update(vmCvar=%p caller=%p draw=%d drawCount=%d)\n",
-			GetExceptionCode(), vmCvar, caller, s_cgRenderSerial, s_cgCvarUpdatesThisRender );
+		Com_DPrintf( "^1[CG CVAR] exception 0x%08x in Cvar_Update(vmCvar=%p)\n",
+			GetExceptionCode(), vmCvar );
 	}
 #else
 	Cvar_Update( vmCvar );
@@ -556,6 +561,7 @@ static void CG_R_ClearScene_Wrapper( void ) {
 			clearSceneLogCount + 1, s_cgRenderDepth, (int)cls.state, s_cgRenderSerial );
 		clearSceneLogCount++;
 	}
+	s_cgFrameRefEntityCount = 0;
 	s_renderSceneSubmitted = qfalse;  // scene cleared — will need a new RenderScene call
 	re.ClearScene();
 }
@@ -640,19 +646,83 @@ static void CG_R_SetColor_SOF2( const void *colorOrPacked ) {
 	re.SetColor( (const float *)colorOrPacked );
 }
 
+static qboolean CG_SOF2_RefEntitySeemsValid( const unsigned char *raw ) {
+	if ( !raw ) return qfalse;
+	const int sof2hModel = *(const int *)( raw + 0x08 );
+	const float *sof2Origin = (const float *)( raw + 0x34 );
+	return ( sof2hModel > 0 &&
+		sof2hModel < 32768 &&
+		( fabsf( sof2Origin[0] ) > 0.01f ||
+		  fabsf( sof2Origin[1] ) > 0.01f ||
+		  fabsf( sof2Origin[2] ) > 0.01f ) ) ? qtrue : qfalse;
+}
+
+static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out ) {
+	const int sof2ReType = *(const int *)( raw + 0x00 );
+	const int sof2Renderfx = *(const int *)( raw + 0x04 );
+	const float *sof2Axis = (const float *)( raw + 0x0C );
+	const float *sof2Origin = (const float *)( raw + 0x34 );
+	const int sof2hModel = *(const int *)( raw + 0x08 );
+
+	memset( out, 0, sizeof( *out ) );
+	out->reType = (refEntityType_t)sof2ReType;
+	out->renderfx = sof2Renderfx;
+	out->hModel = (qhandle_t)sof2hModel;
+	VectorCopy( sof2Origin, out->origin );
+	VectorCopy( sof2Origin, out->oldorigin );
+	VectorCopy( sof2Origin, out->lightingOrigin );
+	VectorCopy( sof2Axis + 0, out->axis[0] );
+	VectorCopy( sof2Axis + 3, out->axis[1] );
+	VectorCopy( sof2Axis + 6, out->axis[2] );
+	out->shaderRGBA[0] = out->shaderRGBA[1] = out->shaderRGBA[2] = out->shaderRGBA[3] = 255;
+	out->modelScale[0] = out->modelScale[1] = out->modelScale[2] = 1.0f;
+}
+
 static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	static int addRefEntityLogCount = 0;
-	if ( addRefEntityLogCount < 12 && ent ) {
-		Com_Printf( "[CG scene] AddRefEntity #%d type=%d origin=(%.1f,%.1f,%.1f) hModel=%d customSkin=%d renderfx=0x%x\n",
+	const refEntity_t *submitEnt = ent;
+	refEntity_t converted;
+	if ( !ent ) {
+		return;
+	}
+
+	const unsigned char *raw = (const unsigned char *)ent;
+	const int sof2hModel = *(const int *)( raw + 0x08 );
+	const float *sof2Origin = (const float *)( raw + 0x34 );
+	const qboolean openjkLooksDegenerate = (
+		fabsf( ent->origin[0] ) < 0.01f &&
+		fabsf( ent->origin[1] ) < 0.01f &&
+		fabsf( ent->origin[2] ) < 0.01f &&
+		( (int)ent->customSkin == 0x3F800000 || (int)ent->customSkin == 0 || (int)ent->hModel == 121 ) )
+		? qtrue : qfalse;
+	const qboolean useSOF2Layout = ( openjkLooksDegenerate && CG_SOF2_RefEntitySeemsValid( raw ) ) ? qtrue : qfalse;
+
+	if ( addRefEntityLogCount < 16 ) {
+		Com_Printf(
+			"[CG scene] AddRefEntity #%d mode=%s openjk{type=%d org=(%.1f,%.1f,%.1f) hModel=%d skin=%d fx=0x%x} sof2{org=(%.1f,%.1f,%.1f) hModel=%d fx=0x%x}\n",
 			addRefEntityLogCount + 1,
+			useSOF2Layout ? "sof2" : "openjk",
 			(int)ent->reType,
 			ent->origin[0], ent->origin[1], ent->origin[2],
 			(int)ent->hModel,
 			(int)ent->customSkin,
-			(unsigned int)ent->renderfx );
+			(unsigned int)ent->renderfx,
+			sof2Origin[0], sof2Origin[1], sof2Origin[2],
+			sof2hModel,
+			*(const int *)( raw + 0x04 ) );
 		addRefEntityLogCount++;
 	}
-	re.AddRefEntityToScene( ent );
+
+	if ( useSOF2Layout ) {
+		CG_ConvertSOF2RefEntity( raw, &converted );
+		submitEnt = &converted;
+	}
+
+	if ( s_cgFrameRefEntityCount < MAX_REFENTITIES ) {
+		s_cgFrameRefEntities[s_cgFrameRefEntityCount++] = *submitEnt;
+	}
+
+	re.AddRefEntityToScene( submitEnt );
 }
 
 static void CG_R_AddLightToScene_Wrapper( const vec3_t org, float intensity,
@@ -683,114 +753,79 @@ typedef struct {
 } sof2_refdef_t;
 
 static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
-	static int renderLogCount = 0;
-	static int forceViewLogCount = 0;
-	static int forceOriginLogCount = 0;
-	static int clientOriginLogCount = 0;
-	vec3_t forcedWorldAngles;
+	int replayedRefEntities = 0;
 
 	if ( !localRefdef ) {
 		CG_FileTrace( "CG_SubmitSOF2Refdef null refdef" );
 		return;
 	}
 
-	// Temporary SOF2 compatibility path:
-	// the active render camera is still decoupled from the client view.
-	// Force the submitted origin/axis from playerstate, but use the same
-	// world-space angle basis as movement:
-	//   worldAngle = SHORT2ANGLE( ANGLE2SHORT( cl.viewangles ) + delta_angles )
-	// Using raw cl.viewangles here was wrong because those are relative input
-	// angles during direct +map startup, while movement uses delta-adjusted
-	// world angles. That mismatch is exactly why W/A/S/D looked locked to the
-	// spawn orientation instead of the visible camera.
-	if ( cls.state == CA_ACTIVE && !( Key_GetCatcher() & KEYCATCH_UI ) ) {
-		const int forcedViewHeight = ( cl.frame.ps.viewheight > 0 ) ? cl.frame.ps.viewheight : 38;
-		for ( int i = 0; i < 3; ++i ) {
-			forcedWorldAngles[i] = SHORT2ANGLE(
-				(short)( ANGLE2SHORT( cl.viewangles[i] ) + cl.frame.ps.delta_angles[i] ) );
-		}
-		if ( clientOriginLogCount < 24 ) {
+	// In active play SOF2 can issue multiple RenderScene calls in one draw pass.
+	// Keep only the first submit in-frame to prevent camera ping-pong.
+	if ( s_renderSceneSubmitted && s_cgRenderDepth > 0 && cls.state == CA_ACTIVE ) {
+		static int duplicateSubmitLogCount = 0;
+		if ( duplicateSubmitLogCount < 8 ) {
 			Com_Printf(
-				"[CL ps] #%d origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) pm_type=%d ground=%d viewheight=%d generic1=%d delta=(%d,%d,%d) psva=(%.1f,%.1f,%.1f)\n",
-				clientOriginLogCount + 1,
-				cl.frame.ps.origin[0],
-				cl.frame.ps.origin[1],
-				cl.frame.ps.origin[2],
-				cl.frame.ps.velocity[0],
-				cl.frame.ps.velocity[1],
-				cl.frame.ps.velocity[2],
-				cl.frame.ps.pm_type,
-				cl.frame.ps.groundEntityNum,
-				cl.frame.ps.viewheight,
-				cl.frame.ps.generic1,
-				cl.frame.ps.delta_angles[0],
-				cl.frame.ps.delta_angles[1],
-				cl.frame.ps.delta_angles[2],
-				cl.frame.ps.viewangles[0],
-				cl.frame.ps.viewangles[1],
-				cl.frame.ps.viewangles[2] );
-			++clientOriginLogCount;
+				"[SOF2 RS] dropped duplicate scene submit in render frame serial=%d time=%d rdflags=0x%x\n",
+				s_cgRenderSerial,
+				localRefdef->time,
+				localRefdef->rdflags );
+			duplicateSubmitLogCount++;
+		}
+		return;
+	}
+
+	// Force camera from player state while active so render follows movement state
+	// even when retail draw paths flip between alternate view controllers.
+	if ( cls.state == CA_ACTIVE ) {
+		const int forcedViewHeight = ( cl.frame.ps.viewheight > 0 ) ? cl.frame.ps.viewheight : 38;
+		vec3_t forcedAngles;
+		for ( int i = 0; i < 3; ++i ) {
+			forcedAngles[i] = SHORT2ANGLE(
+				(short)( ANGLE2SHORT( cl.viewangles[i] ) + cl.frame.ps.delta_angles[i] ) );
 		}
 		VectorCopy( cl.frame.ps.origin, localRefdef->vieworg );
 		localRefdef->vieworg[2] += forcedViewHeight;
-		AnglesToAxis( forcedWorldAngles, localRefdef->viewaxis );
-		if ( forceOriginLogCount < 12 ) {
-			Com_Printf( "[SOF2 RS] forcing vieworg from ps.origin=(%.1f,%.1f,%.1f) vh=%d (raw=%d)\n",
-				cl.frame.ps.origin[0],
-				cl.frame.ps.origin[1],
-				cl.frame.ps.origin[2],
-				forcedViewHeight,
-				cl.frame.ps.viewheight );
-			++forceOriginLogCount;
+		AnglesToAxis( forcedAngles, localRefdef->viewaxis );
+		// 0xFF = all area bits set = all areas connected to viewer = everything visible.
+		// 0x00 would cull all areas → no BSP geometry renders (walls disappear).
+		memset( localRefdef->areamask, 0xFF, sizeof( localRefdef->areamask ) );
+	}
+
+	if ( cls.state == CA_ACTIVE &&
+		!( localRefdef->rdflags & RDF_NOWORLDMODEL ) &&
+		s_cgFrameRefEntityCount == 0 &&
+		s_cgLastRefEntityCount > 0 ) {
+		static int replayLogCount = 0;
+		for ( int i = 0; i < s_cgLastRefEntityCount; ++i ) {
+			re.AddRefEntityToScene( &s_cgLastRefEntities[i] );
 		}
-		if ( forceViewLogCount < 12 ) {
+		replayedRefEntities = s_cgLastRefEntityCount;
+		if ( replayLogCount < 16 ) {
 			Com_Printf(
-				"[SOF2 RS] forcing viewaxis world=(%.1f,%.1f,%.1f) from cl=(%.1f,%.1f,%.1f) delta=(%d,%d,%d)\n",
-				forcedWorldAngles[0], forcedWorldAngles[1], forcedWorldAngles[2],
-				cl.viewangles[0], cl.viewangles[1], cl.viewangles[2],
-				cl.frame.ps.delta_angles[0], cl.frame.ps.delta_angles[1], cl.frame.ps.delta_angles[2] );
-			++forceViewLogCount;
+				"[SOF2 RS] replayed %d cached ref entities for empty scene serial=%d time=%d rdflags=0x%x\n",
+				replayedRefEntities,
+				s_cgRenderSerial,
+				localRefdef->time,
+				localRefdef->rdflags );
+			++replayLogCount;
 		}
 	}
 
-	if ( renderLogCount < 6 ) {
-		CG_FileTrace( "RS #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x",
-			renderLogCount + 1,
-			localRefdef->x,
-			localRefdef->y,
-			localRefdef->width,
-			localRefdef->height,
-			localRefdef->fov_x,
-			localRefdef->fov_y,
-			localRefdef->vieworg[0],
-			localRefdef->vieworg[1],
-			localRefdef->vieworg[2],
-			localRefdef->viewContents,
-			localRefdef->time,
-			localRefdef->rdflags );
-		Com_Printf(
-			"[SOF2 RS] #%d x=%d y=%d w=%d h=%d fov=(%.1f,%.1f) vieworg=(%.1f,%.1f,%.1f) contents=0x%x time=%d rdflags=0x%x\n",
-			renderLogCount + 1,
-			localRefdef->x,
-			localRefdef->y,
-			localRefdef->width,
-			localRefdef->height,
-			localRefdef->fov_x,
-			localRefdef->fov_y,
-			localRefdef->vieworg[0],
-			localRefdef->vieworg[1],
-			localRefdef->vieworg[2],
-			localRefdef->viewContents,
-			localRefdef->time,
-			localRefdef->rdflags );
-			renderLogCount++;
-	}
 	__try {
 		re.RenderScene( localRefdef );
 		// Scene was successfully submitted — save it as the fallback.
 		s_renderSceneSubmitted = qtrue;
 		s_lastGoodRefdef = *localRefdef;
 		s_lastGoodRefdefValid = qtrue;
+		if ( s_cgFrameRefEntityCount > 0 ) {
+			s_cgLastRefEntityCount = s_cgFrameRefEntityCount;
+			memcpy( s_cgLastRefEntities, s_cgFrameRefEntities,
+				sizeof( refEntity_t ) * s_cgFrameRefEntityCount );
+		}
+		else if ( replayedRefEntities > 0 ) {
+			s_cgLastRefEntityCount = replayedRefEntities;
+		}
 	} __except ( EXCEPTION_EXECUTE_HANDLER ) {
 		Com_Printf( "^1[SOF2 RS] exception 0x%08X in re.RenderScene\n", GetExceptionCode() );
 		CG_FileTrace( "RS exception 0x%08X", GetExceptionCode() );
@@ -843,7 +878,7 @@ static void CG_R_RenderScene_SOF2Main( int viewEntityNum, const vec3_t vieworg,
 	const float *sof2FovY = cgameBase ? (const float *)( cgameBase + 0x1D51B4 ) : NULL;
 	const int *sof2Time = cgameBase ? (const int *)( cgameBase + 0x1D51E8 ) : NULL;
 	const byte *sof2Areamask = cgameBase ? (const byte *)( cgameBase + 0x1D51F0 ) : NULL;
-	static int mainRenderLogCount = 0;
+	(void)viewEntityNum;
 
 	memset( &localRefdef, 0, sizeof( localRefdef ) );
 	localRefdef.x = 0;
@@ -866,23 +901,6 @@ static void CG_R_RenderScene_SOF2Main( int viewEntityNum, const vec3_t vieworg,
 	}
 	if ( sof2Areamask ) {
 		memcpy( localRefdef.areamask, sof2Areamask, sizeof( localRefdef.areamask ) );
-	}
-
-	if ( mainRenderLogCount < 12 ) {
-		Com_Printf(
-			"[SOF2 RS81] #%d viewEnt=%d contents=0x%x fov=(%.1f,%.1f) raworg=(%.1f,%.1f,%.1f) rawAxis0=(%.2f,%.2f,%.2f)\n",
-			mainRenderLogCount + 1,
-			viewEntityNum,
-			viewContents,
-			localRefdef.fov_x,
-			localRefdef.fov_y,
-			localRefdef.vieworg[0],
-			localRefdef.vieworg[1],
-			localRefdef.vieworg[2],
-			localRefdef.viewaxis[0][0],
-			localRefdef.viewaxis[0][1],
-			localRefdef.viewaxis[0][2] );
-		++mainRenderLogCount;
 	}
 
 	CG_SubmitSOF2Refdef( &localRefdef );
@@ -956,15 +974,13 @@ static void CG_R_SetLightStyle( int index, float r, float g, float b ) {
 // ----- Slot 59: UI_LoadMenuData(menuData, category) -----
 // SOF2 cgame loads inventory menu data by category ("default", "weapons", "cinematic").
 // Called from CG_LoadInventoryMenus, CG_ServerCommand, CG_CamEnable.
-// We stub this — UI menus are not functional yet.
 static void CG_UI_LoadMenuData( const char *menuData, const char *category ) {
-	static int logCount = 0;
-	if ( logCount < 12 ) {
-		Com_Printf( "[CG init] UI_LoadMenuData #%d data='%.32s' cat='%s' (stub)\n",
-			logCount + 1,
-			menuData ? menuData : "(null)",
-			category ? category : "(null)" );
-		++logCount;
+	const char *value = menuData ? menuData : "";
+	const char *element = category ? category : "";
+
+	if ( uie && uie->UI_SetHudString && category && category[0] ) {
+		uie->UI_SetHudString( (char *)element, (char *)value );
+		return;
 	}
 }
 
@@ -972,11 +988,6 @@ static void CG_UI_LoadMenuData( const char *menuData, const char *category ) {
 // Resets UI menu system state before reloading menu definitions.
 // Called from CG_LoadInventoryMenus as first step.
 static void CG_UI_MenuReset( void ) {
-	static int logCount = 0;
-	if ( logCount < 8 ) {
-		Com_Printf( "[CG init] UI_MenuReset #%d (stub)\n", logCount + 1 );
-		++logCount;
-	}
 }
 
 // ----- Slot 62: UI_SetInfoScreenText(text) -----
@@ -986,21 +997,120 @@ static void CG_UI_SetInfoScreenText( const char * /*text*/ ) {
 	// no-op — loading screen text widget not implemented
 }
 
-// ----- Slots 105-108: GenericParser2 API stubs -----
-// SOF2's cgame uses GP2 for weapon definitions and HUD widget config.
-// These are handle-based wrappers around CGenericParser2.
-// Currently stubbed — GP2 features (weapon configs, HUD widgets) won't parse,
-// but the game continues running. Called only during init.
-static void CG_GP_GetBaseParseGroup( int /*handle*/ ) {
-	// no-op — returns nothing (void), DLL reads from its own state
+// ----- Slots 105-108: unresolved retail helpers -----
+// Current retail cgame disassembly (base 0x30000000) shows:
+//   [106] no-arg call, result stored at object+0x548
+//   [105] 1-arg cdecl helper called alongside [106]
+//   object+0x548 is then used as a virtual interface:
+//      vtbl+0x01C, 0x03C, 0x050, 0x100, 0x10C, 0x128, 0x14C, 0x150, 0x15C
+//
+// Returning NULL from [106] suppresses those call paths entirely, which lines up
+// with the missing HUD/weapon/query behavior seen in-game.
+//
+// We provide a conservative "null object" interface here: non-null pointer plus
+// ABI-correct virtual stubs that return neutral values without corrupting stack.
+// This keeps retail cgame control flow alive while we continue mapping semantics.
+struct CG_SOF2_Import106Iface {
+	void **vftable;
+	int lastHandle;
+	int reserved0;
+	int reserved1;
+};
+
+static int __stdcall CG_SOF2_Import106_VCall_Arg1_Ret0( int /*a0*/ ) {
+	return 0;
 }
 
-static int CG_GP_GetSubGroups( void ) {
-	return 0; // no sub-groups available
+static int __stdcall CG_SOF2_Import106_VCall_Arg2_Ret0( int /*a0*/, int /*a1*/ ) {
+	return 0;
 }
 
-static void CG_GP_GetNext( void * /*dest*/ ) {
-	// no-op — destination state left as-is
+static int __stdcall CG_SOF2_Import106_VCall_Arg4_Ret0( int /*a0*/, int /*a1*/, int /*a2*/, int /*a3*/ ) {
+	return 0;
+}
+
+static float __stdcall CG_SOF2_Import106_VCall_Arg5_Ret0f( int /*a0*/, int /*a1*/, int /*a2*/, int /*a3*/, int /*a4*/ ) {
+	return 0.0f;
+}
+
+static void __stdcall CG_SOF2_Import106_VCall_NoArgs( void ) {
+}
+
+static int __cdecl CG_SOF2_Import106_VCall_Arg1_Cdecl_Ret0( int /*a0*/ ) {
+	return 0;
+}
+
+static void *s_sof2Import106Vftable[96];
+static CG_SOF2_Import106Iface s_sof2Import106Iface;
+static qboolean s_sof2Import106Init = qfalse;
+
+static void CG_SOF2_InitImport106Iface( void ) {
+	if ( s_sof2Import106Init ) {
+		return;
+	}
+
+	for ( int i = 0; i < (int)ARRAY_LEN( s_sof2Import106Vftable ); ++i ) {
+		s_sof2Import106Vftable[i] = (void *)CG_SOF2_Import106_VCall_NoArgs;
+	}
+
+	// Explicit virtuals confirmed by retail wrappers around object+0x548.
+	s_sof2Import106Vftable[0x01C / 4] = (void *)CG_SOF2_Import106_VCall_Arg1_Ret0;
+	s_sof2Import106Vftable[0x03C / 4] = (void *)CG_SOF2_Import106_VCall_Arg2_Ret0;
+	s_sof2Import106Vftable[0x050 / 4] = (void *)CG_SOF2_Import106_VCall_Arg1_Cdecl_Ret0;
+	s_sof2Import106Vftable[0x100 / 4] = (void *)CG_SOF2_Import106_VCall_Arg2_Ret0;
+	s_sof2Import106Vftable[0x10C / 4] = (void *)CG_SOF2_Import106_VCall_Arg1_Ret0;
+	s_sof2Import106Vftable[0x128 / 4] = (void *)CG_SOF2_Import106_VCall_Arg4_Ret0;
+	s_sof2Import106Vftable[0x14C / 4] = (void *)CG_SOF2_Import106_VCall_Arg5_Ret0f;
+	s_sof2Import106Vftable[0x150 / 4] = (void *)CG_SOF2_Import106_VCall_NoArgs;
+	s_sof2Import106Vftable[0x15C / 4] = (void *)CG_SOF2_Import106_VCall_Arg1_Ret0;
+
+	s_sof2Import106Iface.vftable = s_sof2Import106Vftable;
+	s_sof2Import106Iface.lastHandle = 0;
+	s_sof2Import106Iface.reserved0 = 0;
+	s_sof2Import106Iface.reserved1 = 0;
+	s_sof2Import106Init = qtrue;
+}
+
+static int CG_SOF2_Import105_Bridge( int handle ) {
+	CG_SOF2_InitImport106Iface();
+	s_sof2Import106Iface.lastHandle = handle;
+	{
+		static int logCount = 0;
+		if ( logCount < 8 ) {
+			Com_Printf( "[SOF2 import105 bridge] caller=%p handle=%d\n", _ReturnAddress(), handle );
+			++logCount;
+		}
+	}
+	return 1;
+}
+
+static void *CG_SOF2_Import106_Bridge( void ) {
+	CG_SOF2_InitImport106Iface();
+	{
+		static int logCount = 0;
+		if ( logCount < 8 ) {
+			Com_Printf( "[SOF2 import106 bridge] caller=%p iface=%p\n",
+				_ReturnAddress(), &s_sof2Import106Iface );
+			++logCount;
+		}
+	}
+	return &s_sof2Import106Iface;
+}
+
+static void CG_SOF2_Import107_Trace( void *ptr ) {
+	static int logCount = 0;
+	if ( logCount < 12 ) {
+		Com_Printf( "[SOF2 import107] caller=%p ptr=%p\n", _ReturnAddress(), ptr );
+		++logCount;
+	}
+}
+
+static void CG_SOF2_Import108_Trace( void *ptr ) {
+	static int logCount = 0;
+	if ( logCount < 24 ) {
+		Com_Printf( "[SOF2 import108] caller=%p ptr=%p\n", _ReturnAddress(), ptr );
+		++logCount;
+	}
 }
 
 // ----- Slot 148: RE_DamageSurface -----
@@ -1050,7 +1160,7 @@ static entityState_t *CG_GetNextReliableEvent( int index ) {
 	static int logCount = 0;
 
 	if ( logCount < 8 ) {
-		Com_Printf( "[CG] reliable event iterator stubbed: index=%d caller=%p\n",
+		Com_DPrintf( "[CG] reliable event iterator stubbed: index=%d caller=%p\n",
 			index, _ReturnAddress() );
 		logCount++;
 	}
@@ -1062,18 +1172,29 @@ static void CG_FlushReliableEvents( void ) {
 	static qboolean logged = qfalse;
 
 	if ( !logged ) {
-		Com_Printf( "[CG] reliable event flush stubbed caller=%p\n", _ReturnAddress() );
+		Com_DPrintf( "[CG] reliable event flush stubbed caller=%p\n", _ReturnAddress() );
 		logged = qtrue;
 	}
 }
 
-static void CG_Slot58_NoOp( const void *arg ) {
+static void CG_UI_HudRefresh( void ) {
 	static qboolean logged = qfalse;
 
+	if ( uie && uie->UI_Refresh ) {
+		if ( !logged ) {
+			Com_Printf( "[CG] slot 58 -> UI_Refresh\n" );
+			logged = qtrue;
+		}
+		uie->UI_Refresh();
+		return;
+	}
+
 	if ( !logged ) {
-		Com_Printf( "[CG] slot 58 stubbed arg=%p caller=%p\n", arg, _ReturnAddress() );
+		Com_Printf( "[CG] slot 58 fallback -> Menu_PaintAll\n" );
 		logged = qtrue;
 	}
+
+	Menu_PaintAll();
 }
 
 // ----- Slot 53: R_SetupFrustum -----
@@ -1205,9 +1326,25 @@ static void Sprintf_void( char *buf, int size, const char *fmt, ... ) {
 // slot 34: Z_Free — Z_Free returns int; SOF2 slot expects void
 static void Z_Free_void_stub( void *p ) { Z_Free( p ); }
 
+// Footstep channel tracking for ch=6 (CHAN_ITEM) and ch=7 (CHAN_BODY).
+// SOF2 PM_FootstepEvents fires at natural walking cadence (~2/sec). We pass every
+// event through immediately (no rate limiting) and auto-stop the channel 800ms after
+// the last event, which handles the case where the sound is a looping WAV that
+// doesn't stop when the player halts.
+// 800ms > walking cadence (~500ms/step) so the timer only fires when truly stopped.
+#define FOOTSTEP_STOP_MS  800   // stop channel this many ms after last footstep event
+
+static int   s_footstepEventMs[2] = { 0, 0 };
+static int   s_footstepLastEnt[2] = { 0, 0 };
+
 // slot 74: S_StartSound — SOF2 slot uses int for channel; engine uses soundChannel_t
 static void S_StartSound_wrapper( const vec3_t origin, int entityNum,
 		int entChannel, sfxHandle_t sfx ) {
+	if ( entChannel == 6 || entChannel == 7 ) {
+		int idx = entChannel - 6;
+		s_footstepEventMs[idx] = Sys_Milliseconds();
+		s_footstepLastEnt[idx] = entityNum;
+	}
 	S_StartSound( origin, entityNum, (soundChannel_t)entChannel, sfx );
 }
 
@@ -1464,6 +1601,96 @@ static int CG_LogInitException( EXCEPTION_POINTERS *ep ) {
 		ctx ? ctx->Esi : 0U,
 		ctx ? ctx->Edi : 0U,
 		ctx ? ctx->Esp : 0U );
+
+	// VirtualQuery the fault address to identify memory type
+	if ( ctx && ctx->Eip ) {
+		MEMORY_BASIC_INFORMATION mbi;
+		memset( &mbi, 0, sizeof( mbi ) );
+		if ( VirtualQuery( (void *)ctx->Eip, &mbi, sizeof( mbi ) ) ) {
+			char allocModule[512];
+			allocModule[0] = '\0';
+			if ( mbi.AllocationBase ) {
+				GetModuleFileNameA( (HMODULE)mbi.AllocationBase, allocModule, sizeof( allocModule ) );
+			}
+			Com_Printf(
+				"^3[CG] fault VQ: base=%p alloc=%p type=0x%X state=0x%X protect=0x%X allocProtect=0x%X module=[%s]\n",
+				mbi.BaseAddress,
+				mbi.AllocationBase,
+				mbi.Type,
+				mbi.State,
+				mbi.Protect,
+				mbi.AllocationProtect,
+				allocModule[0] ? allocModule : "(none)" );
+		}
+	}
+
+	// Stack walk: look at ESP+0 through ESP+120 for return addresses in code regions
+	if ( ctx && ctx->Esp ) {
+		Com_Printf( "^3[CG] stack walk from esp=%08X:\n", ctx->Esp );
+		for ( int si = 0; si <= 30; si++ ) {
+			DWORD *slot = (DWORD *)(ctx->Esp + si * 4);
+			DWORD val = 0;
+			MEMORY_BASIC_INFORMATION slotMbi;
+			// verify slot is readable
+			if ( !VirtualQuery( slot, &slotMbi, sizeof( slotMbi ) ) ) continue;
+			if ( slotMbi.State != MEM_COMMIT ) continue;
+			if ( !(slotMbi.Protect & (PAGE_READONLY|PAGE_READWRITE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY|PAGE_WRITECOPY)) ) continue;
+			val = *slot;
+			if ( val < 0x10000 ) continue; // skip obviously small values
+			// check if val points to executable memory
+			MEMORY_BASIC_INFORMATION valMbi;
+			if ( !VirtualQuery( (void *)val, &valMbi, sizeof( valMbi ) ) ) continue;
+			if ( valMbi.State != MEM_COMMIT ) continue;
+			if ( !(valMbi.Protect & (PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)) ) continue;
+			char addrModule[512];
+			addrModule[0] = '\0';
+			CG_FormatModuleForAddress( (void *)val, addrModule, sizeof( addrModule ) );
+			Com_Printf( "^3[CG]   esp+%02d: 0x%08X (%s)\n", si*4, val, addrModule );
+		}
+	}
+
+	// DEP recovery: SOF2 (2002) predates hardware NX enforcement and allocates sound/weapon
+	// system vtable trampolines in private PAGE_READWRITE memory (no execute bit).
+	// Original SoF2.exe ran without DEP; OpenJK gets NX enforcement from the OS.
+	// For DEP violations (accessType=8), make the faulting page executable and retry the
+	// instruction rather than aborting CG_Init. Limit to 32 unique pages to avoid infinite loops.
+	if ( rec && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+		 rec->NumberParameters >= 1 && rec->ExceptionInformation[0] == 8 &&
+		 ctx && ctx->Eip ) {
+		static ULONG_PTR s_depFixedPages[32];
+		static int s_depFixedCount = 0;
+		ULONG_PTR faultPage = ctx->Eip & ~(ULONG_PTR)0xFFF;
+		// check if we already fixed this page (prevent infinite loop on pages we can't fix)
+		bool alreadyFixed = false;
+		for ( int i = 0; i < s_depFixedCount; i++ ) {
+			if ( s_depFixedPages[i] == faultPage ) { alreadyFixed = true; break; }
+		}
+		if ( !alreadyFixed && s_depFixedCount < 32 ) {
+			DWORD oldProtect = 0;
+			// mark the entire allocation region executable to handle multi-page vtable blocks
+			MEMORY_BASIC_INFORMATION depMbi;
+			memset( &depMbi, 0, sizeof( depMbi ) );
+			SIZE_T regionSize = 0x1000;
+			void *regionBase = (void *)faultPage;
+			if ( VirtualQuery( (void *)ctx->Eip, &depMbi, sizeof( depMbi ) ) ) {
+				regionBase = depMbi.BaseAddress;
+				regionSize = depMbi.RegionSize;
+			}
+			if ( VirtualProtect( regionBase, regionSize, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+				s_depFixedPages[s_depFixedCount++] = faultPage;
+				Com_Printf( "^3[CG] DEP fix: made %p+0x%zX executable (was 0x%X), retrying\n",
+					regionBase, (size_t)regionSize, (unsigned)oldProtect );
+				return EXCEPTION_CONTINUE_EXECUTION;
+			} else {
+				Com_Printf( "^1[CG] DEP fix: VirtualProtect failed at %p (err=%lu), aborting\n",
+					regionBase, GetLastError() );
+			}
+		} else if ( alreadyFixed ) {
+			Com_Printf( "^1[CG] DEP fix: page %p already fixed but still crashing — aborting\n",
+				(void *)faultPage );
+		}
+	}
+
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
@@ -1508,6 +1735,43 @@ static void CG_FileTrace( const char *fmt, ... ) {
 	fclose( fp );
 }
 
+static qboolean CL_SOF2_ForceCameraOffEnabled( void ) {
+	static cvar_t *cv = NULL;
+	if ( !cv ) {
+		cv = Cvar_Get( "sof2_forceCameraOff", "0", CVAR_ARCHIVE );
+	}
+	return ( cv && cv->integer ) ? qtrue : qfalse;
+}
+
+static void CL_SOF2_ForceRetailCameraOff( void ) {
+	typedef void (__cdecl *CG_DisableCameraProc)( void );
+	HMODULE hCgame;
+	volatile unsigned char *cameraMode;
+	unsigned int modeValue;
+
+	if ( !cgameLibrary ) {
+		return;
+	}
+
+	hCgame = (HMODULE)cgameLibrary;
+	cameraMode = (volatile unsigned char *)( (char *)hCgame + 0x0B8378 );
+	modeValue = (unsigned int)( *cameraMode );
+	if ( modeValue == 0 ) {
+		return;
+	}
+
+	((CG_DisableCameraProc)( (char *)hCgame + 0x027DA0 ))();
+	*cameraMode = 0;
+
+	{
+		static int sof2CameraDisableLogCount = 0;
+		if ( sof2CameraDisableLogCount < 16 ) {
+			Com_Printf( "[SOF2 fix] forced retail cgame camera off (mode=%u)\n", modeValue );
+			++sof2CameraDisableLogCount;
+		}
+	}
+}
+
 static void CL_PatchDllRet( HMODULE module, unsigned int rva, const char *name ) {
 	unsigned char *pFunc = (unsigned char *)module + rva;
 	DWORD oldProt;
@@ -1550,8 +1814,10 @@ Called from CL_InitCGame() when the map starts.
 */
 qboolean CL_InitSOF2CGame( void ) {
 	typedef cgame_export_t *(__cdecl *GetCGameAPIProc)( int version, cgame_import_t *import );
+	static const unsigned char retFalse[] = { 0x33, 0xC0, 0xC3 };
+	static const unsigned char ret4[] = { 0xC2, 0x04, 0x00 };
 
-		Com_Printf( "[SOF2 build] 2026-03-06-corrupt-entity-drop\n" );
+		Com_Printf( "[SOF2 build] 2026-03-11-pass55-rain-diag\n" );
 	CG_FileTrace( "CL_InitSOF2CGame enter" );
 	cgameLibrary = Sys_LoadSPGameDll( "cgame", NULL );   // "cgame" + ARCH_STRING("x86") + DLL_EXT = "cgamex86.dll"
 	if ( !cgameLibrary ) {
@@ -1579,31 +1845,31 @@ qboolean CL_InitSOF2CGame( void ) {
 	// -----------------------------------------------------------------------
 	{
 		HMODULE hCgame = (HMODULE)cgameLibrary;
-		static const unsigned char ret4[] = { 0xC2, 0x04, 0x00 };
-		static const unsigned char retFalse[] = { 0x31, 0xC0, 0xC3 };
 		CL_PatchDllRet( hCgame, 0x16BB0, "CGlassMgr::ResolveConstraints" );
 
-		// The retail UI/weapon pass is still unstable while the game import ABI is being
-		// corrected, so keep CG_DrawActive behind a hard guard for now.
-		CL_PatchDllRet( hCgame, 0x00A2D0, "CG_DrawSkyboxPortal" );
-		CL_PatchDllRet( hCgame, 0x00AE90, "CG_DrawActive" );
-		// Direct +map loads still trigger the retail cinematic camera path inside cgame.
-		// That camera owns the rendered view, suppresses the first-person weapon, and
-		// explains why the server can move while the visible view does not match input.
+		// CG_CamEnable (RVA 0x009E40) triggers ICARUS scripted camera mode which causes
+		// a 180° camera flip when the player enters certain map triggers (e.g. pra1).
+		// Always patch it out: ret 4 = return immediately without enabling camera mode.
+		// CG_GetCameraMode (RVA 0x027D90) always returns 0 (camera inactive) to match.
 		CL_PatchDllBytes( hCgame, 0x009E40, ret4, sizeof( ret4 ), "CG_CamEnable" );
 		CL_PatchDllBytes( hCgame, 0x027D90, retFalse, sizeof( retFalse ), "CG_GetCameraMode" );
-		// Re-enable weather effects while keeping HUD/UI crash isolation.
+		CL_SOF2_ForceRetailCameraOff();
+
+		// CG_DrawSkyboxPortal (RVA 0xA2D0) uses an uninitialized ECX register — called
+		// from CG_DrawActive without setting up a valid 'this' pointer. It reads
+		// *(float*)(ECX+0x1c) which crashes or draws garbage over the already-rendered
+		// main scene, causing sprites/trees to flash every other frame. Patch to no-op.
+		CL_PatchDllRet( hCgame, 0x00A2D0, "CG_DrawSkyboxPortal" );
+		// CL_PatchDllRet( hCgame, 0x00AE90, "CG_DrawActive" );
+		// Re-enable weather effects while keeping only lightweight crash isolation.
 		// CL_PatchDllRet( hCgame, 0x00AC50, "CG_DrawRaindrops" );
 		CL_PatchDllRet( hCgame, 0x00B180, "CG_DrawFPS" );
-		CL_PatchDllRet( hCgame, 0x00B2E0, "CG_DrawTimerHUD" );
-		CL_PatchDllRet( hCgame, 0x00B3A0, "CG_DrawCrosshairHitMarker" );
-		CL_PatchDllRet( hCgame, 0x00B4F0, "CG_DrawScopeOverlay" );
-		CL_PatchDllRet( hCgame, 0x00BFA0, "CG_DrawCorpseMarkers" );
-		CL_PatchDllRet( hCgame, 0x040A70, "CG_Draw2DSprites" );
-		// Re-enable weapon/HUD path incrementally.
-		// CL_PatchDllRet( hCgame, 0x0693C0, "CG_DrawWeaponHUD" );
-		CL_PatchDllRet( hCgame, 0x070750, "CG_DrawVehicleDirection" );
-		CL_PatchDllRet( hCgame, 0x0284F0, "CG_LoadInventoryMenus" );
+		// HUD/sprite paths are now live for parity with retail presentation:
+		// CG_DrawTimerHUD, CG_DrawCrosshairHitMarker, CG_DrawScopeOverlay,
+		// CG_DrawCorpseMarkers, CG_Draw2DSprites, CG_DrawVehicleDirection.
+		// Let retail cgame load its default/weapons HUD definitions again.
+		// Slot 58 now routes to the live UI refresh path instead of a stub.
+		// CL_PatchDllRet( hCgame, 0x0284F0, "CG_LoadInventoryMenus" );
 		// Re-enable spawned world entities (props/crates/etc).
 		// CL_PatchDllRet( hCgame, 0x0301E0, "CG_SpawnEntitiesFromSpawnVars" );
 		// Re-enable player entity init (required for first-person presentation).
@@ -1929,17 +2195,18 @@ qboolean CL_InitSOF2CGame( void ) {
 		// --- METIS UI stubs 59, 61, 62 ---
 		// These are SOF2-specific UI helper imports for menu/loading screen management.
 		// Verified via Ghidra xref decompilation of CG_LoadInventoryMenus, CG_SetLoadingLevelshot.
-		slots[58] = (void *)CG_Slot58_NoOp;                  // [58] active HUD helper, currently stubbed for isolation
+		slots[58] = (void *)CG_UI_HudRefresh;                // [58] HUD/UI per-frame refresh
 		slots[59] = (void *)CG_UI_LoadMenuData;              // [59] UI_LoadMenuData ← verified
 		slots[61] = (void *)CG_UI_MenuReset;                 // [61] UI_MenuReset ← verified
 		slots[62] = (void *)CG_UI_SetInfoScreenText;         // [62] UI_SetInfoScreenText ← verified
 
-		// --- GenericParser2 slots 105, 106, 108 ---
-		// SOF2 cgame uses GP2 for weapon definitions and HUD widget config.
-		// Verified via Ghidra: CG_PlayerEntity_SetWeapon, CG_HudWidget_QueryCallback.
-		slots[105] = (void *)CG_GP_GetBaseParseGroup;         // [105] GP_GetBaseParseGroup ← verified
-		slots[106] = (void *)CG_GP_GetSubGroups;              // [106] GP_GetSubGroups ← verified
-		slots[108] = (void *)CG_GP_GetNext;                   // [108] GP_GetNext ← verified
+		// --- Slots 105-108: unresolved retail helpers ---
+		// [105]/[106] now bridge to a non-null interface object so retail
+		// object+0x548 virtual dispatch stays alive.
+		slots[105] = (void *)CG_SOF2_Import105_Bridge;
+		slots[106] = (void *)CG_SOF2_Import106_Bridge;
+		slots[107] = (void *)CG_SOF2_Import107_Trace;
+		slots[108] = (void *)CG_SOF2_Import108_Trace;
 
 		// --- Slot 116: G2_InitWraithSurfaceMap ---
 		// CG_InitWraith calls this with (void**) expecting qboolean.
@@ -2163,6 +2430,26 @@ static qboolean CL_SOF2_IsRetailCameraEvent( unsigned int rawEvent ) {
 	}
 }
 
+static qboolean CL_SOF2_IsKnownRetailEvent( unsigned int rawEvent ) {
+	if ( rawEvent == 0 ) {
+		return qtrue;
+	}
+
+	// Retail cgame switch covers 0x01..0x49, then 0x4b..0x57 and 0x59..0x5a.
+	// 0x4a and 0x58 fall into UNKNOWN-event error handling.
+	if ( rawEvent <= 0x49 ) {
+		return qtrue;
+	}
+	if ( rawEvent >= 0x4b && rawEvent <= 0x57 ) {
+		return qtrue;
+	}
+	if ( rawEvent == 0x59 || rawEvent == 0x5a ) {
+		return qtrue;
+	}
+
+	return qfalse;
+}
+
 static void CL_SOF2_DropCorruptEntity( int snapshotNumber, int entIndex, entityState_t *ent, const char *reason ) {
 	static int sof2CorruptEntityLogCount = 0;
 	int entNum;
@@ -2186,7 +2473,7 @@ static void CL_SOF2_DropCorruptEntity( int snapshotNumber, int entIndex, entityS
 	g2RadiusValue = ent->g2radius;
 
 	if ( sof2CorruptEntityLogCount < 64 ) {
-		Com_Printf(
+		Com_DPrintf(
 			"[SNAP fix] dropped corrupt entity snap=%d idx=%d num=%d type=%d event=0x%X parm=%d loop=%d model=%d g2=%d why=%s\n",
 			snapshotNumber,
 			entIndex,
@@ -2220,7 +2507,7 @@ static void CL_SOF2_SanitizeLoopSound( int snapshotNumber, int entIndex, entityS
 	}
 
 	if ( sof2LoopSoundLogCount < 96 ) {
-		Com_Printf(
+		Com_DPrintf(
 			"[SNAP fix] cleared bad loopSound snap=%d idx=%d num=%d type=%d loop=%d model=%d g2=%d soundSet=%d\n",
 			snapshotNumber,
 			entIndex,
@@ -2248,7 +2535,7 @@ static void CL_SOF2_SanitizeSpeakerSound( int snapshotNumber, int entIndex, enti
 	}
 
 	if ( sof2SpeakerSoundLogCount < 64 ) {
-		Com_Printf(
+		Com_DPrintf(
 			"[SNAP fix] cleared bad speaker sound snap=%d idx=%d num=%d parm=%d client=%d frame=%d\n",
 			snapshotNumber,
 			entIndex,
@@ -2263,30 +2550,63 @@ static void CL_SOF2_SanitizeSpeakerSound( int snapshotNumber, int entIndex, enti
 }
 
 static void CL_SOF2_SanitizeLoopSetIndex( int snapshotNumber, int entIndex, entityState_t *ent ) {
-	static int sof2LoopSetLogCount = 0;
+	// g2radius is used by multiple SOF2 entity paths; treating it as a strict
+	// loop-set index causes valid runtime state to be zeroed.
+	(void)snapshotNumber;
+	(void)entIndex;
+	(void)ent;
+}
 
-	if ( !ent || ent->g2radius == 0 ) {
+static void CL_SOF2_SanitizeModelIndices( int snapshotNumber, int entIndex, entityState_t *ent ) {
+	static int sof2ModelIndexLogCount = 0;
+	qboolean cleared = qfalse;
+	int originalModelIndex;
+	int originalModelIndex2;
+	const qboolean bmodelEntity = ( ent && ( ent->solid == SOLID_BMODEL || ent->eType == ET_MOVER ) ) ? qtrue : qfalse;
+	const int modelIndexLimit = bmodelEntity ? MAX_SUBMODELS : MAX_MODELS;
+
+	if ( !ent ) {
+		return;
+	}
+	if ( ent->eType > ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) {
 		return;
 	}
 
-	if ( ent->g2radius > 0 && ent->g2radius < SOF2_RETAIL_LOOPSET_MAX ) {
+	originalModelIndex = ent->modelindex;
+	originalModelIndex2 = ent->modelindex2;
+
+	// modelindex is serialized as a 9-bit value and ET_MOVER/SOLID_BMODEL entities
+	// legitimately reference inline models up to MAX_SUBMODELS (512).
+	if ( ent->modelindex < 0 || ent->modelindex >= modelIndexLimit ) {
+		ent->modelindex = 0;
+		cleared = qtrue;
+	}
+
+	if ( ent->modelindex2 < 0 || ent->modelindex2 >= MAX_MODELS ) {
+		ent->modelindex2 = 0;
+		cleared = qtrue;
+	}
+
+	if ( !cleared ) {
 		return;
 	}
 
-	if ( sof2LoopSetLogCount < 64 ) {
-		Com_Printf(
-			"[SNAP fix] cleared bad loop-set snap=%d idx=%d num=%d type=%d g2=%d loop=%d model=%d\n",
+	if ( sof2ModelIndexLogCount < 96 ) {
+		Com_DPrintf(
+			"[SNAP fix] cleared bad model index snap=%d idx=%d num=%d type=%d solid=0x%X model=%d model2=%d limits=(%d,%d) loop=%d g2=%d\n",
 			snapshotNumber,
 			entIndex,
 			ent->number,
 			ent->eType,
-			ent->g2radius,
+			ent->solid,
+			originalModelIndex,
+			originalModelIndex2,
+			modelIndexLimit,
+			MAX_MODELS,
 			ent->loopSound,
-			ent->modelindex );
-		++sof2LoopSetLogCount;
+			ent->g2radius );
+		++sof2ModelIndexLogCount;
 	}
-
-	ent->g2radius = 0;
 }
 
 static void CL_SOF2_SanitizeEventField( const char *scope, int snapshotNumber, int ownerNum, int slot, int *eventField, int *parmField ) {
@@ -2294,26 +2614,97 @@ static void CL_SOF2_SanitizeEventField( const char *scope, int snapshotNumber, i
 	const unsigned int fullEvent = eventField ? (unsigned int)( *eventField ) : 0U;
 	const unsigned int rawEvent = CL_SOF2_RawEvent( fullEvent );
 
-	if ( rawEvent == 0 || rawEvent < EV_NUM_ENTITY_EVENTS ) {
+	// Preserve low-range events for retail SOF2 handling. Only clear obviously
+	// corrupt values carrying high garbage bits.
+	if ( ( fullEvent & 0xFFFF0000U ) != 0U || rawEvent > 0x3FFU ) {
+		if ( sof2BadEventLogCount < 32 ) {
+			Com_DPrintf(
+				"[SNAP fix] cleared corrupt %s snap=%d owner=%d slot=%d full=0x%X raw=0x%X parm=%d\n",
+				scope ? scope : "(null)",
+				snapshotNumber,
+				ownerNum,
+				slot,
+				fullEvent,
+				rawEvent,
+				parmField ? *parmField : 0 );
+			++sof2BadEventLogCount;
+		}
+
+		if ( eventField ) {
+			*eventField = 0;
+		}
+		if ( parmField ) {
+			*parmField = 0;
+		}
 		return;
 	}
 
-	if ( sof2BadEventLogCount < 96 ) {
-		Com_Printf(
-			"[SNAP fix] cleared bad %s snap=%d owner=%d slot=%d full=0x%X raw=0x%X parm=%d\n",
+	if ( CL_SOF2_IsKnownRetailEvent( rawEvent ) ) {
+		return;
+	}
+}
+
+static void CL_SOF2_SanitizeRetailSoundEventParm( const char *scope, int snapshotNumber, int ownerNum, int slot, int *eventField, int *parmField ) {
+	static int sof2BadSoundParmLogCount = 0;
+	unsigned int rawEvent;
+	int eventParm;
+
+	if ( !eventField || !parmField ) {
+		return;
+	}
+
+	rawEvent = CL_SOF2_RawEvent( *eventField );
+	if ( !CL_SOF2_IsRetailSoundEvent( rawEvent ) ) {
+		return;
+	}
+
+	eventParm = *parmField;
+	if ( eventParm >= 0 && eventParm < SOF2_RETAIL_SOUND_TABLE_MAX ) {
+		return;
+	}
+
+	if ( sof2BadSoundParmLogCount < 96 ) {
+		Com_DPrintf(
+			"[SNAP fix] dropped bad %s sound parm snap=%d owner=%d slot=%d ev=0x%X parm=%d\n",
 			scope ? scope : "(null)",
 			snapshotNumber,
 			ownerNum,
 			slot,
-			fullEvent,
 			rawEvent,
-			parmField ? *parmField : 0 );
-		++sof2BadEventLogCount;
+			eventParm );
+		++sof2BadSoundParmLogCount;
 	}
 
-	if ( eventField ) {
-		*eventField = 0;
+	*eventField = 0;
+	*parmField = 0;
+}
+
+static void CL_SOF2_StripRetailCameraEvent( const char *scope, int snapshotNumber, int ownerNum, int slot, int *eventField, int *parmField ) {
+	static int sof2CameraStripLogCount = 0;
+	unsigned int rawEvent;
+
+	if ( !eventField ) {
+		return;
 	}
+
+	rawEvent = CL_SOF2_RawEvent( *eventField );
+	if ( !CL_SOF2_IsRetailCameraEvent( rawEvent ) ) {
+		return;
+	}
+
+	if ( sof2CameraStripLogCount < 64 ) {
+		Com_DPrintf(
+			"[SNAP fix] stripped %s camera event snap=%d owner=%d slot=%d ev=0x%X parm=%d\n",
+			scope ? scope : "(null)",
+			snapshotNumber,
+			ownerNum,
+			slot,
+			rawEvent,
+			parmField ? *parmField : 0 );
+		++sof2CameraStripLogCount;
+	}
+
+	*eventField = 0;
 	if ( parmField ) {
 		*parmField = 0;
 	}
@@ -2321,37 +2712,72 @@ static void CL_SOF2_SanitizeEventField( const char *scope, int snapshotNumber, i
 
 static void CL_SOF2_SanitizeSnapshotPlayerState( int snapshotNumber, playerState_t *ps ) {
 	int i;
+	const qboolean stripCameraEvents = CL_SOF2_ForceCameraOffEnabled();
 
 	if ( !ps ) {
 		return;
 	}
 
 	CL_SOF2_SanitizeEventField( "ps.external", snapshotNumber, ps->clientNum, -1, &ps->externalEvent, &ps->externalEventParm );
+	CL_SOF2_SanitizeRetailSoundEventParm( "ps.external", snapshotNumber, ps->clientNum, -1, &ps->externalEvent, &ps->externalEventParm );
+	if ( stripCameraEvents ) {
+		CL_SOF2_StripRetailCameraEvent( "ps.external", snapshotNumber, ps->clientNum, -1, &ps->externalEvent, &ps->externalEventParm );
+	}
 	for ( i = 0; i < MAX_PS_EVENTS; ++i ) {
 		CL_SOF2_SanitizeEventField( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
+		CL_SOF2_SanitizeRetailSoundEventParm( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
+		if ( stripCameraEvents ) {
+			CL_SOF2_StripRetailCameraEvent( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
+		}
 	}
 }
 
 static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, entityState_t *ent ) {
 	static int sof2EventLogCount = 0;
 	static int sof2SoundDropLogCount = 0;
-	static int sof2CameraStripLogCount = 0;
 	unsigned int rawEvent;
+	const qboolean stripCameraEvents = CL_SOF2_ForceCameraOffEnabled();
+	const qboolean legacyEntityType =
+		( ent && ent->eType >= ET_GENERAL && ent->eType <= ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) ? qtrue : qfalse;
 
 	if ( !ent ) {
 		return;
 	}
 
-	if ( ent->eType < ET_GENERAL || ent->eType > ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) {
+	if ( ent->eType < -1024 || ent->eType > 4096 ) {
 		CL_SOF2_DropCorruptEntity( snapshotNumber, entIndex, ent, "etype" );
 		return;
+	}
+	if ( !legacyEntityType ) {
+		return;
+	}
+
+	// Sanitize eType-encoded events (eType = ET_EVENTS + eventNum).
+	// The retail cgame decodes these as event = eType - ET_EVENTS, so an unknown
+	// event encoded here will bypass the ent->event sanitization below and crash.
+	if ( ent->eType >= ET_EVENTS && ent->eType <= ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) {
+		unsigned int etypeEvent = (unsigned int)( ent->eType - ET_EVENTS );
+		if ( !CL_SOF2_IsKnownRetailEvent( etypeEvent ) ) {
+			Com_DPrintf(
+				"[SNAP note] preserving unknown eType-event snap=%d idx=%d num=%d eType=%d etypeEv=%u\n",
+				snapshotNumber,
+				entIndex,
+				ent->number,
+				ent->eType,
+				etypeEvent );
+		}
 	}
 
 	CL_SOF2_SanitizeLoopSound( snapshotNumber, entIndex, ent );
 	CL_SOF2_SanitizeSpeakerSound( snapshotNumber, entIndex, ent );
 	CL_SOF2_SanitizeLoopSetIndex( snapshotNumber, entIndex, ent );
+	CL_SOF2_SanitizeModelIndices( snapshotNumber, entIndex, ent );
 
 	CL_SOF2_SanitizeEventField( "entity.event", snapshotNumber, ent ? ent->number : -1, entIndex, ent ? &ent->event : NULL, ent ? &ent->eventParm : NULL );
+	CL_SOF2_SanitizeRetailSoundEventParm( "entity.event", snapshotNumber, ent ? ent->number : -1, entIndex, ent ? &ent->event : NULL, ent ? &ent->eventParm : NULL );
+	if ( stripCameraEvents ) {
+		CL_SOF2_StripRetailCameraEvent( "entity.event", snapshotNumber, ent ? ent->number : -1, entIndex, ent ? &ent->event : NULL, ent ? &ent->eventParm : NULL );
+	}
 	rawEvent = CL_SOF2_RawEvent( ent->event );
 
 	if ( rawEvent == 0 ) {
@@ -2360,7 +2786,7 @@ static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, en
 
 	if ( CL_SOF2_IsRetailSoundEvent( rawEvent ) ) {
 		if ( sof2EventLogCount < 96 ) {
-			Com_Printf(
+			Com_DPrintf(
 				"[SNAP event] snap=%d idx=%d num=%d ev=0x%X parm=%d other=%d other2=%d g2=%d ang2=%.2f\n",
 				snapshotNumber,
 				entIndex,
@@ -2376,7 +2802,7 @@ static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, en
 
 		if ( ent->eventParm < 0 || ent->eventParm >= SOF2_RETAIL_SOUND_TABLE_MAX ) {
 			if ( sof2SoundDropLogCount < 64 ) {
-				Com_Printf(
+				Com_DPrintf(
 					"[SNAP fix] dropped bad sound event snap=%d idx=%d num=%d ev=0x%X parm=%d other=%d other2=%d g2=%d\n",
 					snapshotNumber,
 					entIndex,
@@ -2396,25 +2822,6 @@ static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, en
 		return;
 	}
 
-	if ( CL_SOF2_IsRetailCameraEvent( rawEvent ) ) {
-		if ( sof2CameraStripLogCount < 64 ) {
-			Com_Printf(
-				"[SNAP fix] stripped camera event snap=%d idx=%d num=%d ev=0x%X parm=%d time=%d time2=%d other=%d other2=%d\n",
-				snapshotNumber,
-				entIndex,
-				ent->number,
-				rawEvent,
-				ent->eventParm,
-				ent->time,
-				ent->time2,
-				ent->otherEntityNum,
-				ent->otherEntityNum2 );
-			++sof2CameraStripLogCount;
-		}
-
-		ent->event = 0;
-		ent->eventParm = 0;
-	}
 }
 
 /*
@@ -2472,7 +2879,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 	}
 
 	if ( snapshotLogCount < 12 ) {
-		Com_Printf(
+		Com_DPrintf(
 			"[SNAP] CL_GetSnapshot #%d req=%d serverTime=%d snapFlags=0x%x ping=%d numEntities=%d parseBase=%d firstEntity=%d\n",
 			snapshotLogCount + 1,
 			snapshotNumber,
@@ -2490,7 +2897,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 		const int detailCount = snapshot->numEntities < 3 ? snapshot->numEntities : 3;
 		for ( i = 0; i < detailCount && snapshotEntityLogCount < 18; ++i ) {
 			const entityState_t *ent = &snapshot->entities[i];
-			Com_Printf(
+			Com_DPrintf(
 				"[SNAP ent] log=%d snap=%d idx=%d num=%d type=%d flags=0x%x model=%d model2=%d client=%d solid=0x%x event=%d weapon=%d skin=%d sound=%d\n",
 				snapshotEntityLogCount + 1,
 				snapshotNumber,
@@ -3236,7 +3643,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		S_Respatialize( args[1], (const float *) VMA(2), (float(*)[3]) VMA(3), (qboolean)(args[4] != 0) );
 		return 0;
 	case CG_S_REGISTERSOUND:
-		return S_RegisterSound( (const char *) VMA(1) );
+		return S_RegisterSoundSafe_SOF2( (const char *) VMA(1), "syscall" );
 	case CG_S_STARTBACKGROUNDTRACK:
 		S_StartBackgroundTrack( (const char *) VMA(1), (const char *) VMA(2), (qboolean)(args[3] != 0) );
 		return 0;
@@ -3780,6 +4187,21 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 
 	re.G2API_SetTime( cl.serverTime, G2T_CG_TIME );
 	if ( !cge ) return;
+
+	// Footstep sound cleanup: stop ch=6/7 after FOOTSTEP_STOP_MS of no footstep events.
+	// Handles looping WAVs that don't self-terminate when the player halts.
+	{
+		static const soundChannel_t kFootChans[2] = { (soundChannel_t)6, (soundChannel_t)7 };
+		int now = Sys_Milliseconds();
+		for ( int fi = 0; fi < 2; fi++ ) {
+			if ( s_footstepEventMs[fi] && ( now - s_footstepEventMs[fi] ) > FOOTSTEP_STOP_MS ) {
+				S_StopEntityChannel( s_footstepLastEnt[fi], kFootChans[fi] );
+				s_footstepEventMs[fi] = 0;
+			}
+		}
+	}
+
+	CL_SOF2_ForceRetailCameraOff();
 	if ( renderLogCount < 12 ) {
 		CG_FileTrace( "CGameRender #%d state=%d serverTime=%d frameServerTime=%d newSnapshots=%d",
 			renderLogCount + 1,
@@ -3809,8 +4231,35 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 	// Flicker fix: if DrawInformation crashed before submitting a scene (it called
 	// ClearScene which wiped the buffer, but never called RenderScene), submit a
 	// fallback scene using the last known camera so the screen doesn't go blank.
+	// Camera-follow fix: update vieworg/viewaxis from current playerState so the
+	// camera tracks the player even when the retail cgame's draw path fails.
 	if ( !s_renderSceneSubmitted && s_lastGoodRefdefValid && cls.state == CA_ACTIVE ) {
 		s_lastGoodRefdef.time = timei;
+		// Mirror the same view forcing that CG_SubmitSOF2Refdef applies on the hot path.
+		const int forcedViewHeight = ( cl.frame.ps.viewheight > 0 ) ? cl.frame.ps.viewheight : 38;
+		vec3_t fallbackAngles;
+		for ( int i = 0; i < 3; ++i ) {
+			fallbackAngles[i] = SHORT2ANGLE(
+				(short)( ANGLE2SHORT( cl.viewangles[i] ) + cl.frame.ps.delta_angles[i] ) );
+		}
+		VectorCopy( cl.frame.ps.origin, s_lastGoodRefdef.vieworg );
+		s_lastGoodRefdef.vieworg[2] += forcedViewHeight;
+		AnglesToAxis( fallbackAngles, s_lastGoodRefdef.viewaxis );
+		memset( s_lastGoodRefdef.areamask, 0xFF, sizeof( s_lastGoodRefdef.areamask ) );
+		if ( s_cgLastRefEntityCount > 0 ) {
+			static int fallbackReplayLogCount = 0;
+			for ( int i = 0; i < s_cgLastRefEntityCount; ++i ) {
+				re.AddRefEntityToScene( &s_cgLastRefEntities[i] );
+			}
+			if ( fallbackReplayLogCount < 16 ) {
+				Com_Printf(
+					"[SOF2 RS] fallback replayed %d cached ref entities serial=%d time=%d\n",
+					s_cgLastRefEntityCount,
+					s_cgRenderSerial,
+					s_lastGoodRefdef.time );
+				++fallbackReplayLogCount;
+			}
+		}
 		re.RenderScene( &s_lastGoodRefdef );
 	}
 }
@@ -3924,6 +4373,11 @@ void CL_FirstSnapshot( void ) {
 		Com_Printf( "[SNAP] CL_FirstSnapshot: clearing KEYCATCH_UI on first active frame\n" );
 		Key_SetCatcher( Key_GetCatcher() & ~KEYCATCH_UI );
 	}
+	// Direct +map startup can carry menu/mouse button state into the first live
+	// gameplay snapshot. Flush it once here so the player does not inherit a
+	// phantom +attack/+use state on map start.
+	Key_ClearStates();
+	Com_Printf( "[SNAP] CL_FirstSnapshot: cleared latched key/button state for active play\n" );
 	Com_Printf( "[SNAP] CL_FirstSnapshot: cls.state = CA_ACTIVE\n" );
 
 	// set the timedelta so we are exactly on this first frame
@@ -3968,6 +4422,8 @@ void CL_SetCGameTime( void ) {
 			return;
 		}
 	}
+
+	CL_SOF2_ForceRetailCameraOff();
 
 	// if we have gotten to this point, cl.frame is guaranteed to be valid
 	if ( !cl.frame.valid ) {

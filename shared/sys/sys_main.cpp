@@ -423,8 +423,10 @@ static void *Sys_LoadDllFromPaths( const char *filename, const char *gamedir, co
 
 			fn = FS_BuildOSPath( libDir, gamedir, filename );
 			libHandle = Sys_LoadLibrary( fn );
-			if ( libHandle )
+			if ( libHandle ) {
+				Com_Printf( "%s: loaded %s\n", callerName, fn );
 				return libHandle;
+			}
 
 			Com_Printf( "%s(%s) failed: \"%s\"\n", callerName, fn, Sys_LibraryError() );
 		}
@@ -440,8 +442,10 @@ static void *Sys_LoadDllFromPaths( const char *filename, const char *gamedir, co
 
 			fn = FS_BuildOSPath( libDir, BASEGAME, filename );
 			libHandle = Sys_LoadLibrary( fn );
-			if ( libHandle )
+			if ( libHandle ) {
+				Com_Printf( "%s: loaded %s\n", callerName, fn );
 				return libHandle;
+			}
 
 			Com_Printf( "%s(%s) failed: \"%s\"\n", callerName, fn, Sys_LibraryError() );
 		}
@@ -457,8 +461,10 @@ static void *Sys_LoadDllFromPaths( const char *filename, const char *gamedir, co
 
 			fn = FS_BuildOSPath( libDir, OPENJKGAME, filename );
 			libHandle = Sys_LoadLibrary( fn );
-			if ( libHandle )
+			if ( libHandle ) {
+				Com_Printf( "%s: loaded %s\n", callerName, fn );
 				return libHandle;
+			}
 
 			Com_Printf( "%s(%s) failed: \"%s\"\n", callerName, fn, Sys_LibraryError() );
 		}
@@ -474,8 +480,10 @@ static void *Sys_LoadDllFromPaths( const char *filename, const char *gamedir, co
 
 			fn = va( "%s%c%s", libDir, PATH_SEP, filename );
 			libHandle = Sys_LoadLibrary( fn );
-			if ( libHandle )
+			if ( libHandle ) {
+				Com_Printf( "%s: loaded %s\n", callerName, fn );
 				return libHandle;
+			}
 
 			Com_Printf( "%s(%s) failed: \"%s\"\n", callerName, fn, Sys_LibraryError() );
 		}
@@ -576,16 +584,40 @@ void *Sys_LoadSPGameDll( const char *name, GetGameAPIProc **GetGameAPI )
 {
 	void	*libHandle = NULL;
 	char	filename[MAX_OSPATH];
+	const qboolean isSOF2SPDll = ( !Q_stricmp( name, "cgame" ) || !Q_stricmp( name, "game" ) || !Q_stricmp( name, "Menus" ) ) ? qtrue : qfalse;
 
 	// GetGameAPI may be NULL when the caller wants to load a SOF2-style DLL
 	// that uses a different entry point (e.g. GetUIAPI, GetCGameAPI).
 
 	Com_sprintf (filename, sizeof(filename), "%s" ARCH_STRING DLL_EXT, name);
 
+	// Deterministic SOF2 SP DLL loading:
+	// For game/cgame/Menus we ONLY load from the executable directory.
+	// This prevents stale homepath/basepath DLLs from silently overriding debug runs.
+	if ( isSOF2SPDll ) {
+		const char *binaryPath = Sys_BinaryPath();
+		if ( !binaryPath || !binaryPath[0] ) {
+			Com_Printf( "%s(%s): empty binary path; strict SOF2 SP loading requires exe-adjacent DLLs\n",
+						__FUNCTION__, filename );
+			return NULL;
+		}
+
+		const char *binaryOnly[] = { binaryPath };
+		libHandle = Sys_LoadDllFromPaths( filename, "", binaryOnly, ARRAY_LEN( binaryOnly ),
+										  SEARCH_PATH_ROOT, __FUNCTION__ );
+		if ( !libHandle ) {
+			Com_Printf( "%s(%s): strict SOF2 SP loading active; no fallback outside %s\n",
+						__FUNCTION__, filename, binaryPath );
+			return NULL;
+		}
+	}
+
 #if defined(MACOS_X) && !defined(_JK2EXE)
     //First, look for the old-style mac .bundle that's inside a pk3
     //It's actually zipped, and the zipfile has the same name as 'name'
-    libHandle = Sys_LoadMachOBundle( filename );
+    if ( !libHandle ) {
+		libHandle = Sys_LoadMachOBundle( filename );
+	}
 #endif
 
 	if (!libHandle) {
@@ -608,7 +640,7 @@ void *Sys_LoadSPGameDll( const char *name, GetGameAPIProc **GetGameAPI )
 		size_t numPaths = ARRAY_LEN( searchPaths );
 
 		libHandle = Sys_LoadDllFromPaths( filename, gamedir, searchPaths, numPaths,
-											SEARCH_PATH_BASE | SEARCH_PATH_MOD | SEARCH_PATH_OPENJK | SEARCH_PATH_ROOT,
+											SEARCH_PATH_ROOT | SEARCH_PATH_BASE | SEARCH_PATH_MOD | SEARCH_PATH_OPENJK,
 											__FUNCTION__ );
 		if ( !libHandle )
 			return NULL;

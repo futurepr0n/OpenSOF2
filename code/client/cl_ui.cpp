@@ -55,68 +55,64 @@ extern int     keyCatchers;
 extern keyGlobals_t kg;
 
 // ---------------------------------------------------------------------------
-// Shadow keys array: indexed by Q3A/SOF2 keycodes, synced from OpenJK kg.keys
-// each frame. The DLL reads keys_array[sof2_keycode].down but OpenJK stores
-// key state at fakeAscii_t indices (different numbering). This bridge fixes
-// mouse hover/click by making the DLL's key lookups hit the right state.
+// Shadow keys array: indexed by the Menusx86.dll 8-bit keyspace. This OpenJK
+// branch already uses the same numeric values for those keys, so the bridge is
+// a straight mirror of the raw fakeAscii_t indices.
 // ---------------------------------------------------------------------------
 static qkey_t sof2_shadow_keys[MAX_KEYS];
 
-// Mapping table: sof2Keycode -> openJK keycode (fakeAscii_t)
-// Built once, used each frame to sync shadow array
+// Mapping table: Menusx86 keycode -> OpenJK fakeAscii_t keycode.
 static int sof2_to_openjk[256];
 static bool sof2_keymap_built = false;
+static const qboolean clVerboseUiDebug = qfalse;
+
+static void CL_ClearStaleUIMouseButtons( void ) {
+#ifdef _WIN32
+	struct mouseKeyMap_t {
+		int key;
+		int vk;
+	};
+	static const mouseKeyMap_t mouseKeys[] = {
+		{ A_MOUSE1, VK_LBUTTON },
+		{ A_MOUSE2, VK_RBUTTON },
+		{ A_MOUSE3, VK_MBUTTON },
+		{ A_MOUSE4, VK_XBUTTON1 },
+		{ A_MOUSE5, VK_XBUTTON2 },
+	};
+	static int staleLogCount = 0;
+
+	for ( int i = 0; i < (int)ARRAY_LEN( mouseKeys ); i++ ) {
+		const int key = mouseKeys[i].key;
+		if ( !kg.keys[key].down ) {
+			continue;
+		}
+		if ( ( GetAsyncKeyState( mouseKeys[i].vk ) & 0x8000 ) != 0 ) {
+			continue;
+		}
+
+		kg.keys[key].down = qfalse;
+		kg.keys[key].repeats = 0;
+
+		if ( clVerboseUiDebug && staleLogCount < 24 ) {
+			Com_Printf( "[UI key] cleared stale mouse key=%d while syncing Menusx86 shadow state\n", key );
+			++staleLogCount;
+		}
+	}
+#endif
+}
 
 static void BuildSOF2KeyMap(void) {
 	memset(sof2_to_openjk, -1, sizeof(sof2_to_openjk));
-	// ASCII 32-126 map 1:1
-	for (int i = 32; i <= 126; i++) sof2_to_openjk[i] = i;
-	// Special keys (reverse of TranslateKeyToSOF2 in ui_main.cpp)
-	sof2_to_openjk[9]   = A_TAB;
-	sof2_to_openjk[13]  = A_ENTER;
-	sof2_to_openjk[27]  = A_ESCAPE;
-	sof2_to_openjk[127] = A_BACKSPACE;
-	sof2_to_openjk[129] = A_CAPSLOCK;
-	sof2_to_openjk[131] = A_PAUSE;
-	sof2_to_openjk[132] = A_CURSOR_UP;
-	sof2_to_openjk[133] = A_CURSOR_DOWN;
-	sof2_to_openjk[134] = A_CURSOR_LEFT;
-	sof2_to_openjk[135] = A_CURSOR_RIGHT;
-	sof2_to_openjk[136] = A_ALT;
-	sof2_to_openjk[137] = A_CTRL;
-	sof2_to_openjk[138] = A_SHIFT;
-	sof2_to_openjk[139] = A_INSERT;
-	sof2_to_openjk[140] = A_DELETE;
-	sof2_to_openjk[141] = A_PAGE_DOWN;
-	sof2_to_openjk[142] = A_PAGE_UP;
-	sof2_to_openjk[143] = A_HOME;
-	sof2_to_openjk[144] = A_END;
-	sof2_to_openjk[145] = A_F1;  sof2_to_openjk[146] = A_F2;
-	sof2_to_openjk[147] = A_F3;  sof2_to_openjk[148] = A_F4;
-	sof2_to_openjk[149] = A_F5;  sof2_to_openjk[150] = A_F6;
-	sof2_to_openjk[151] = A_F7;  sof2_to_openjk[152] = A_F8;
-	sof2_to_openjk[153] = A_F9;  sof2_to_openjk[154] = A_F10;
-	sof2_to_openjk[155] = A_F11; sof2_to_openjk[156] = A_F12;
-	sof2_to_openjk[160] = A_KP_7; sof2_to_openjk[161] = A_KP_8;
-	sof2_to_openjk[162] = A_KP_9; sof2_to_openjk[163] = A_KP_4;
-	sof2_to_openjk[164] = A_KP_5; sof2_to_openjk[165] = A_KP_6;
-	sof2_to_openjk[166] = A_KP_1; sof2_to_openjk[167] = A_KP_2;
-	sof2_to_openjk[168] = A_KP_3; sof2_to_openjk[169] = A_KP_ENTER;
-	sof2_to_openjk[170] = A_KP_0; sof2_to_openjk[171] = A_KP_PERIOD;
-	sof2_to_openjk[172] = A_DIVIDE;      // KP_SLASH
-	sof2_to_openjk[173] = A_KP_MINUS;
-	sof2_to_openjk[174] = A_KP_PLUS;
-	sof2_to_openjk[178] = A_MOUSE1; sof2_to_openjk[179] = A_MOUSE2;
-	sof2_to_openjk[180] = A_MOUSE3; sof2_to_openjk[181] = A_MOUSE4;
-	sof2_to_openjk[182] = A_MOUSE5;
-	sof2_to_openjk[183] = A_MWHEELDOWN;
-	sof2_to_openjk[184] = A_MWHEELUP;
+	for (int i = 0; i < 256; i++) {
+		sof2_to_openjk[i] = i;
+	}
 	sof2_keymap_built = true;
 }
 
 // Call each frame before DLL refresh to sync shadow keys from OpenJK state
 void SyncSOF2ShadowKeys(void) {
 	if (!sof2_keymap_built) BuildSOF2KeyMap();
+	CL_ClearStaleUIMouseButtons();
 	static qboolean prevMouse1 = qfalse;
 	for (int sof2Key = 0; sof2Key < 256; sof2Key++) {
 		int ojkKey = sof2_to_openjk[sof2Key];
@@ -131,10 +127,10 @@ void SyncSOF2ShadowKeys(void) {
 		}
 	}
 	// Log MOUSE1 state changes for diagnostics
-	qboolean curMouse1 = sof2_shadow_keys[178].down;
-	if ( curMouse1 != prevMouse1 ) {
-		Com_Printf("[KEY] MOUSE1 shadow[178].down changed: %d → %d (kg[%d].down=%d)\n",
-			(int)prevMouse1, (int)curMouse1, A_MOUSE1, (int)kg.keys[A_MOUSE1].down);
+	qboolean curMouse1 = sof2_shadow_keys[A_MOUSE1].down;
+	if ( clVerboseUiDebug && curMouse1 != prevMouse1 ) {
+		Com_Printf("[KEY] MOUSE1 shadow[%d].down changed: %d -> %d (kg[%d].down=%d)\n",
+			A_MOUSE1, (int)prevMouse1, (int)curMouse1, A_MOUSE1, (int)kg.keys[A_MOUSE1].down);
 		prevMouse1 = curMouse1;
 	}
 }
@@ -165,7 +161,7 @@ static void UI_Z_FreeTags( int tag )
 static int g_mallocCount = 0;
 static void *UI_SysMalloc( int size ) {
 	void *p = HeapAlloc( GetProcessHeap(), 0, (SIZE_T)size );
-	if ( (++g_mallocCount % 50) == 1 )
+	if ( clVerboseUiDebug && (++g_mallocCount % 50) == 1 )
 		Com_Printf("[DBG] Z_Malloc(%d) = %p  [#%d]\n", size, p, g_mallocCount);
 	return p;
 }
@@ -274,6 +270,19 @@ static int SOF2_FindCvarByName( const char *name ) {
 			return i;
 	}
 	return -1;
+}
+
+qboolean CL_GetSOF2CursorPos( float *x, float *y ) {
+	const int ix = SOF2_FindCvarByName( "menu_mouse_x" );
+	const int iy = SOF2_FindCvarByName( "menu_mouse_y" );
+
+	if ( ix < 0 || iy < 0 ) {
+		return qfalse;
+	}
+
+	if ( x ) *x = s_sof2Cvars[ix].value;
+	if ( y ) *y = s_sof2Cvars[iy].value;
+	return qtrue;
 }
 
 // After the engine updates a real cvar (via Cvar_Set/Cvar_SetValue), push the
@@ -476,21 +485,61 @@ MAKE_SLOT_STUB(76)
 MAKE_SLOT_STUB(81)
 MAKE_SLOT_STUB(82)
 MAKE_SLOT_STUB(83)
+static qboolean s_uiSof2ScissorEnabled = qfalse;
+static int s_uiSof2ScissorX = 0;
+static int s_uiSof2ScissorY = 0;
+static int s_uiSof2ScissorW = 0;
+static int s_uiSof2ScissorH = 0;
+static int s_uiSof2ClipRightEdge = -1;
+static qboolean s_uiSof2TextOriginValid = qfalse;
+static int s_uiSof2TextOriginX = 0;
+static int s_uiSof2TextOriginY = 0;
+
+static void UI_SOF2_TranslateTextPoint( float *x, float *y ) {
+	if ( s_uiSof2TextOriginValid && s_uiSof2ClipRightEdge > 0 ) {
+		*x += (float)s_uiSof2TextOriginX;
+		*y += (float)s_uiSof2TextOriginY;
+	}
+}
+
 // Slot 99: RE_SetClipRegion — SOF2 passes a single int (clip right-edge pixel).
-// This OpenJK build's refexport_t has no SetClipRegion, so just no-op.
-// Text won't be clipped, but that's fine — ensures it's always visible.
+// SOF2's text renderer uses this as part of its widget-local draw state. We do not
+// implement hard clipping here, but we preserve the value for diagnostics.
 static void UI_RE_SetClipRegion( int clipRightEdge ) {
-	// no-op: clipping not supported in this renderer build
+	s_uiSof2ClipRightEdge = clipRightEdge;
+	static int clipLogCount = 0;
+	if ( ++clipLogCount <= 20 ) {
+		Com_Printf( "[DBG] SetClipRegion #%d: right=%d scissorEnabled=%d scissor=(%d,%d,%d,%d)\n",
+			clipLogCount,
+			clipRightEdge,
+			s_uiSof2ScissorEnabled ? 1 : 0,
+			s_uiSof2ScissorX, s_uiSof2ScissorY, s_uiSof2ScissorW, s_uiSof2ScissorH );
+	}
 }
 
 // Slot 98: RE_SetScissor — SOF2 passes (x, y, w, h, enable).
 // enable=1 sets a clip rectangle; (-1,-1,-1,-1, 0) disables clipping.
-// OpenJK has no direct scissor API in refexport — no-op for now.
-// CRITICAL: This was previously misidentified as RE_SetColor and calling
-// re.SetColor() with coordinate values, which caused a persistent blue tint
-// on all subsequent draws (the "blue gauge" bug).
+// OpenJK has no direct scissor API in refexport. Preserve the rectangle anyway and
+// use its origin as the widget-space translation for the SOF2 menu draw path.
 static void UI_RE_SetScissor( int x, int y, int w, int h, int enable ) {
-	// no-op: scissor clipping not implemented in this renderer build
+	s_uiSof2ScissorEnabled = enable ? qtrue : qfalse;
+	s_uiSof2ScissorX = x;
+	s_uiSof2ScissorY = y;
+	s_uiSof2ScissorW = w;
+	s_uiSof2ScissorH = h;
+	if ( enable && x >= 0 && y >= 0 && w > 0 && h > 0 && !( x == 0 && y == 0 && w == 640 && h == 480 ) ) {
+		s_uiSof2TextOriginValid = qtrue;
+		s_uiSof2TextOriginX = x;
+		s_uiSof2TextOriginY = y;
+	}
+
+	static int scissorLogCount = 0;
+	if ( ++scissorLogCount <= 20 ) {
+		Com_Printf( "[DBG] SetScissor #%d: enable=%d rect=(%d,%d,%d,%d) textOriginValid=%d textOrigin=(%d,%d)\n",
+			scissorLogCount, enable, x, y, w, h,
+			s_uiSof2TextOriginValid ? 1 : 0,
+			s_uiSof2TextOriginX, s_uiSof2TextOriginY );
+	}
 }
 
 // Traced wrapper for Cbuf_ExecuteText (slot 22)
@@ -636,29 +685,29 @@ static char *UI_SE_GetString_WithFallback( const char *token, int flags ) {
 // Slot 86: R_RegisterFont — SOF2's DLL calls this as RegisterFont(name, size, scaleRaw, flags).
 // OpenJK's re.RegisterFont takes (const char *name) and returns an int handle.
 //
-// SOF2 has font names (small, medium, title, credmed) that don't have .fontdat files
-// in any PK3.  The original SOF2 renderer created these internally.  Map them to the
-// closest available fonts that DO have .fontdat files.
+// SOF2 has logical font names (small, medium, title, credmed) that do not exist
+// as standalone .fontdat assets in this runtime. The earlier compatibility pass
+// collapsed all of them onto "hud", which matches neither the menu appearance nor
+// the layout metrics. Use the closest available concrete assets instead so width/
+// height calculations do not blow out the menu item placement.
 static int UI_RE_RegisterFont_SOF2( const char *name, int size, int scaleRaw, int flags ) {
-	(void)size; (void)scaleRaw; (void)flags;
-
 	const char *actual = name;
-	// Map missing SOF2 fonts to available ones — use "hud" font which best matches
-	// the original SOF2 menu font metrics and appearance.
+
 	if ( name ) {
-		if ( !Q_stricmp( name, "small" ) )        actual = "hud";
-		else if ( !Q_stricmp( name, "medium" ) )   actual = "hud";
-		else if ( !Q_stricmp( name, "title" ) )    actual = "hud";
-		else if ( !Q_stricmp( name, "credmed" ) )  actual = "hud";
+		if ( !Q_stricmp( name, "small" ) )        actual = "lcdsmall";
+		else if ( !Q_stricmp( name, "medium" ) )   actual = "lcd";
+		else if ( !Q_stricmp( name, "title" ) )    actual = "credtitle";
+		else if ( !Q_stricmp( name, "credmed" ) )  actual = "lcd";
 	}
 
 	int h = re.RegisterFont( actual );
 	if ( h == 0 ) h = re.RegisterFont( "hud" );  // ultimate fallback
-	Com_Printf( "RegisterFont: '%s'%s%s%s -> %d\n",
+	Com_Printf( "RegisterFont: '%s'%s%s%s size=%d scale=%.2f flags=0x%x -> %d\n",
 		name ? name : "(null)",
 		(actual != name) ? " (mapped to '" : "",
 		(actual != name) ? actual : "",
 		(actual != name) ? "')" : "",
+		size, *(float *)&scaleRaw, flags,
 		h );
 	return h;
 }
@@ -713,8 +762,9 @@ static void UI_UnpackColor( unsigned int color, float *rgba ) {
 static void UI_RE_StretchPic( float x, float y, float w, float h, int color, int hShader, int adjustFrom ) {
 	g_stretchPicCount++;
 	if (g_stretchPicCount <= 30) {
-		Com_Printf("[DBG] StretchPic #%d: x=%.0f y=%.0f w=%.0f h=%.0f color=0x%08X shader=%d adj=%d\n",
-			g_stretchPicCount, x, y, w, h, (unsigned int)color, hShader, adjustFrom);
+		Com_Printf("[DBG] StretchPic #%d: x=%.0f y=%.0f w=%.0f h=%.0f color=0x%08X shader=%d adj=%d scissor=%d\n",
+			g_stretchPicCount, x, y, w, h, (unsigned int)color, hShader, adjustFrom,
+			s_uiSof2ScissorEnabled ? 1 : 0 );
 	}
 	// Apply SOF2 packed RGBA color tint before drawing
 	if ( color != 0 && color != (int)0xFFFFFFFF ) {
@@ -773,73 +823,157 @@ static void UI_RE_DrawBox( int x, int y, int w, int h, unsigned int color ) {
 	UI_RE_DrawLine( (float)(x+w), (float)(y-1), (float)(x+w), (float)(y+h), 1.0f, outlineColor );
 }
 
-// Slot 87: RE_Font_HeightPixels — font height in pixels scaled by 'scale'.
-// SOF2 signature: float RE_Font_HeightPixels(uint fontHandle, float scale)
-// OpenJK's re.Font_HeightPixels returns int; SOF2 DLL expects float return.
-// Safety: never return 0 — DLL may divide by font height.
-static float UI_RE_Font_HeightPixels( unsigned int fontHandle, float scale ) {
-	int px = re.Font_HeightPixels( (int)fontHandle, scale );
-	if ( px <= 0 ) px = 14;  // fallback to reasonable height
+static qboolean UI_SOF2_StringArg( int raw, const char **out ) {
+	if ( (unsigned int)raw <= 0x10000 ) return qfalse;
+	__try {
+		const char *text = (const char *)raw;
+		if ( !text || !*text ) return qfalse;
+		*out = text;
+		return qtrue;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return qfalse;
+	}
+}
+
+static qboolean UI_SOF2_ScaleArg( int raw, float *out ) {
+	float f = *(float *)&raw;
+	if ( f > 0.01f && f < 16.0f ) {
+		*out = f;
+		return qtrue;
+	}
+	return qfalse;
+}
+
+static int UI_SOF2_FontHandleArg( int raw ) {
+	return ( raw > 0 && raw < 4096 ) ? raw : 0;
+}
+
+static float UI_SOF2_CoordArg( int raw ) {
+	float f = *(float *)&raw;
+	if ( raw != 0 && fabsf( f ) < 0.01f && abs( raw ) < 10000 ) {
+		return (float)raw;
+	}
+	if ( f > -10000.0f && f < 10000.0f ) {
+		return f;
+	}
+	return (float)raw;
+}
+
+static const float *UI_SOF2_ColorArg( int raw, float *whiteFallback ) {
+	unsigned int uraw = (unsigned int)raw;
+	if ( (unsigned int)raw > 0x10000 ) {
+		const float *rgba = (const float *)raw;
+		__try {
+			if ( rgba[0] >= 0.0f && rgba[0] <= 1.0f &&
+			     rgba[1] >= 0.0f && rgba[1] <= 1.0f &&
+			     rgba[2] >= 0.0f && rgba[2] <= 1.0f &&
+			     rgba[3] >= 0.0f && rgba[3] <= 2.0f ) {
+				return rgba;
+			}
+		} __except(EXCEPTION_EXECUTE_HANDLER) {
+		}
+	}
+	if ( ( uraw & 0xFF000000u ) != 0 ) {
+		whiteFallback[0] = (float)( uraw        & 0xFF ) / 255.0f;
+		whiteFallback[1] = (float)( ( uraw >> 8 )  & 0xFF ) / 255.0f;
+		whiteFallback[2] = (float)( ( uraw >> 16 ) & 0xFF ) / 255.0f;
+		whiteFallback[3] = (float)( ( uraw >> 24 ) & 0xFF ) / 255.0f;
+		return whiteFallback;
+	}
+	return whiteFallback;
+}
+
+// Slot 87: RE_Font_HeightPixels — retail SOF2 callers are not ABI-consistent
+// enough to trust a fixed typed signature here. Decode the raw arguments and
+// fall back to sane defaults rather than returning garbage metrics.
+static float UI_RE_Font_HeightPixels( int a1, int a2, int a3 ) {
+	int fontHandle = 0;
+	float scale = 1.0f;
+
+	if ( UI_SOF2_ScaleArg( a1, &scale ) && UI_SOF2_FontHandleArg( a3 ) ) {
+		fontHandle = UI_SOF2_FontHandleArg( a3 );
+	} else if ( UI_SOF2_FontHandleArg( a1 ) && UI_SOF2_ScaleArg( a2, &scale ) ) {
+		fontHandle = UI_SOF2_FontHandleArg( a1 );
+	} else if ( UI_SOF2_FontHandleArg( a2 ) && UI_SOF2_ScaleArg( a3, &scale ) ) {
+		fontHandle = UI_SOF2_FontHandleArg( a2 );
+	}
+
+	if ( !fontHandle ) {
+		fontHandle = UI_SOF2_FontHandleArg( a1 );
+		if ( !fontHandle ) fontHandle = UI_SOF2_FontHandleArg( a2 );
+		if ( !fontHandle ) fontHandle = UI_SOF2_FontHandleArg( a3 );
+		if ( !fontHandle ) fontHandle = 3;
+	}
+
+	int px = re.Font_HeightPixels( fontHandle, scale );
+	if ( px <= 0 ) px = 14;
 	return (float)px;
 }
 
-// Slot 88: RE_Font_StrLenPixels — pixel width of a string.
-// SOF2 signature: int RE_Font_StrLenPixels(char *text, int setIndex, float scale)
-static int UI_RE_Font_StrLenPixels( const char *text, int setIndex, float scale ) {
-	return re.Font_StrLenPixels( text, setIndex, scale );
+// Slot 88: RE_Font_StrLenPixels — observed retail callsites use either
+// (text,font) or (text,font,scale). Treat missing/garbage scale as 1.0.
+static int UI_RE_Font_StrLenPixels( int a1, int a2, int a3 ) {
+	const char *text = NULL;
+	int fontHandle = 3;
+	float scale = 1.0f;
+
+	if ( UI_SOF2_StringArg( a1, &text ) ) {
+		if ( UI_SOF2_FontHandleArg( a2 ) ) fontHandle = UI_SOF2_FontHandleArg( a2 );
+		UI_SOF2_ScaleArg( a3, &scale );
+	} else if ( UI_SOF2_StringArg( a2, &text ) ) {
+		if ( UI_SOF2_FontHandleArg( a3 ) ) fontHandle = UI_SOF2_FontHandleArg( a3 );
+		UI_SOF2_ScaleArg( a1, &scale );
+	}
+
+	if ( !text ) return 0;
+	return re.Font_StrLenPixels( text, fontHandle, scale );
 }
 
-// Slot 89: RE_Font_DrawString — draw a text string.
-// SOF2 DLL pushes 7 values (verified from UI_Widget_DrawText disasm at 0x4000cc60):
-//   p0 = float ox (bit pattern)       → e.g. 0 = 0.0
-//   p1 = float oy (bit pattern)       → e.g. 0x43580000 = 216.0
-//   p2 = const char *text
-//   p3 = color (packed uint32 or float[4] ptr)
-//   p4 = int setIndex/fontHandle
-//   p5 = float scale (bit pattern)    → e.g. 0x3F800000 = 1.0
-//   p6 = int iMaxPixelWidth or style  → 0 = unlimited
-//
-// CRITICAL: The DLL may pass rgba (param 3) as either a float[4] pointer OR a packed
-// uint32 color.  Accept all params as raw ints and safely probe to determine which case.
-// Uses Windows SEH (__try/__except) to guard against bad pointer dereferences.
-static void UI_RE_Font_DrawString_Safe( int p0, int p1, int p2, int p3,
-                                        int p4, int p5, int p6 ) {
-	const char *text = (const char *)p2;
-	if ( !text || !*text ) return;
-
-	// SOF2 passes ox/oy/scale as floats, reinterpret the raw int bits
-	float ox = *(float *)&p0;
-	float oy = *(float *)&p1;
-	int setIndex = p4;
-	float scale = *(float *)&p5;
-	// p6 = iMaxPixelWidth (0 = unlimited), passed through to renderer
-
-	// Determine rgba: if p3 looks like a valid heap/stack pointer (>64K),
-	// try to use it as float[4].  Otherwise fall back to white.
+// Slot 89: RE_Font_DrawString — retail Menusx86 is calling this with a SOF2-
+// specific raw ABI. Two patterns are tolerated here:
+//   A) (x, y, scale, color, text, font, limit)  ← seen in UI_Widget_DrawText
+//   B) legacy OpenJK-style fallback used by earlier compatibility work
+static void UI_RE_Font_DrawString_Safe( int a1, int a2, int a3, int a4,
+                                        int a5, int a6, int a7 ) {
+	float ox = UI_SOF2_CoordArg( a1 );
+	float oy = UI_SOF2_CoordArg( a2 );
 	float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	const float *color = white;
-	if ( (unsigned int)p3 > 0x10000 ) {
-		// Likely a valid pointer — probe with SEH to be safe
-		const float *rgba = (const float *)p3;
-		__try {
-			if ( rgba[0] >= 0.0f && rgba[0] <= 1.0f &&
-			     rgba[3] >= 0.0f && rgba[3] <= 2.0f ) {
-				color = rgba;
-			}
-		} __except(EXCEPTION_EXECUTE_HANDLER) {
-			// Bad pointer — use white
-		}
+	const float *color = UI_SOF2_ColorArg( a4, white );
+	const char *text = NULL;
+	int fontHandle = 3;
+	float scale = 1.0f;
+	int limit = a7;
+	const char *sig = "unknown";
+
+	if ( UI_SOF2_StringArg( a5, &text ) && UI_SOF2_FontHandleArg( a6 ) ) {
+		fontHandle = UI_SOF2_FontHandleArg( a6 );
+		UI_SOF2_ScaleArg( a3, &scale );
+		sig = "sof2";
+	} else if ( UI_SOF2_StringArg( a3, &text ) && UI_SOF2_FontHandleArg( a5 ) ) {
+		fontHandle = UI_SOF2_FontHandleArg( a5 );
+		UI_SOF2_ScaleArg( a6, &scale );
+		sig = "legacy";
 	}
 
-	if ( scale <= 0.0f || scale > 10.0f ) scale = 1.0f;
+	if ( !text || !*text ) {
+		return;
+	}
+
+	UI_SOF2_TranslateTextPoint( &ox, &oy );
 
 	static int s_drawCalls = 0;
-	if ( ++s_drawCalls <= 20 ) {
-		Com_Printf("[DBG] Font_DrawString #%d: ox=%.1f oy=%.1f text='%.32s' set=%d scale=%.2f p6=%d\n",
-			s_drawCalls, ox, oy, text, setIndex, scale, p6);
+	if ( ++s_drawCalls <= 24 ) {
+		Com_Printf(
+			"[DBG] Font_DrawString #%d sig=%s raw=(%08X,%08X,%08X,%08X,%08X,%08X,%08X) xy=(%.1f,%.1f) text='%.32s' font=%d scale=%.2f limit=%d scissor=%d clipRight=%d textOrigin=(%d,%d)\n",
+			s_drawCalls, sig,
+			(unsigned int)a1, (unsigned int)a2, (unsigned int)a3, (unsigned int)a4,
+			(unsigned int)a5, (unsigned int)a6, (unsigned int)a7,
+			ox, oy, text, fontHandle, scale, limit,
+			s_uiSof2ScissorEnabled ? 1 : 0, s_uiSof2ClipRightEdge,
+			s_uiSof2TextOriginX, s_uiSof2TextOriginY );
 	}
 
-	re.Font_DrawString( (int)ox, (int)oy, text, color, setIndex, p6, scale );
+	re.Font_DrawString( (int)ox, (int)oy, text, color, fontHandle, limit, scale );
 }
 
 

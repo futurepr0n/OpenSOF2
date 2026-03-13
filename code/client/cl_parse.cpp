@@ -255,7 +255,7 @@ void CL_ParseSnapshot( msg_t *msg ) {
 		}
 	}
 	if ( snapshotParseLogCount < 24 ) {
-		Com_Printf(
+		Com_DPrintf(
 			"[CL parse] snapshot #%d serverTime=%d msg=%d delta=%d cmdNum=%d flags=0x%X oldValid=%d oldMsg=%d\n",
 			snapshotParseLogCount + 1,
 			newSnap.serverTime,
@@ -513,7 +513,7 @@ void CL_ParseServerMessage( msg_t *msg ) {
 	// parse the message
 	//
 	if ( serverMessageLogCount < 24 ) {
-		Com_Printf( "[CL parse] server msg #%d size=%d state=%d readcount=%d\n",
+		Com_DPrintf( "[CL parse] server msg #%d size=%d state=%d readcount=%d\n",
 			serverMessageLogCount + 1,
 			msg->cursize,
 			(int)cls.state,
@@ -536,7 +536,7 @@ void CL_ParseServerMessage( msg_t *msg ) {
 			const char *name = ( cmd >= 0 && cmd < ARRAY_LEN( svc_strings ) && svc_strings[cmd] )
 				? svc_strings[cmd]
 				: "svc_unknown";
-			Com_Printf( "[CL parse] cmd #%d opcode=%d (%s) readcount=%d/%d state=%d\n",
+			Com_DPrintf( "[CL parse] cmd #%d opcode=%d (%s) readcount=%d/%d state=%d\n",
 				serverCommandOpcodeLogCount + 1,
 				cmd,
 				name,

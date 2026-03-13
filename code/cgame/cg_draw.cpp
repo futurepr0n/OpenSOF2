@@ -3913,10 +3913,18 @@ static void CG_Draw2D( void )
 	int		w,y_pos;
 	centity_t *cent = &cg_entities[cg.snap->ps.clientNum];
 
-	// if we are taking a levelshot for the menu, don't draw anything
+	// If levelshot gets latched outside intermission (bad server command timing),
+	// clear it so normal HUD drawing can resume.
 	if ( cg.levelShot )
 	{
-		return;
+		if ( cg.snap && cg.snap->ps.pm_type != PM_INTERMISSION )
+		{
+			cg.levelShot = qfalse;
+		}
+		else
+		{
+			return;
+		}
 	}
 
 	if ( cg_draw2D.integer == 0 )

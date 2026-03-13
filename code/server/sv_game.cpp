@@ -26,6 +26,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../server/exe_headers.h"
 
 #include "../qcommon/cm_local.h"
+#include "../qcommon/strippublic.h"
+#include "../client/snd_public.h"
 
 #include "server.h"
 #include <intrin.h>
@@ -512,6 +514,19 @@ static void QDECL SV_Traced_Error( int level, const char *fmt, ... ) {
 	va_end( args );
 	fprintf(stderr, "[GI] gi_Com_Error called (#%d) level=%d msg='%s'\n", gi_call_count, level, buf);
 	fflush(stderr);
+
+	// SOF2 game DLL generates entity events (NPC vocalizations, etc.) that
+	// don't exist in the OpenJK event table.  Swallow these to prevent a
+	// fatal server crash; the cgame sanitizer handles the client side.
+	if ( Q_strncmp( buf, "Unknown event:", 14 ) == 0 ) {
+		static int s_unknownEventCount = 0;
+		if ( s_unknownEventCount < 32 ) {
+			Com_Printf( "^3[SV guard] swallowed game Unknown event: %s\n", buf );
+			s_unknownEventCount++;
+		}
+		return;
+	}
+
 	Com_Error( level, "%s", buf );
 }
 
@@ -677,6 +692,27 @@ static int   sv_numGEntities = 0;      // MAX_GENTITIES (1024)
 static void *sv_GameClients  = NULL;   // game client array (stride-based, unlike entities)
 static int   sv_GameClientSize = 0;    // sizeof(gclient_t) = 0x24C
 
+static int SV_FindEntityNumByPointer( gentity_t *gEnt ) {
+	int limit;
+
+	if ( !gEnt || !sv_GEntities ) {
+		return -1;
+	}
+
+	limit = sv_numGEntities;
+	if ( limit <= 0 || limit > MAX_GENTITIES ) {
+		limit = MAX_GENTITIES;
+	}
+
+	for ( int i = 0; i < limit; ++i ) {
+		if ( ((gentity_t **)sv_GEntities)[i] == gEnt ) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
 gentity_t	*SV_GentityNum( int num ) {
 	gentity_t *ent;
 	if ( num < 0 || num >= MAX_GENTITIES || !sv_GEntities ) {
@@ -686,22 +722,45 @@ gentity_t	*SV_GentityNum( int num ) {
 	ent = ((gentity_t **)sv_GEntities)[num];
 	if ( ent ) {
 		SOF2_ENT_NUMBER( ent ) = num;
+		SOF2_ENT_SERVERINDEX( ent ) = num;
 	}
 	return ent;
 }
 
 svEntity_t	*SV_SvEntityForGentity( gentity_t *gEnt ) {
-	// SOF2: entity number is at CEntity offset 0x08 (after vtable+entityIndex)
-	int entNum = SOF2_ENT_NUMBER(gEnt);
-	if ( !gEnt || entNum < 0 || entNum >= MAX_GENTITIES ) {
+	int entNum;
+	int serverIndex;
+
+	if ( !gEnt ) {
+		return NULL;
+	}
+
+	entNum = SOF2_ENT_NUMBER( gEnt );
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+		serverIndex = SOF2_ENT_SERVERINDEX( gEnt );
+		if ( serverIndex >= 0 && serverIndex < MAX_GENTITIES ) {
+			entNum = serverIndex;
+		} else {
+			entNum = SV_FindEntityNumByPointer( gEnt );
+		}
+	}
+
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
 		static int badEntWarnCount = 0;
-		if ( badEntWarnCount < 5 ) {
-			Com_Printf( "^3SV_SvEntityForGentity: out-of-range gEnt=%p entNum=%d (MAX=%d), returning NULL\n",
-				(void*)gEnt, gEnt ? entNum : -1, MAX_GENTITIES);
+		if ( badEntWarnCount < 12 ) {
+			Com_Printf(
+				"^3SV_SvEntityForGentity: unresolved gEnt=%p s.number=%d serverIndex=%d (MAX=%d), returning NULL\n",
+				(void *)gEnt,
+				SOF2_ENT_NUMBER( gEnt ),
+				SOF2_ENT_SERVERINDEX( gEnt ),
+				MAX_GENTITIES );
 			badEntWarnCount++;
 		}
 		return NULL;
 	}
+
+	SOF2_ENT_NUMBER( gEnt ) = entNum;
+	SOF2_ENT_SERVERINDEX( gEnt ) = entNum;
 	return &sv.svEntities[ entNum ];
 }
 
@@ -1689,6 +1748,7 @@ static void SV_LocateGameData_SOF2( void *gentities, int numEntities, int entity
 			continue;
 		}
 		SOF2_ENT_NUMBER( ent ) = i;
+		SOF2_ENT_SERVERINDEX( ent ) = i;
 	}
 }
 
@@ -1725,13 +1785,70 @@ static int SV_GameStub_ReturnZero( void ) { return 0; }
 static void SV_CSkin_Noop( void ) {}
 
 // gi[64-66]: SV_AddNextMap/RemoveNextMap/GetNextMap — ICARUS map sequencing stubs
-static void SV_AddNextMap_Stub( const char * /*map*/ ) {}
-static void SV_RemoveNextMap_Stub( void ) {}
-static const char *SV_GetNextMap_Stub( void ) { return ""; }
+static const char *SV_AddNextMap_Stub( ... ) {
+	static int logCount = 0;
+	if ( logCount < 6 ) {
+		Com_Printf( "[SOF2 gi] AddNextMap stub hit\n" );
+		logCount++;
+	}
+	return "";
+}
+static const char *SV_RemoveNextMap_Stub( ... ) {
+	static int logCount = 0;
+	if ( logCount < 6 ) {
+		Com_Printf( "[SOF2 gi] RemoveNextMap stub hit\n" );
+		logCount++;
+	}
+	return "";
+}
+static const char *SV_GetNextMap_Stub( ... ) {
+	static int logCount = 0;
+	if ( logCount < 6 ) {
+		Com_Printf( "[SOF2 gi] GetNextMap stub hit\n" );
+		logCount++;
+	}
+	return "";
+}
 
-// gi[67-68]: GenericParser2 stubs
-static void *SV_GP_GetBaseParseGroup_Stub( void ) { return NULL; }
-static void SV_GP_SetSubGroups_Stub( void ) {}
+typedef int (*sof2_gp_vcall_stub_t)( ... );
+struct sof2_gp_group_stub_t {
+	sof2_gp_vcall_stub_t *vftable;
+};
+static int SV_SOF2_GPVCall_Stub( ... ) {
+	return 0;
+}
+static sof2_gp_vcall_stub_t s_sof2GpVTable[64];
+static sof2_gp_group_stub_t s_sof2GpGroup = { s_sof2GpVTable };
+static qboolean s_sof2GpInited = qfalse;
+
+static void SV_SOF2_InitGPStub( void ) {
+	int i;
+	if ( s_sof2GpInited ) {
+		return;
+	}
+	for ( i = 0; i < (int)( sizeof( s_sof2GpVTable ) / sizeof( s_sof2GpVTable[0] ) ); ++i ) {
+		s_sof2GpVTable[i] = SV_SOF2_GPVCall_Stub;
+	}
+	s_sof2GpInited = qtrue;
+}
+
+static void *SV_GP_GetBaseParseGroup_Stub( ... ) {
+	static int logCount = 0;
+	SV_SOF2_InitGPStub();
+	if ( logCount < 8 ) {
+		Com_Printf( "[SOF2 gi] GP_GetBaseParseGroup -> %p\n", (void *)&s_sof2GpGroup );
+		logCount++;
+	}
+	return &s_sof2GpGroup;
+}
+static void SV_GP_SetSubGroups_Stub( ... ) {
+	static int logCount = 0;
+	SV_SOF2_InitGPStub();
+	if ( logCount < 8 ) {
+		Com_Printf( "[SOF2 gi] GP_SetSubGroups stub hit\n" );
+		logCount++;
+	}
+}
 
 // gi[71]: SV_Trace — 10-arg wrapper matching SOF2 gamex86.dll calling convention
 // SOF2 game DLL pushes 10 args: results, start, mins, maxs, end, passEnt, contentmask,
@@ -1784,10 +1901,12 @@ static void SV_CM_DamageBrushSideHealth_Stub( int /*brushSide*/, int /*damage*/ 
 // cmd = ps+0x1DC, so ps = (char*)cmd - 0x1DC.
 // Used by sv_client.cpp after ClientThink to sync DLL position to engine playerState.
 char *g_sof2_dll_ps = NULL;
+static const int SOF2_PMF_NOCLIPMOVE = 0x100;
 
 static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 	static int getCmdLogCount = 0;
 	static int getCmdMoveLogCount = 0;
+	static int getCmdLockClearLogCount = 0;
 	if ( !cmd ) {
 		return;
 	}
@@ -1813,11 +1932,16 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 	//     PM_WalkMove with proper ground collision.
 	{
 		int *pm_type_ptr   = (int *)(g_sof2_dll_ps + 0x04);
+		int *pm_flags_ptr  = (int *)(g_sof2_dll_ps + 0x0C);
+		int *pm_time_ptr   = (int *)(g_sof2_dll_ps + 0x10);
 		int *dll_delta = (int *)(g_sof2_dll_ps + 0x50);
 		int *health        = (int *)(g_sof2_dll_ps + 0xD0);
-		int *controlSlot   = (int *)(g_sof2_dll_ps + 0x150);
 		int *moveType      = (int *)(g_sof2_dll_ps + 2212);
+		unsigned char *noclip = (unsigned char *)(g_sof2_dll_ps + 1701);
 		playerState_t *enginePs = SV_GameClientNum( 0 );
+		const int originalMoveType = *moveType;
+		const int originalPmFlags = *pm_flags_ptr;
+		const int originalPmTime = *pm_time_ptr;
 		*pm_type_ptr   = 0;   // PM_NORMAL — use PM_WalkMove with ground detection
 		if ( enginePs ) {
 			dll_delta[0] = enginePs->delta_angles[0];
@@ -1831,26 +1955,65 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 		if ( *health < 1 ) {
 			*health = 100;
 		}
-		if ( *controlSlot != 0 ) {
-			static int s_controlSlotLogCount = 0;
-			if ( s_controlSlotLogCount < 24 ) {
+		// Clear time-based movement locks and retail noclip-mode bit that can pin the
+		// player into PM_NoclipMove after direct +map startup.
+		*pm_time_ptr = 0;
+		*pm_flags_ptr &= ~( PMF_ALL_TIMES | PMF_RESPAWNED | PMF_TRIGGER_PUSHED | SOF2_PMF_NOCLIPMOVE );
+		if ( *noclip != 0 ) {
+			static int s_noclipLogCount = 0;
+			if ( s_noclipLogCount < 24 ) {
 				Com_Printf(
-					"[SOF2 fix] cleared control slot (SV_GetUsercmd) generic1/viewEntity=%d\n",
-					*controlSlot );
-				++s_controlSlotLogCount;
+					"[SOF2 fix] cleared noclip (SV_GetUsercmd) value=%u\n",
+					(unsigned int)( *noclip ) );
+				++s_noclipLogCount;
 			}
-			*controlSlot = 0;
+			*noclip = 0;
 		}
-		if ( *moveType == 3 ) {
+		// Fix N: clear ps+0x1FC — ClientThink @ RVA 0x4d009 reads this byte as a
+		// noclip-mode flag. If non-zero it immediately sets pm_type=1 (PM_NOCLIP),
+		// enabling full 3D free-flight before the health check. This field is set by
+		// a direct +map startup path and is never cleared by our existing patches
+		// (which cleared gclient->noclip at offset 1701, a completely different field).
+		// pra1: this byte is non-zero from spawn → pm_type=1 every frame from the start.
+		// air1: set by ICARUS/script during movement → pm_type=1 after first W+lookup.
+		{
+			volatile int *psNoclipByte = (volatile int *)(g_sof2_dll_ps + 0x1FC);
+			if ( *psNoclipByte != 0 ) {
+				static int s_ps1fcLogCount = 0;
+				if ( s_ps1fcLogCount < 24 ) {
+					Com_Printf(
+						"[SOF2 fix] cleared ps+0x1FC noclip byte (SV_GetUsercmd) value=0x%X\n",
+						(unsigned int)*psNoclipByte );
+					++s_ps1fcLogCount;
+				}
+				*psNoclipByte = 0;
+			}
+		}
+		// Keep retail movement in walk/run mode for direct map startup.
+		if ( *moveType != 2 ) {
 			static int s_moveTypeLogCount = 0;
-			if ( s_moveTypeLogCount < 24 ) {
+			if ( s_moveTypeLogCount < 32 ) {
 				Com_Printf(
-					"[SOF2 fix] cleared flyswim (SV_GetUsercmd) moveType=%d -> %d\n",
+					"[SOF2 fix] normalized moveType (SV_GetUsercmd) %d -> %d\n",
 					*moveType,
 					2 );
 				++s_moveTypeLogCount;
 			}
 			*moveType = 2;
+		}
+		if ( getCmdLockClearLogCount < 32 &&
+			( originalMoveType != *moveType ||
+			  originalPmTime != *pm_time_ptr ||
+			  originalPmFlags != *pm_flags_ptr ) ) {
+			Com_Printf(
+				"[SOF2 fix] cleared move locks (SV_GetUsercmd) pm_time=%d->%d pm_flags=0x%X->0x%X moveType=%d->%d\n",
+				originalPmTime,
+				*pm_time_ptr,
+				(unsigned int)originalPmFlags,
+				(unsigned int)*pm_flags_ptr,
+				originalMoveType,
+				*moveType );
+			++getCmdLockClearLogCount;
 		}
 	}
 
@@ -1874,7 +2037,30 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 		out[1] = src->angles[0];  // PITCH (OpenJK angles[0]) → DLL viewangles[0]
 		out[2] = src->angles[1];  // YAW   (OpenJK angles[1]) → DLL viewangles[1]
 		out[3] = src->angles[2];  // ROLL
-		out[4] = src->buttons;
+
+		// Strip BUTTON_ATTACK (bit 0) from the forwarded command.
+		// The weapon system in gamex86.dll crashes when curWeapon is NULL (direct +map load
+		// has no saved weapon inventory). IsWeaponInFireState is patched to return false to
+		// avoid that crash, but this causes a new problem: since the state is always "not
+		// firing", every frame that has BUTTON_ATTACK set starts a new fire cycle, generating
+		// a rapid-fire sound loop. Until weapon initialization is fully solved, suppress
+		// attack input to prevent the sound loop.
+		{
+			static int s_attackSuppressLogCount = 0;
+			unsigned int rawButtons = (unsigned int)src->buttons;
+			if ( rawButtons & 1u ) { // BUTTON_ATTACK
+				if ( s_attackSuppressLogCount < 8 ) {
+					Com_Printf( "[SOF2 fix] suppressed BUTTON_ATTACK in cmd: buttons=0x%08X fwd=%d right=%d up=%d (#%d)\n",
+						rawButtons,
+						(int)src->forwardmove, (int)src->rightmove, (int)src->upmove,
+						s_attackSuppressLogCount + 1 );
+					++s_attackSuppressLogCount;
+				}
+				rawButtons &= ~1u;
+			}
+			out[4] = (int)rawButtons;
+		}
+
 		out[5] = (unsigned char)src->weapon
 		       | ( (unsigned char)src->forwardmove << 8 )
 		       | ( (unsigned char)src->rightmove   << 16 )
@@ -1893,7 +2079,8 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 	// Log using the original OpenJK usercmd fields
 	{
 		const usercmd_t *src2 = &svs.clients[0].lastUsercmd;
-		if ( getCmdLogCount < 4 ) {
+		static const qboolean svVerboseGetUsercmdLogs = qfalse;
+		if ( svVerboseGetUsercmdLogs && getCmdLogCount < 4 ) {
 			Com_Printf( "[GI GetUsercmd] #%d move=(%d,%d,%d) ang=(%d,%d,%d) btn=0x%08X cmdTime=%d\n",
 				getCmdLogCount + 1,
 				(int)src2->forwardmove, (int)src2->rightmove, (int)src2->upmove,
@@ -1903,7 +2090,7 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 		}
 		if ( src2->forwardmove || src2->rightmove || src2->upmove ) {
 			sv_trace_log_armed = 1;
-			if ( getCmdMoveLogCount < 128 ) {
+			if ( svVerboseGetUsercmdLogs && getCmdMoveLogCount < 128 ) {
 				Com_Printf( "[GI GetUsercmd MOVE] #%d move=(%d,%d,%d) cmdTime=%d\n",
 					getCmdMoveLogCount + 1,
 					(int)src2->forwardmove, (int)src2->rightmove, (int)src2->upmove,
@@ -1929,7 +2116,8 @@ static qhandle_t SV_RE_RegisterShader_Wrapper( const char *name ) { return re.Re
 // The DLL stores this pointer at entitySystem+0x30C4, then calls through its vtable:
 //   vtable[0]: CEntitySystem_DispatchEvent — Dispatch(int arg1, int arg2), void return
 //   vtable[1]: G_SpawnEntityInWorld — Allocate(void *ent, int slotOverride), returns int slot index
-// MSVC thiscall: this in ECX, callee cleans stack args with RET 8.
+//   vtable[2]: CEntitySystem_UnregisterEntity tail-jump target — takes entity pointer.
+// MSVC thiscall: this in ECX, callee cleans stack args.
 class CHandlePoolStub {
 	int nextSlot;
 public:
@@ -1945,6 +2133,11 @@ public:
 	virtual int Allocate(void * /*ent*/, int slotOverride) {
 		if (slotOverride >= 0) return slotOverride;
 		return nextSlot++;
+	}
+
+	// vtable[2]: Unregister/free callback used by CEntitySystem_UnregisterEntity.
+	// Must exist so gamex86.dll doesn't jump through a null function pointer.
+	virtual void Unregister(void * /*ent*/) {
 	}
 };
 static CHandlePoolStub g_handlePoolStub;
@@ -2011,6 +2204,10 @@ public:
 	}
 
 	// ===== vtable[0] (0x00): AddBoltToModel — 2 stack args =====
+	// NOTE: CG_AddViewWeapon ALSO calls vtable[0] with local_d0[0]=0 (reType=RT_MODEL=0),
+	// so ResolveModel(0) returns NULL → safe no-op. The game DLL calls this with real
+	// modelHandle+boneName to add G2 bolts during entity initialization.
+	// DO NOT change arg count — game calls with 2 args (ret 8).
 	virtual int Slot00_AddBolt(int modelHandle, const char *boneName) {
 		CGhoul2Info *ghl = ResolveModel(modelHandle);
 		if (ghl) {
@@ -2398,8 +2595,49 @@ public:
 	// ===== vtable[62] (0xF8): GetAnimFrameIndex — 2 stack args =====
 	virtual int Slot62_GetAnimFrameIndex(int a1, int a2) { return 0; }
 
-	// ===== vtable[63] (0xFC): GetAnimFrameCount — 2 stack args =====
-	virtual int Slot63_GetAnimFrameCount(int a1, int a2) { return 0; }
+	// Helper: convert SOF2 refEntity_t layout → OpenJK refEntity_t → re.AddRefEntityToScene
+	// SOF2 refEntity_t (from Ghidra CWeaponSystem_Update): axis@+0x0C, origin@+0x34, hModel@+0x6C
+	void SubmitSOF2RefEntityToScene(void *sof2Ent, const char *dbgSlot) {
+		if (!sof2Ent) return;
+		const unsigned char *raw = (const unsigned char *)sof2Ent;
+		const int   sof2ReType   = *(const int  *)(raw + 0x00);
+		const int   sof2Renderfx = *(const int  *)(raw + 0x04);
+		const float *sof2Axis    = (const float *)(raw + 0x0C);
+		const float *sof2Origin  = (const float *)(raw + 0x34);
+		const int   sof2hModel   = *(const int  *)(raw + 0x6C);
+
+		static int submitLogCount = 0;
+		if (submitLogCount < 12) {
+			Com_Printf("[WRAITH%s] reType=%d hModel=%d renderfx=0x%x origin=(%.1f,%.1f,%.1f)\n",
+				dbgSlot, sof2ReType, sof2hModel, sof2Renderfx,
+				sof2Origin[0], sof2Origin[1], sof2Origin[2]);
+			submitLogCount++;
+		}
+
+		if (!sof2hModel) return;
+
+		refEntity_t ent;
+		memset(&ent, 0, sizeof(ent));
+		ent.reType   = (refEntityType_t)sof2ReType;
+		ent.renderfx = sof2Renderfx;
+		ent.hModel   = (qhandle_t)sof2hModel;
+		VectorCopy(sof2Origin, ent.origin);
+		VectorCopy(sof2Origin, ent.lightingOrigin);
+		VectorCopy(sof2Origin, ent.oldorigin);
+		VectorCopy(sof2Axis + 0, ent.axis[0]);
+		VectorCopy(sof2Axis + 3, ent.axis[1]);
+		VectorCopy(sof2Axis + 6, ent.axis[2]);
+		ent.shaderRGBA[0] = ent.shaderRGBA[1] = ent.shaderRGBA[2] = ent.shaderRGBA[3] = 255;
+		ent.modelScale[0] = ent.modelScale[1] = ent.modelScale[2] = 1.0f;
+		re.AddRefEntityToScene(&ent);
+	}
+
+	// ===== vtable[63] (0xFC): SubmitRefEntity — called from CWeaponSystem_Update (1 stack arg: sof2 refent ptr) =====
+	// Assembly-confirmed: PUSH ESI; CALL [EDX+0xfc] → exactly 1 stack arg = refent ptr.
+	// vtable[0] (AddBolt) is NOT this — game calls vtable[0] with 2 args (modelHandle, boneName).
+	virtual void Slot63_SubmitRefEntity(void *sof2Ent) {
+		SubmitSOF2RefEntityToScene(sof2Ent, "63");
+	}
 
 	// ===== vtable[64] (0x100): GetBonePosition — 3 stack args =====
 	virtual int Slot64_GetBonePosition(int a1, int a2, int a3) { return 0; }
@@ -2487,7 +2725,10 @@ static void *SV_G2_GetGhoul2InfoByHandle( int handle ) {
 }
 
 // gi[94]: SP_GetStringTextByIndex
-static const char *SV_SP_GetStringTextByIndex_Stub( int /*index*/ ) { return ""; }
+static const char *SV_SP_GetStringTextByIndex_Wrapper( int index ) {
+	(void)index;
+	return "";
+}
 
 // gi[95]: SE_GetString
 static const char *SV_SE_GetString_Wrapper( const char *token ) {
@@ -2501,16 +2742,30 @@ static int SV_SE_GetStringIndex_Stub( const char * /*token*/ ) { return 0; }
 static void SV_SE_SetString_Stub( const char * /*token*/, const char * /*value*/ ) {}
 
 // gi[98]: SV_GetEntityWavVol
-static int SV_GetEntityWavVol_Stub( int /*entNum*/ ) { return 0; }
+static int SV_GetEntityWavVol_Stub( int /*entNum*/ ) { return 127; }
 
 // gi[99]: SV_SoundClearLooping
-static void SV_SoundClearLooping_Stub( void ) {}
+static void SV_SoundClearLooping_Stub( void ) {
+#ifndef DEDICATED
+	S_ClearLoopingSounds();
+#endif
+}
 
 // gi[100]: SV_GetSoundDuration
-static int SV_GetSoundDuration_Stub( int /*sfxHandle*/ ) { return 0; }
+static int SV_GetSoundDuration_Stub( int sfxHandle ) {
+#ifndef DEDICATED
+	return (int)S_GetSampleLengthInMilliSeconds( (sfxHandle_t)sfxHandle );
+#else
+	return 0;
+#endif
+}
 
 // gi[101]: SV_SoundStopAll
-static void SV_SoundStopAll_Stub( void ) {}
+static void SV_SoundStopAll_Stub( void ) {
+#ifndef DEDICATED
+	S_StopAllSounds();
+#endif
+}
 
 // gi[102-103]: Terrain init/shutdown
 static void SV_InitTerrain_Stub( void ) {}
@@ -2638,7 +2893,7 @@ void SV_InitGameProgs (void) {
 	gi[ 89] = (void *)SV_G2API_AnimateG2Models;        // G2API_AnimateGhoul2Models
 	gi[ 90] = (void *)SV_G2API_CleanGhoul2Models_Safe;  // G2API_CleanGhoul2Models (validate handle)
 	gi[ 91] = (void *)SV_G2_GetGhoul2InfoByHandle; // G2_GetGhoul2InfoByHandle
-	gi[ 92] = (void *)SV_SP_GetStringTextByIndex_Stub;  // SP_GetStringTextByIndex
+	gi[ 92] = (void *)SV_SP_GetStringTextByIndex_Wrapper;  // SP_GetStringTextByIndex
 	gi[ 93] = (void *)SV_Traced_SE_GetString;           // SE_GetString (traced)
 	gi[ 94] = (void *)SV_SE_GetStringIndex_Stub;        // SE_GetStringIndex
 	gi[ 95] = (void *)SV_SE_SetString_Stub;             // SE_SetString
@@ -2709,6 +2964,11 @@ void SV_InitGameProgs (void) {
 	fprintf(stderr, "[DBG] gi[77] SetConfigstring     = %p\n", gi[77]);
 	fprintf(stderr, "[DBG] gi[79] GetServerinfo       = %p\n", gi[79]);
 	fprintf(stderr, "[DBG] gi[85] GetEntityToken      = %p\n", gi[85]);
+	Com_Printf(
+		"[SOF2 dbg] handlePool=%p gpGroup=%p gpVtable=%p\n",
+		(void *)&g_handlePoolStub,
+		(void *)&s_sof2GpGroup,
+		(void *)s_sof2GpGroup.vftable );
 	fprintf(stderr, "[DBG] SV_InitGameProgs: calling Z_TagFree(TAG_G_ALLOC)\n");
 	Z_TagFree(TAG_G_ALLOC);
 	fprintf(stderr, "[DBG] SV_InitGameProgs: Z_TagFree done, calling ge->Init...\n");

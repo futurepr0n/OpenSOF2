@@ -1441,8 +1441,11 @@ static qboolean ParseStage( shaderStage_t *stage, const char **text )
 				blendDstBits = NameToDstBlendMode( token );
 			}
 
-			// clear depth mask for blended surfaces
-			if ( !depthMaskExplicit )
+			// clear depth mask for blended surfaces, but not for GL_ONE GL_ZERO
+			// which is effectively opaque (src*1 + dst*0 = src) and needs depth write
+			// to avoid Z-fighting and alternate-frame flashing on alpha-tested foliage
+			if ( !depthMaskExplicit &&
+				!( blendSrcBits == GLS_SRCBLEND_ONE && blendDstBits == GLS_DSTBLEND_ZERO ) )
 			{
 				depthMaskBits = 0;
 			}
@@ -3246,6 +3249,27 @@ static shader_t *FinishShader( void ) {
 
 	// there are times when you will need to manually apply a sort to
 	// opaque alpha tested shaders that have later blend passes
+	if ( !shader.sort ) {
+		for ( int sortedStage = 0; sortedStage < stage; ++sortedStage ) {
+			const shaderStage_t *sorted = &stages[sortedStage];
+
+			if ( !sorted->active ) {
+				break;
+			}
+
+			// Alpha-tested geometry like foliage/grates often normalizes
+			// GL_ONE GL_ZERO down to "no blend" during ParseStage. Those
+			// shaders still need see-through ordering so their cutout
+			// surfaces sort after solid world geometry instead of falling
+			// back to plain opaque.
+			if ( ( sorted->stateBits & GLS_ATEST_BITS ) &&
+				 ( sorted->stateBits & GLS_DEPTHMASK_TRUE ) ) {
+				shader.sort = SS_SEE_THROUGH;
+				break;
+			}
+		}
+	}
+
 	if ( !shader.sort ) {
 		shader.sort = SS_OPAQUE;
 	}

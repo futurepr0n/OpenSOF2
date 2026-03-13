@@ -47,6 +47,8 @@ void S_RawSamples( int samples, int rate, int width, int channels, const byte *d
 void S_StopSounds(void);	// from snd_dma.cpp
 // stop all sounds and the background track
 void S_StopAllSounds( void );
+// stop a single entity/channel pair (footstep cleanup)
+void S_StopEntityChannel( int entityNum, soundChannel_t channel );
 
 // scan all MP3s in the sound dir and add maxvol info if necessary.
 void S_MP3_CalcVols_f( void );

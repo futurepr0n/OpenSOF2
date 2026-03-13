@@ -67,10 +67,571 @@ extern uiExport_t *uie;
 float uie_cursorx = 320.0f;
 float uie_cursory = 240.0f;
 
+extern qboolean CL_GetSOF2CursorPos( float *x, float *y );
+
 // Actual GL video dimensions — set by CL_InitUI, used to scale mouse deltas
 // from pixel space to virtual (640x480) space for the DLL.
 extern int ui_actual_vidWidth;
 extern int ui_actual_vidHeight;
+void Text_Paint(float x, float y, float scale, vec4_t color, const char *text, int iMaxPixelWidth, int style, int iFontIndex);
+int Text_Height(const char *text, float scale, int iFontIndex);
+int Text_Width(const char *text, float scale, int iFontIndex);
+
+typedef enum {
+	SOF2_NATIVE_MENU_NONE = 0,
+	SOF2_NATIVE_MENU_MAIN,
+	SOF2_NATIVE_MENU_SINGLE_PLAYER,
+	SOF2_NATIVE_MENU_RANDOM_MISSION,
+	SOF2_NATIVE_MENU_OPTIONS,
+	SOF2_NATIVE_MENU_CREDITS
+} sof2NativeMenuPage_t;
+
+typedef enum {
+	SOF2_NATIVE_ACTION_NONE = 0,
+	SOF2_NATIVE_ACTION_OPEN_MAIN,
+	SOF2_NATIVE_ACTION_OPEN_SINGLE_PLAYER,
+	SOF2_NATIVE_ACTION_OPEN_RANDOM_MISSION,
+	SOF2_NATIVE_ACTION_OPEN_OPTIONS,
+	SOF2_NATIVE_ACTION_OPEN_CREDITS,
+	SOF2_NATIVE_ACTION_START_GAME,
+	SOF2_NATIVE_ACTION_PLAY_TUTORIAL,
+	SOF2_NATIVE_ACTION_LOAD_AIR1,
+	SOF2_NATIVE_ACTION_LOAD_PRA1,
+	SOF2_NATIVE_ACTION_QUIT,
+	SOF2_NATIVE_ACTION_SET_DIFFICULTY_0,
+	SOF2_NATIVE_ACTION_SET_DIFFICULTY_1,
+	SOF2_NATIVE_ACTION_SET_DIFFICULTY_2,
+	SOF2_NATIVE_ACTION_SET_DIFFICULTY_3,
+	SOF2_NATIVE_ACTION_SET_DIFFICULTY_4
+} sof2NativeMenuAction_t;
+
+typedef struct {
+	const char *label;
+	rectDef_t rect;
+	sof2NativeMenuAction_t action;
+	qhandle_t icon;
+	qhandle_t iconGlow;
+} sof2NativeMenuEntry_t;
+
+typedef struct {
+	qboolean initialized;
+	qhandle_t background;
+	qhandle_t logo;
+	qhandle_t cursor;
+	qhandle_t buttonBlank;
+	qhandle_t requestor;
+	qhandle_t submenuBack;
+	qhandle_t submenuBackAlt;
+	qhandle_t submenuNewGame;
+	qhandle_t submenuLevels;
+	qhandle_t submenuMisc;
+	qhandle_t iconGame;
+	qhandle_t iconGameGlow;
+	qhandle_t iconRmg;
+	qhandle_t iconRmgGlow;
+	qhandle_t iconOptions;
+	qhandle_t iconOptionsGlow;
+	qhandle_t iconCredits;
+	qhandle_t iconCreditsGlow;
+	qhandle_t iconQuit;
+	qhandle_t iconQuitGlow;
+	int hudFont;
+	int titleFont;
+} sof2NativeMenuAssets_t;
+
+static sof2NativeMenuAssets_t s_sof2NativeMenuAssets;
+static qboolean s_sof2NativeMenuActive = qfalse;
+static sof2NativeMenuPage_t s_sof2NativeMenuPage = SOF2_NATIVE_MENU_NONE;
+static int s_sof2NativeMenuSelection = 0;
+static int s_sof2NativeMenuHover = -1;
+static int s_sof2NativeDifficulty = 1;
+static qboolean s_sof2NativeMenuLogged = qfalse;
+
+static qboolean SOF2_NativeMenu_PointInRect( float x, float y, const rectDef_t *rect ) {
+	return ( x >= rect->x && y >= rect->y && x <= rect->x + rect->w && y <= rect->y + rect->h ) ? qtrue : qfalse;
+}
+
+static const char *SOF2_NativeMenu_StartMap( const char *cvarName, const char *fallbackMap ) {
+	const char *mapName = UI_Cvar_VariableString( cvarName );
+	if ( mapName && mapName[0] ) {
+		return mapName;
+	}
+	return fallbackMap;
+}
+
+static void SOF2_NativeMenu_InitAssets( void ) {
+	if ( s_sof2NativeMenuAssets.initialized ) {
+		return;
+	}
+
+	s_sof2NativeMenuAssets.background = ui.R_RegisterShaderNoMip( "gfx/menus/backdrop/menu_back" );
+	s_sof2NativeMenuAssets.logo = ui.R_RegisterShaderNoMip( "gfx/menus/icons/sof2_logo" );
+	s_sof2NativeMenuAssets.cursor = ui.R_RegisterShaderNoMip( "gfx/menus/cursor/cursor" );
+	s_sof2NativeMenuAssets.buttonBlank = ui.R_RegisterShaderNoMip( "gfx/menus/icons/button_blank" );
+	s_sof2NativeMenuAssets.requestor = ui.R_RegisterShaderNoMip( "gfx/menus/backdrop/requestor" );
+	s_sof2NativeMenuAssets.submenuBack = ui.R_RegisterShaderNoMip( "gfx/menus/icons/submenu_back" );
+	s_sof2NativeMenuAssets.submenuBackAlt = ui.R_RegisterShaderNoMip( "gfx/menus/icons/submenu_back_alt" );
+	s_sof2NativeMenuAssets.submenuNewGame = ui.R_RegisterShaderNoMip( "gfx/menus/icons/submenu_newgame" );
+	s_sof2NativeMenuAssets.submenuLevels = ui.R_RegisterShaderNoMip( "gfx/menus/icons/submenu_levels" );
+	s_sof2NativeMenuAssets.submenuMisc = ui.R_RegisterShaderNoMip( "gfx/menus/icons/submenu_misc" );
+	s_sof2NativeMenuAssets.iconGame = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_game" );
+	s_sof2NativeMenuAssets.iconGameGlow = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_game_glow" );
+	s_sof2NativeMenuAssets.iconRmg = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_torr" );
+	s_sof2NativeMenuAssets.iconRmgGlow = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_torr_glow" );
+	s_sof2NativeMenuAssets.iconOptions = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_options" );
+	s_sof2NativeMenuAssets.iconOptionsGlow = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_options_glow" );
+	s_sof2NativeMenuAssets.iconCredits = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_credits" );
+	s_sof2NativeMenuAssets.iconCreditsGlow = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_stats_glow" );
+	s_sof2NativeMenuAssets.iconQuit = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_quit" );
+	s_sof2NativeMenuAssets.iconQuitGlow = ui.R_RegisterShaderNoMip( "gfx/menus/icons/icon_quit_glow" );
+	s_sof2NativeMenuAssets.hudFont = UI_RegisterFont( "hud" );
+	s_sof2NativeMenuAssets.titleFont = UI_RegisterFont( "credtitle" );
+	s_sof2NativeMenuAssets.initialized = qtrue;
+}
+
+static int SOF2_NativeMenu_BuildEntries( sof2NativeMenuEntry_t *entries, const int maxEntries ) {
+	int count = 0;
+
+	if ( maxEntries < 1 ) {
+		return 0;
+	}
+
+	switch ( s_sof2NativeMenuPage ) {
+	case SOF2_NATIVE_MENU_MAIN:
+		if ( maxEntries < 5 ) {
+			return 0;
+		}
+		entries[count++] = { "SINGLE PLAYER", { 98.0f, 175.0f, 270.0f, 28.0f }, SOF2_NATIVE_ACTION_OPEN_SINGLE_PLAYER, s_sof2NativeMenuAssets.iconGame, s_sof2NativeMenuAssets.iconGameGlow };
+		entries[count++] = { "RANDOM MISSION GENERATOR", { 98.0f, 204.0f, 365.0f, 28.0f }, SOF2_NATIVE_ACTION_OPEN_RANDOM_MISSION, s_sof2NativeMenuAssets.iconRmg, s_sof2NativeMenuAssets.iconRmgGlow };
+		entries[count++] = { "OPTIONS", { 98.0f, 233.0f, 190.0f, 28.0f }, SOF2_NATIVE_ACTION_OPEN_OPTIONS, s_sof2NativeMenuAssets.iconOptions, s_sof2NativeMenuAssets.iconOptionsGlow };
+		entries[count++] = { "CREDITS", { 98.0f, 262.0f, 190.0f, 28.0f }, SOF2_NATIVE_ACTION_OPEN_CREDITS, s_sof2NativeMenuAssets.iconCredits, s_sof2NativeMenuAssets.iconCreditsGlow };
+		entries[count++] = { "QUIT", { 98.0f, 291.0f, 150.0f, 28.0f }, SOF2_NATIVE_ACTION_QUIT, s_sof2NativeMenuAssets.iconQuit, s_sof2NativeMenuAssets.iconQuitGlow };
+		break;
+	case SOF2_NATIVE_MENU_SINGLE_PLAYER:
+		if ( maxEntries < 8 ) {
+			return 0;
+		}
+		entries[count++] = { "BACK", { 57.0f, 53.0f, 42.0f, 32.0f }, SOF2_NATIVE_ACTION_OPEN_MAIN, s_sof2NativeMenuAssets.submenuBack, s_sof2NativeMenuAssets.submenuBackAlt };
+		entries[count++] = { "Amateur", { 162.0f, 140.0f, 148.0f, 20.0f }, SOF2_NATIVE_ACTION_SET_DIFFICULTY_0, 0, 0 };
+		entries[count++] = { "Gun For Hire", { 147.0f, 159.0f, 178.0f, 20.0f }, SOF2_NATIVE_ACTION_SET_DIFFICULTY_1, 0, 0 };
+		entries[count++] = { "Consultant", { 156.0f, 178.0f, 160.0f, 20.0f }, SOF2_NATIVE_ACTION_SET_DIFFICULTY_2, 0, 0 };
+		entries[count++] = { "Soldier of Fortune", { 127.0f, 197.0f, 218.0f, 20.0f }, SOF2_NATIVE_ACTION_SET_DIFFICULTY_3, 0, 0 };
+		entries[count++] = { "Custom", { 184.0f, 216.0f, 104.0f, 20.0f }, SOF2_NATIVE_ACTION_SET_DIFFICULTY_4, 0, 0 };
+		entries[count++] = { "START GAME", { 164.0f, 239.0f, 145.0f, 40.0f }, SOF2_NATIVE_ACTION_START_GAME, 0, 0 };
+		entries[count++] = { "PLAY TUTORIAL", { 151.0f, 293.0f, 170.0f, 40.0f }, SOF2_NATIVE_ACTION_PLAY_TUTORIAL, 0, 0 };
+		break;
+	case SOF2_NATIVE_MENU_RANDOM_MISSION:
+		if ( maxEntries < 4 ) {
+			return 0;
+		}
+		entries[count++] = { "BACK", { 57.0f, 53.0f, 42.0f, 32.0f }, SOF2_NATIVE_ACTION_OPEN_MAIN, s_sof2NativeMenuAssets.submenuBack, s_sof2NativeMenuAssets.submenuBackAlt };
+		entries[count++] = { "LOAD PRA1", { 196.0f, 184.0f, 132.0f, 38.0f }, SOF2_NATIVE_ACTION_LOAD_PRA1, 0, 0 };
+		entries[count++] = { "LOAD AIR1", { 196.0f, 232.0f, 132.0f, 38.0f }, SOF2_NATIVE_ACTION_LOAD_AIR1, 0, 0 };
+		entries[count++] = { "RETURN", { 196.0f, 300.0f, 132.0f, 38.0f }, SOF2_NATIVE_ACTION_OPEN_MAIN, 0, 0 };
+		break;
+	case SOF2_NATIVE_MENU_OPTIONS:
+	case SOF2_NATIVE_MENU_CREDITS:
+		if ( maxEntries < 1 ) {
+			return 0;
+		}
+		entries[count++] = { "BACK", { 57.0f, 53.0f, 42.0f, 32.0f }, SOF2_NATIVE_ACTION_OPEN_MAIN, s_sof2NativeMenuAssets.submenuBack, s_sof2NativeMenuAssets.submenuBackAlt };
+		break;
+	default:
+		break;
+	}
+
+	return count;
+}
+
+static int SOF2_NativeMenu_HitTest( const sof2NativeMenuEntry_t *entries, const int count, const float x, const float y ) {
+	int i;
+
+	for ( i = 0; i < count; ++i ) {
+		if ( SOF2_NativeMenu_PointInRect( x, y, &entries[i].rect ) ) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+static void SOF2_NativeMenu_DrawCursor( void ) {
+	UI_SetColor( NULL );
+	if ( s_sof2NativeMenuAssets.cursor ) {
+		UI_DrawHandlePic( uiInfo.uiDC.cursorx - 8.0f, uiInfo.uiDC.cursory - 8.0f, 32.0f, 32.0f, s_sof2NativeMenuAssets.cursor );
+	} else if ( uiInfo.uiDC.Assets.cursor ) {
+		UI_DrawHandlePic( uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory, 32.0f, 32.0f, uiInfo.uiDC.Assets.cursor );
+	} else if ( uiInfo.uiDC.whiteShader ) {
+		trap_R_DrawStretchPic( uiInfo.uiDC.cursorx - 6, uiInfo.uiDC.cursory, 13, 1, 0, 0, 0, 0, uiInfo.uiDC.whiteShader );
+		trap_R_DrawStretchPic( uiInfo.uiDC.cursorx, uiInfo.uiDC.cursory - 6, 1, 13, 0, 0, 0, 0, uiInfo.uiDC.whiteShader );
+	}
+}
+
+static void SOF2_NativeMenu_FillRect( float x, float y, float w, float h, const vec4_t color ) {
+	const qhandle_t shader = uiInfo.uiDC.whiteShader ? uiInfo.uiDC.whiteShader : uis.whiteShader;
+
+	if ( !shader ) {
+		return;
+	}
+
+	trap_R_SetColor( color );
+	trap_R_DrawStretchPic( x, y, w, h, 0, 0, 1, 1, shader );
+	trap_R_SetColor( NULL );
+}
+
+static void SOF2_NativeMenu_DrawTintedPic( float x, float y, float w, float h, qhandle_t shader, const vec4_t color ) {
+	if ( !shader ) {
+		return;
+	}
+
+	trap_R_SetColor( color );
+	trap_R_DrawStretchPic( x, y, w, h, 0, 0, 1, 1, shader );
+	trap_R_SetColor( NULL );
+}
+
+static void SOF2_NativeMenu_DrawIconTile( const rectDef_t *rect, qhandle_t icon, const bool active ) {
+	static const vec4_t fillActive = { 0.05f, 0.06f, 0.03f, 0.96f };
+	static const vec4_t border = { 0.16f, 0.19f, 0.09f, 0.92f };
+	static const vec4_t iconIdle = { 0.10f, 0.11f, 0.05f, 1.0f };
+	static const vec4_t iconActive = { 0.64f, 0.78f, 0.21f, 1.0f };
+
+	if ( active ) {
+		SOF2_NativeMenu_FillRect( rect->x, rect->y, rect->w, rect->h, fillActive );
+	}
+	_UI_DrawRect( rect->x, rect->y, rect->w, rect->h, 1.0f, border );
+	SOF2_NativeMenu_DrawTintedPic( rect->x + 5.0f, rect->y + 4.0f, rect->w - 10.0f, rect->h - 8.0f, icon, active ? iconActive : iconIdle );
+}
+
+static void SOF2_NativeMenu_DrawActionBox( const rectDef_t *rect, const char *label, const bool active, const bool wide, const int font ) {
+	static const vec4_t fillIdle = { 0.0f, 0.0f, 0.0f, 0.0f };
+	static const vec4_t fillActive = { 0.05f, 0.06f, 0.03f, 0.96f };
+	static const vec4_t border = { 0.13f, 0.16f, 0.08f, 0.94f };
+	static const vec4_t textIdle = { 0.09f, 0.10f, 0.05f, 1.0f };
+	static const vec4_t textActive = { 0.64f, 0.78f, 0.21f, 1.0f };
+	const float scale = wide ? 0.76f : 0.72f;
+	const int textWidth = Text_Width( label, scale, font );
+	const int textHeight = Text_Height( label, scale, font );
+	const float textX = rect->x + ( rect->w - textWidth ) * 0.5f;
+	const float textY = rect->y + ( rect->h - textHeight ) * 0.5f - 1.0f;
+
+	SOF2_NativeMenu_FillRect( rect->x, rect->y, rect->w, rect->h, active ? fillActive : fillIdle );
+
+	_UI_DrawRect( rect->x, rect->y, rect->w, rect->h, 1.0f, border );
+	Text_Paint( textX, textY, scale, (float *)( active ? textActive : textIdle ), label, 0, ITEM_TEXTSTYLE_NORMAL, font );
+}
+
+static void SOF2_NativeMenu_DrawMainEntry( const sof2NativeMenuEntry_t *entry, const bool active, const int font ) {
+	static const vec4_t highlightFill = { 0.05f, 0.06f, 0.03f, 0.96f };
+	static const vec4_t highlightBorder = { 0.16f, 0.19f, 0.09f, 0.92f };
+	static const vec4_t idleText = { 0.09f, 0.10f, 0.06f, 1.0f };
+	static const vec4_t activeText = { 0.64f, 0.78f, 0.21f, 1.0f };
+	static const vec4_t idleIcon = { 0.09f, 0.10f, 0.05f, 1.0f };
+	static const vec4_t activeIcon = { 0.64f, 0.78f, 0.21f, 1.0f };
+	const float scale = 0.74f;
+	const int textWidth = Text_Width( entry->label, scale, font );
+	const int textHeight = Text_Height( entry->label, scale, font );
+	const float iconX = 61.0f;
+	const float iconY = entry->rect.y + 1.0f;
+	const float textX = 95.0f;
+	const float textY = entry->rect.y - 3.0f;
+	rectDef_t textRect = { textX - 8.0f, textY - 2.0f, (float)textWidth + 18.0f, (float)textHeight + 8.0f };
+
+	if ( active ) {
+		if ( s_sof2NativeMenuAssets.buttonBlank ) {
+			UI_SetColor( highlightFill );
+			UI_DrawHandlePic( textRect.x, textRect.y, textRect.w, textRect.h, s_sof2NativeMenuAssets.buttonBlank );
+			UI_SetColor( NULL );
+		} else {
+			SOF2_NativeMenu_FillRect( textRect.x, textRect.y, textRect.w, textRect.h, highlightFill );
+		}
+		_UI_DrawRect( textRect.x, textRect.y, textRect.w, textRect.h, 1.0f, highlightBorder );
+	}
+
+	if ( entry->icon ) {
+		SOF2_NativeMenu_DrawTintedPic( iconX, iconY, 24.0f, 24.0f, entry->icon, active ? activeIcon : idleIcon );
+	}
+
+	Text_Paint( textX, textY, scale, (float *)( active ? activeText : idleText ), entry->label, 0, ITEM_TEXTSTYLE_NORMAL, font );
+}
+
+static void SOF2_NativeMenu_DrawMain( const sof2NativeMenuEntry_t *entries, const int count, const int activeIndex ) {
+	int i;
+	const float monitorGridX = 50.0f;
+	const float monitorGridW = 460.0f;
+	const float logoScale = 1.095f;
+	const float logoW = 255.0f * logoScale;
+	const float logoH = 112.0f * logoScale;
+	const float logoX = monitorGridX + ( monitorGridW - logoW ) * 0.5f - 2.0f;
+	const float logoY = 52.0f;
+
+	UI_SetColor( NULL );
+	if ( s_sof2NativeMenuAssets.background ) {
+		UI_DrawHandlePic( 0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, s_sof2NativeMenuAssets.background );
+	}
+	if ( s_sof2NativeMenuAssets.logo ) {
+		UI_DrawHandlePic( logoX, logoY, logoW, logoH, s_sof2NativeMenuAssets.logo );
+	}
+
+	for ( i = 0; i < count; ++i ) {
+		SOF2_NativeMenu_DrawMainEntry( &entries[i], i == activeIndex, s_sof2NativeMenuAssets.hudFont );
+	}
+}
+
+static void SOF2_NativeMenu_DrawSinglePlayer( const sof2NativeMenuEntry_t *entries, const int count, const int activeIndex ) {
+	static const vec4_t titleColor = { 0.08f, 0.10f, 0.06f, 1.0f };
+	static const vec4_t lineColor = { 0.06f, 0.07f, 0.03f, 0.95f };
+	static const vec4_t textIdle = { 0.11f, 0.12f, 0.07f, 1.0f };
+	static const vec4_t textActive = { 0.64f, 0.78f, 0.21f, 1.0f };
+	static const vec4_t selectFill = { 0.05f, 0.06f, 0.03f, 0.96f };
+	int i;
+	const float titleScale = 0.74f;
+	const int titleWidth = Text_Width( "SELECT DIFFICULTY LEVEL", titleScale, s_sof2NativeMenuAssets.hudFont );
+	const float titleX = 50.0f + ( 372.0f - titleWidth ) * 0.5f;
+
+	UI_SetColor( NULL );
+	if ( s_sof2NativeMenuAssets.background ) {
+		UI_DrawHandlePic( 0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, s_sof2NativeMenuAssets.background );
+	}
+	{
+		const rectDef_t topIcons[4] = {
+			{ 52.0f, 51.0f, 42.0f, 32.0f },
+			{ 104.0f, 51.0f, 42.0f, 32.0f },
+			{ 156.0f, 51.0f, 42.0f, 32.0f },
+			{ 208.0f, 51.0f, 42.0f, 32.0f }
+		};
+		SOF2_NativeMenu_DrawIconTile( &topIcons[0], s_sof2NativeMenuAssets.submenuBack, activeIndex == 0 );
+		SOF2_NativeMenu_DrawIconTile( &topIcons[1], s_sof2NativeMenuAssets.submenuNewGame, qfalse );
+		SOF2_NativeMenu_DrawIconTile( &topIcons[2], s_sof2NativeMenuAssets.submenuLevels, qfalse );
+		SOF2_NativeMenu_DrawIconTile( &topIcons[3], s_sof2NativeMenuAssets.submenuMisc, qfalse );
+	}
+
+	SOF2_NativeMenu_FillRect( 50.0f, 92.0f, 372.0f, 2.0f, lineColor );
+	Text_Paint( titleX, 108.0f, titleScale, (float *)titleColor, "SELECT DIFFICULTY LEVEL", 0, ITEM_TEXTSTYLE_NORMAL, s_sof2NativeMenuAssets.hudFont );
+	SOF2_NativeMenu_FillRect( 144.0f, 130.0f, 252.0f, 1.0f, lineColor );
+
+	for ( i = 1; i <= 5 && i < count; ++i ) {
+		const bool selected = ( s_sof2NativeDifficulty == ( i - 1 ) );
+		const bool active = ( i == activeIndex );
+		const float scale = 0.58f;
+		const int font = s_sof2NativeMenuAssets.hudFont;
+		const int textWidth = Text_Width( entries[i].label, scale, font );
+		const int textHeight = Text_Height( entries[i].label, scale, font );
+		float textX = entries[i].rect.x + ( entries[i].rect.w - textWidth ) * 0.5f;
+		float textY = entries[i].rect.y + 1.0f;
+		rectDef_t highlight = { textX - 6.0f, textY - 2.0f, (float)textWidth + 12.0f, (float)textHeight + 4.0f };
+
+		if ( selected || active ) {
+			SOF2_NativeMenu_FillRect( highlight.x, highlight.y, highlight.w, highlight.h, selectFill );
+		}
+
+		Text_Paint( textX, textY, scale, (float *)( selected || active ? textActive : textIdle ), entries[i].label, 0, ITEM_TEXTSTYLE_NORMAL, font );
+	}
+
+	if ( count > 6 ) {
+		SOF2_NativeMenu_DrawActionBox( &entries[6].rect, entries[6].label, activeIndex == 6, qtrue, s_sof2NativeMenuAssets.hudFont );
+	}
+	if ( count > 7 ) {
+		SOF2_NativeMenu_DrawActionBox( &entries[7].rect, entries[7].label, activeIndex == 7, qtrue, s_sof2NativeMenuAssets.hudFont );
+	}
+}
+
+static void SOF2_NativeMenu_DrawPlaceholder( const char *title, const char *detail, const sof2NativeMenuEntry_t *entries, const int count, const int activeIndex ) {
+	static const vec4_t titleColor = { 0.08f, 0.10f, 0.06f, 1.0f };
+	static const vec4_t bodyColor = { 0.12f, 0.13f, 0.09f, 1.0f };
+	const int titleFont = s_sof2NativeMenuAssets.hudFont;
+	const float titleScale = 0.78f;
+	const int titleWidth = Text_Width( title, titleScale, titleFont );
+	const float titleX = ( SCREEN_WIDTH - titleWidth ) * 0.5f;
+
+	UI_SetColor( NULL );
+	if ( s_sof2NativeMenuAssets.background ) {
+		UI_DrawHandlePic( 0.0f, 0.0f, SCREEN_WIDTH, SCREEN_HEIGHT, s_sof2NativeMenuAssets.background );
+	}
+	if ( count > 0 ) {
+		UI_SetColor( NULL );
+		UI_DrawHandlePic( entries[0].rect.x, entries[0].rect.y, entries[0].rect.w, entries[0].rect.h,
+			activeIndex == 0 ? entries[0].iconGlow : entries[0].icon );
+	}
+	if ( s_sof2NativeMenuAssets.requestor ) {
+		UI_DrawHandlePic( 138.0f, 140.0f, 365.0f, 182.0f, s_sof2NativeMenuAssets.requestor );
+	}
+
+	Text_Paint( titleX, 156.0f, titleScale, (float *)titleColor, title, 0, ITEM_TEXTSTYLE_NORMAL, titleFont );
+	Text_Paint( 150.0f, 202.0f, 0.46f, (float *)bodyColor, detail, 340, ITEM_TEXTSTYLE_NORMAL, s_sof2NativeMenuAssets.hudFont );
+
+	if ( s_sof2NativeMenuPage == SOF2_NATIVE_MENU_RANDOM_MISSION ) {
+		if ( count > 1 ) {
+			SOF2_NativeMenu_DrawActionBox( &entries[1].rect, entries[1].label, activeIndex == 1, qfalse, s_sof2NativeMenuAssets.hudFont );
+		}
+		if ( count > 2 ) {
+			SOF2_NativeMenu_DrawActionBox( &entries[2].rect, entries[2].label, activeIndex == 2, qfalse, s_sof2NativeMenuAssets.hudFont );
+		}
+		if ( count > 3 ) {
+			SOF2_NativeMenu_DrawActionBox( &entries[3].rect, entries[3].label, activeIndex == 3, qfalse, s_sof2NativeMenuAssets.hudFont );
+		}
+	}
+}
+
+static void SOF2_NativeMenu_DrawCurrent( void ) {
+	sof2NativeMenuEntry_t entries[8];
+	const int count = SOF2_NativeMenu_BuildEntries( entries, ARRAY_LEN( entries ) );
+	const int activeIndex = ( s_sof2NativeMenuHover >= 0 ) ? s_sof2NativeMenuHover : s_sof2NativeMenuSelection;
+
+	if ( !s_sof2NativeMenuLogged ) {
+		Com_Printf( "[SOF2 ui] 2026-03-08-pass38-main-logo-1095-and-right page=%d\n", s_sof2NativeMenuPage );
+		s_sof2NativeMenuLogged = qtrue;
+	}
+
+	switch ( s_sof2NativeMenuPage ) {
+	case SOF2_NATIVE_MENU_MAIN:
+		SOF2_NativeMenu_DrawMain( entries, count, activeIndex );
+		break;
+	case SOF2_NATIVE_MENU_SINGLE_PLAYER:
+		SOF2_NativeMenu_DrawSinglePlayer( entries, count, activeIndex );
+		break;
+	case SOF2_NATIVE_MENU_RANDOM_MISSION:
+		SOF2_NativeMenu_DrawPlaceholder( "RANDOM MISSION GENERATOR", "Use this page to jump into the current SP map test targets while the original RMG flow is still being rebuilt.", entries, count, activeIndex );
+		break;
+	case SOF2_NATIVE_MENU_OPTIONS:
+		SOF2_NativeMenu_DrawPlaceholder( "OPTIONS", "The native replacement menu is now handling startup flow. Settings panels will be rebuilt on top of this path next.", entries, count, activeIndex );
+		break;
+	case SOF2_NATIVE_MENU_CREDITS:
+		SOF2_NativeMenu_DrawPlaceholder( "CREDITS", "OpenSOF2 native menu bridge in progress. Startup flow is now decoupled from Menusx86 so the remaining menu panels can be rebuilt in-engine.", entries, count, activeIndex );
+		break;
+	default:
+		break;
+	}
+
+	SOF2_NativeMenu_DrawCursor();
+}
+
+static void SOF2_NativeMenu_CloseInternal( const qboolean clearCatcher ) {
+	s_sof2NativeMenuActive = qfalse;
+	s_sof2NativeMenuPage = SOF2_NATIVE_MENU_NONE;
+	s_sof2NativeMenuSelection = 0;
+	s_sof2NativeMenuHover = -1;
+	s_sof2NativeMenuLogged = qfalse;
+	UI_Cursor_Show( qfalse );
+
+	if ( clearCatcher ) {
+		trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
+		trap_Key_ClearStates();
+	}
+}
+
+static void SOF2_NativeMenu_StartMapNow( const char *mapName ) {
+	char safeMap[MAX_QPATH];
+
+	Q_strncpyz( safeMap, mapName, sizeof( safeMap ) );
+	ui.Cvar_Set( "ui_sof2_difficulty", va( "%d", s_sof2NativeDifficulty ) );
+	ui.Cvar_Set( "g_spskill", va( "%d", Q_min( s_sof2NativeDifficulty, 2 ) ) );
+	Com_Printf( "[SOF2 ui] start map=%s ui_sof2_difficulty=%d g_spskill=%d\n",
+		safeMap, s_sof2NativeDifficulty, Q_min( s_sof2NativeDifficulty, 2 ) );
+	SOF2_NativeMenu_CloseInternal( qtrue );
+	ui.Cvar_Set( "cl_paused", "0" );
+	ui.Cmd_ExecuteText( EXEC_APPEND, va( "map %s\n", safeMap ) );
+}
+
+static void SOF2_NativeMenu_ExecuteAction( const sof2NativeMenuAction_t action ) {
+	switch ( action ) {
+	case SOF2_NATIVE_ACTION_OPEN_MAIN:
+		s_sof2NativeMenuPage = SOF2_NATIVE_MENU_MAIN;
+		s_sof2NativeMenuSelection = 0;
+		s_sof2NativeMenuHover = -1;
+		break;
+	case SOF2_NATIVE_ACTION_OPEN_SINGLE_PLAYER:
+		s_sof2NativeMenuPage = SOF2_NATIVE_MENU_SINGLE_PLAYER;
+		s_sof2NativeMenuSelection = 2;
+		s_sof2NativeMenuHover = -1;
+		break;
+	case SOF2_NATIVE_ACTION_OPEN_RANDOM_MISSION:
+		s_sof2NativeMenuPage = SOF2_NATIVE_MENU_RANDOM_MISSION;
+		s_sof2NativeMenuSelection = 1;
+		s_sof2NativeMenuHover = -1;
+		break;
+	case SOF2_NATIVE_ACTION_OPEN_OPTIONS:
+		s_sof2NativeMenuPage = SOF2_NATIVE_MENU_OPTIONS;
+		s_sof2NativeMenuSelection = 0;
+		s_sof2NativeMenuHover = -1;
+		break;
+	case SOF2_NATIVE_ACTION_OPEN_CREDITS:
+		s_sof2NativeMenuPage = SOF2_NATIVE_MENU_CREDITS;
+		s_sof2NativeMenuSelection = 0;
+		s_sof2NativeMenuHover = -1;
+		break;
+	case SOF2_NATIVE_ACTION_START_GAME:
+		SOF2_NativeMenu_StartMapNow( SOF2_NativeMenu_StartMap( "ui_sof2_startmap", "air1" ) );
+		break;
+	case SOF2_NATIVE_ACTION_PLAY_TUTORIAL:
+		SOF2_NativeMenu_StartMapNow( SOF2_NativeMenu_StartMap( "ui_sof2_tutorialmap", "pra1" ) );
+		break;
+	case SOF2_NATIVE_ACTION_LOAD_AIR1:
+		SOF2_NativeMenu_StartMapNow( "air1" );
+		break;
+	case SOF2_NATIVE_ACTION_LOAD_PRA1:
+		SOF2_NativeMenu_StartMapNow( "pra1" );
+		break;
+	case SOF2_NATIVE_ACTION_QUIT:
+		ui.Cmd_ExecuteText( EXEC_APPEND, "quit\n" );
+		break;
+	case SOF2_NATIVE_ACTION_SET_DIFFICULTY_0:
+	case SOF2_NATIVE_ACTION_SET_DIFFICULTY_1:
+	case SOF2_NATIVE_ACTION_SET_DIFFICULTY_2:
+	case SOF2_NATIVE_ACTION_SET_DIFFICULTY_3:
+	case SOF2_NATIVE_ACTION_SET_DIFFICULTY_4:
+		s_sof2NativeDifficulty = (int)action - (int)SOF2_NATIVE_ACTION_SET_DIFFICULTY_0;
+		break;
+	default:
+		break;
+	}
+}
+
+qboolean UI_IsSOF2NativeMenuActive( void ) {
+	return s_sof2NativeMenuActive;
+}
+
+void UI_CloseSOF2NativeMenu( qboolean clearCatcher ) {
+	if ( !s_sof2NativeMenuActive ) {
+		return;
+	}
+	SOF2_NativeMenu_CloseInternal( clearCatcher );
+}
+
+qboolean UI_HandleSOF2NativeSetActiveMenu( const char *menuname, const char *menuID ) {
+	(void)menuID;
+
+	if ( !menuname ) {
+		if ( s_sof2NativeMenuActive ) {
+			SOF2_NativeMenu_CloseInternal( qfalse );
+			return qtrue;
+		}
+		return qfalse;
+	}
+
+	if ( Q_stricmp( menuname, "main" ) != 0 && Q_stricmp( menuname, "mainMenu" ) != 0 ) {
+		if ( s_sof2NativeMenuActive ) {
+			SOF2_NativeMenu_CloseInternal( qfalse );
+		}
+		return qfalse;
+	}
+
+	SOF2_NativeMenu_InitAssets();
+	s_sof2NativeMenuActive = qtrue;
+	s_sof2NativeMenuPage = SOF2_NATIVE_MENU_MAIN;
+	s_sof2NativeMenuSelection = 0;
+	s_sof2NativeMenuHover = -1;
+	s_sof2NativeMenuLogged = qfalse;
+	ui.Cvar_Set( "sv_killserver", "1" );
+	ui.Key_SetCatcher( KEYCATCH_UI );
+	trap_Key_ClearStates();
+	UI_Cursor_Show( qtrue );
+	if ( uiInfo.uiDC.cursorx <= 0 && uiInfo.uiDC.cursory <= 0 ) {
+		uiInfo.uiDC.cursorx = 170;
+		uiInfo.uiDC.cursory = 184;
+	}
+	Com_Printf( "[SOF2 ui] native startup menu active menuname=%s\n", menuname );
+	return qtrue;
+}
 
 #define LISTBUFSIZE 10240
 
@@ -494,11 +1055,18 @@ int Key_GetCatcher( void );
 #define	UI_FPS_FRAMES	4
 void _UI_Refresh( int realtime )
 {
+	if ( UI_IsSOF2NativeMenuActive() ) {
+		uiInfo.uiDC.realTime = realtime;
+		SOF2_NativeMenu_DrawCurrent();
+		return;
+	}
+
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
 		extern int g_stretchPicCount;
 		extern void SyncSOF2ShadowKeys(void);
 		static int slot5Calls = 0;
+		static const qboolean uiVerboseSlot5Debug = qfalse;
 
 		// Sync shadow keys array so DLL sees correct key states
 		SyncSOF2ShadowKeys();
@@ -512,17 +1080,32 @@ void _UI_Refresh( int realtime )
 			int prevSP = g_stretchPicCount;
 			int kc = Key_GetCatcher();
 			slot5Calls++;
-			if ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) {
+			if ( uiVerboseSlot5Debug && ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) ) {
 				Com_Printf("[DBG] slot5 PRE #%d: keyCatchers=%d\n", slot5Calls, kc);
 			}
 			uie->slot5();
-			if ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) {
+			if ( uiVerboseSlot5Debug && ( slot5Calls <= 10 || (slot5Calls % 300 == 0) ) ) {
 				Com_Printf("[DBG] slot5 POST #%d: stretchPic=%d (delta=%d)\n",
 					slot5Calls, g_stretchPicCount, g_stretchPicCount - prevSP);
 			}
 		}
 
-		// DLL draws its own cursor via RE_StretchPic (shader 10 = gfx/menus/cursor/cursor)
+		// Prefer the DLL's actual cursor state over the engine-side fallback.
+		// Menusx86 hit-testing uses menu_mouse_x/menu_mouse_y directly.
+		CL_GetSOF2CursorPos( &uie_cursorx, &uie_cursory );
+
+		// Menusx86 does not draw a visible cursor in our current bridge. Render the
+		// engine-tracked cursor so menu hit-testing has an on-screen reference.
+		if ( Key_GetCatcher() & KEYCATCH_UI ) {
+			UI_SetColor( NULL );
+			if ( uiInfo.uiDC.Assets.cursor ) {
+				UI_DrawHandlePic( uie_cursorx, uie_cursory, 32, 32, uiInfo.uiDC.Assets.cursor );
+			} else if ( uiInfo.uiDC.whiteShader ) {
+				trap_R_DrawStretchPic( uie_cursorx - 6, uie_cursory, 13, 1, 0, 0, 0, 0, uiInfo.uiDC.whiteShader );
+				trap_R_DrawStretchPic( uie_cursorx, uie_cursory - 6, 1, 13, 0, 0, 0, 0, uiInfo.uiDC.whiteShader );
+			}
+		}
+
 		return;
 	}
 
@@ -4052,6 +4635,31 @@ UI_MouseEvent
 //JLFMOUSE  CALLED EACH FRAME IN UI
 void _UI_MouseEvent( int dx, int dy )
 {
+	if ( UI_IsSOF2NativeMenuActive() ) {
+		sof2NativeMenuEntry_t entries[8];
+		const int count = SOF2_NativeMenu_BuildEntries( entries, ARRAY_LEN( entries ) );
+
+		uiInfo.uiDC.cursorx += dx;
+		if ( uiInfo.uiDC.cursorx < 0 ) {
+			uiInfo.uiDC.cursorx = 0;
+		} else if ( uiInfo.uiDC.cursorx > SCREEN_WIDTH ) {
+			uiInfo.uiDC.cursorx = SCREEN_WIDTH;
+		}
+
+		uiInfo.uiDC.cursory += dy;
+		if ( uiInfo.uiDC.cursory < 0 ) {
+			uiInfo.uiDC.cursory = 0;
+		} else if ( uiInfo.uiDC.cursory > SCREEN_HEIGHT ) {
+			uiInfo.uiDC.cursory = SCREEN_HEIGHT;
+		}
+
+		s_sof2NativeMenuHover = SOF2_NativeMenu_HitTest( entries, count, (float)uiInfo.uiDC.cursorx, (float)uiInfo.uiDC.cursory );
+		if ( s_sof2NativeMenuHover >= 0 ) {
+			s_sof2NativeMenuSelection = s_sof2NativeMenuHover;
+		}
+		return;
+	}
+
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
 		// Scale mouse deltas from pixel space to virtual (640x480) space.
@@ -4076,6 +4684,7 @@ void _UI_MouseEvent( int dx, int dy )
 		uie_cursory += vdy;
 		if (uie_cursory < 0) uie_cursory = 0;
 		else if (uie_cursory > SCREEN_HEIGHT) uie_cursory = SCREEN_HEIGHT;
+		CL_GetSOF2CursorPos( &uie_cursorx, &uie_cursory );
 		// Log first few mouse events for diagnostics
 		static int mouseLogCount = 0;
 		if ( (vdx || vdy) && ++mouseLogCount <= 10 ) {
@@ -4115,86 +4724,15 @@ void _UI_MouseEvent( int dx, int dy )
 
 }
 
-// ---- Q3A/SoF2 keycodes the DLL expects (different from OpenJK fakeAscii_t) ----
-enum sof2Key_t {
-	SOF2_K_TAB = 9, SOF2_K_ENTER = 13, SOF2_K_ESCAPE = 27, SOF2_K_SPACE = 32,
-	SOF2_K_BACKSPACE = 127,
-	SOF2_K_CAPSLOCK = 129, SOF2_K_PAUSE = 131,
-	SOF2_K_UPARROW = 132, SOF2_K_DOWNARROW = 133,
-	SOF2_K_LEFTARROW = 134, SOF2_K_RIGHTARROW = 135,
-	SOF2_K_ALT = 136, SOF2_K_CTRL = 137, SOF2_K_SHIFT = 138,
-	SOF2_K_INS = 139, SOF2_K_DEL = 140,
-	SOF2_K_PGDN = 141, SOF2_K_PGUP = 142, SOF2_K_HOME = 143, SOF2_K_END = 144,
-	SOF2_K_F1 = 145, SOF2_K_F2 = 146, SOF2_K_F3 = 147, SOF2_K_F4 = 148,
-	SOF2_K_F5 = 149, SOF2_K_F6 = 150, SOF2_K_F7 = 151, SOF2_K_F8 = 152,
-	SOF2_K_F9 = 153, SOF2_K_F10 = 154, SOF2_K_F11 = 155, SOF2_K_F12 = 156,
-	SOF2_K_KP_HOME = 160, SOF2_K_KP_UPARROW = 161, SOF2_K_KP_PGUP = 162,
-	SOF2_K_KP_LEFTARROW = 163, SOF2_K_KP_5 = 164, SOF2_K_KP_RIGHTARROW = 165,
-	SOF2_K_KP_END = 166, SOF2_K_KP_DOWNARROW = 167, SOF2_K_KP_PGDN = 168,
-	SOF2_K_KP_ENTER = 169, SOF2_K_KP_INS = 170, SOF2_K_KP_DEL = 171,
-	SOF2_K_KP_SLASH = 172, SOF2_K_KP_MINUS = 173, SOF2_K_KP_PLUS = 174,
-	SOF2_K_MOUSE1 = 178, SOF2_K_MOUSE2 = 179, SOF2_K_MOUSE3 = 180,
-	SOF2_K_MOUSE4 = 181, SOF2_K_MOUSE5 = 182,
-	SOF2_K_MWHEELDOWN = 183, SOF2_K_MWHEELUP = 184,
-};
-
 static int TranslateKeyToSOF2( int key ) {
-	if ( key >= 32 && key <= 126 ) return key;  // ASCII printable — identical
-	switch ( key ) {
-		case A_TAB:          return SOF2_K_TAB;
-		case A_ENTER:        return SOF2_K_ENTER;
-		case A_ESCAPE:       return SOF2_K_ESCAPE;
-		case A_BACKSPACE:    return SOF2_K_BACKSPACE;
-		case A_SHIFT:        return SOF2_K_SHIFT;
-		case A_CTRL:         return SOF2_K_CTRL;
-		case A_ALT:          return SOF2_K_ALT;
-		case A_CAPSLOCK:     return SOF2_K_CAPSLOCK;
-		case A_PAUSE:        return SOF2_K_PAUSE;
-		case A_CURSOR_UP:    return SOF2_K_UPARROW;
-		case A_CURSOR_DOWN:  return SOF2_K_DOWNARROW;
-		case A_CURSOR_LEFT:  return SOF2_K_LEFTARROW;
-		case A_CURSOR_RIGHT: return SOF2_K_RIGHTARROW;
-		case A_INSERT:       return SOF2_K_INS;
-		case A_DELETE:       return SOF2_K_DEL;
-		case A_HOME:         return SOF2_K_HOME;
-		case A_END:          return SOF2_K_END;
-		case A_PAGE_UP:      return SOF2_K_PGUP;
-		case A_PAGE_DOWN:    return SOF2_K_PGDN;
-		case A_F1:           return SOF2_K_F1;
-		case A_F2:           return SOF2_K_F2;
-		case A_F3:           return SOF2_K_F3;
-		case A_F4:           return SOF2_K_F4;
-		case A_F5:           return SOF2_K_F5;
-		case A_F6:           return SOF2_K_F6;
-		case A_F7:           return SOF2_K_F7;
-		case A_F8:           return SOF2_K_F8;
-		case A_F9:           return SOF2_K_F9;
-		case A_F10:          return SOF2_K_F10;
-		case A_F11:          return SOF2_K_F11;
-		case A_F12:          return SOF2_K_F12;
-		case A_KP_ENTER:     return SOF2_K_KP_ENTER;
-		case A_KP_PLUS:      return SOF2_K_KP_PLUS;
-		case A_KP_MINUS:     return SOF2_K_KP_MINUS;
-		case A_KP_PERIOD:    return SOF2_K_KP_DEL;
-		case A_KP_0:         return SOF2_K_KP_INS;
-		case A_KP_1:         return SOF2_K_KP_END;
-		case A_KP_2:         return SOF2_K_KP_DOWNARROW;
-		case A_KP_3:         return SOF2_K_KP_PGDN;
-		case A_KP_4:         return SOF2_K_KP_LEFTARROW;
-		case A_KP_5:         return SOF2_K_KP_5;
-		case A_KP_6:         return SOF2_K_KP_RIGHTARROW;
-		case A_KP_7:         return SOF2_K_KP_HOME;
-		case A_KP_8:         return SOF2_K_KP_UPARROW;
-		case A_KP_9:         return SOF2_K_KP_PGUP;
-		case A_MOUSE1:       return SOF2_K_MOUSE1;
-		case A_MOUSE2:       return SOF2_K_MOUSE2;
-		case A_MOUSE3:       return SOF2_K_MOUSE3;
-		case A_MOUSE4:       return SOF2_K_MOUSE4;
-		case A_MOUSE5:       return SOF2_K_MOUSE5;
-		case A_MWHEELUP:     return SOF2_K_MWHEELUP;
-		case A_MWHEELDOWN:   return SOF2_K_MWHEELDOWN;
-		default:             return key;
+	// Menusx86.dll uses the same 8-bit key values this OpenJK branch already
+	// emits (for example A_MOUSE1=0x8d, A_MWHEELUP=0x89, arrows=0xaa-0xad).
+	// The earlier Q3A-style remap broke hover/click because the DLL checks its
+	// keys_array[] at the raw indices.
+	if ( key >= 0 && key <= 0xFF ) {
+		return key;
 	}
+	return key;
 }
 
 /*
@@ -4204,29 +4742,79 @@ UI_KeyEvent
 */
 void _UI_KeyEvent( int key, qboolean down )
 {
+	if ( UI_IsSOF2NativeMenuActive() ) {
+		sof2NativeMenuEntry_t entries[8];
+		const int count = SOF2_NativeMenu_BuildEntries( entries, ARRAY_LEN( entries ) );
+		int activeIndex = ( s_sof2NativeMenuHover >= 0 ) ? s_sof2NativeMenuHover : s_sof2NativeMenuSelection;
+
+		if ( !down ) {
+			return;
+		}
+
+		if ( count <= 0 ) {
+			return;
+		}
+
+		if ( activeIndex < 0 || activeIndex >= count ) {
+			activeIndex = 0;
+		}
+
+		switch ( key ) {
+		case A_MOUSE1:
+		case A_ENTER:
+		case A_KP_ENTER:
+			if ( s_sof2NativeMenuHover >= 0 && s_sof2NativeMenuHover < count ) {
+				activeIndex = s_sof2NativeMenuHover;
+				s_sof2NativeMenuSelection = activeIndex;
+			}
+			SOF2_NativeMenu_ExecuteAction( entries[activeIndex].action );
+			return;
+		case A_ESCAPE:
+			if ( s_sof2NativeMenuPage != SOF2_NATIVE_MENU_MAIN ) {
+				SOF2_NativeMenu_ExecuteAction( SOF2_NATIVE_ACTION_OPEN_MAIN );
+			}
+			return;
+		case A_CURSOR_UP:
+		case A_KP_8:
+			activeIndex = ( activeIndex + count - 1 ) % count;
+			s_sof2NativeMenuSelection = activeIndex;
+			s_sof2NativeMenuHover = -1;
+			return;
+		case A_CURSOR_DOWN:
+		case A_KP_2:
+		case A_TAB:
+			activeIndex = ( activeIndex + 1 ) % count;
+			s_sof2NativeMenuSelection = activeIndex;
+			s_sof2NativeMenuHover = -1;
+			return;
+		default:
+			break;
+		}
+
+		if ( s_sof2NativeMenuPage == SOF2_NATIVE_MENU_SINGLE_PLAYER && key >= '1' && key <= '5' ) {
+			s_sof2NativeDifficulty = key - '1';
+			s_sof2NativeMenuSelection = s_sof2NativeDifficulty + 1;
+		}
+		return;
+	}
+
 	// SOF2 Menusx86.dll dispatch
 	if ( uie ) {
-		// SoF2 DLL only receives key-DOWN events, never key-up
-		if ( !down ) return;
-
 		if ( uie->UI_KeyEvent ) {
 			int isChar = 0;
 			int sof2Key;
-			int menuKey = 0;
+			int reservedFlags = 0;
 
 			if ( key & K_CHAR_FLAG ) {
+				if ( !down ) return;
 				// Character event from CL_CharEvent: strip flag, set isChar=1
 				sof2Key = key & ~K_CHAR_FLAG;
 				isChar = 1;
-				menuKey = 0;  // typed characters are not menu keys
 			} else {
-				// Key event: translate OpenJK fakeAscii_t -> Q3A/SoF2 keycode
+				// Pass raw 8-bit key values straight through so the DLL can use
+				// keys_array[key].down to distinguish press/release internally.
 				sof2Key = TranslateKeyToSOF2( key );
-				// Original SOF2 CL_KeyEvent passes keynames[key].menukey as
-				// the 3rd parameter. Mouse/navigation/special keys are "menu
-				// keys" (=1) — the DLL checks this to process clicks/nav.
-				// All non-printable SOF2 keys (>126 or special codes) are menu keys.
-				menuKey = (sof2Key > 126 || sof2Key == 9 || sof2Key == 13 || sof2Key == 27) ? 1 : 0;
+				reservedFlags = 0;
 			}
 
 			// CRITICAL: Sync shadow keys array NOW, before calling the DLL.
@@ -4239,13 +4827,17 @@ void _UI_KeyEvent( int key, qboolean down )
 			SyncSOF2ShadowKeys();
 
 			// Diagnostic logging (temporary)
-			static int keyLogCount = 0;
-			if ( ++keyLogCount <= 30 ) {
-				Com_Printf("[DBG] UI_KeyEvent: openJK=%d -> sof2=%d isChar=%d menuKey=%d\n",
-				           key, sof2Key, isChar, menuKey);
-			}
+			int handled = uie->UI_KeyEvent( sof2Key, isChar, reservedFlags );
 
-			uie->UI_KeyEvent( sof2Key, isChar, menuKey );
+			static int keyLogCount = 0;
+			const qboolean interestingKey =
+				( key <= 16 || key >= 0x80 || isChar ) ? qtrue : qfalse;
+			if ( ++keyLogCount <= 120 || interestingKey ) {
+				Com_Printf("[DBG] UI_KeyEvent: raw=%d upper=%d -> sof2=%d down=%d isChar=%d flags=%d handled=%d catcher=%d cursor=(%.0f,%.0f)\n",
+				           key,
+				           ( key >= 0 && key < MAX_KEYS ) ? keynames[key].upper : -1,
+				           sof2Key, down ? 1 : 0, isChar, reservedFlags, handled, Key_GetCatcher(), uie_cursorx, uie_cursory);
+			}
 		}
 		return;
 	}

@@ -1602,6 +1602,54 @@ void RB_RenderWorldEffects(void)
 		return;
 	}
 
+	// SOF2 compatibility: when no weather zone cache exists with CONTENTS_INSIDE/OUTSIDE
+	// brushes, PointOutside() defaults to "everything outside", causing rain to appear
+	// inside tunnels and covered areas.  Fan 5 upward rays from the camera position:
+	// straight up + 4 diagonal, each 2048 units.  If ANY hits a solid surface the
+	// camera is under a ceiling — skip all weather rendering this frame.
+	// Re-checked every 100ms; result cached between checks.
+	{
+		static int  s_weatherCheckTime   = -9999;
+		static bool s_weatherViewIndoors = false;
+
+		int curTime = backEnd.refdef.time;
+		if ( curTime - s_weatherCheckTime > 100 || curTime < s_weatherCheckTime ) {
+			s_weatherCheckTime = curTime;
+
+			static const vec3_t kZero = { 0.0f, 0.0f, 0.0f };
+			// Shoot a single ray straight up.  Diagonal rays would hit nearby building
+			// walls in outdoor levels like pra1, incorrectly suppressing rain.
+			const float kDist = 2048.0f;
+			vec3_t traceEnd;
+			traceEnd[0] = backEnd.refdef.vieworg[0];
+			traceEnd[1] = backEnd.refdef.vieworg[1];
+			traceEnd[2] = backEnd.refdef.vieworg[2] + kDist;
+
+			bool underCeiling = false;
+			trace_t ctr;
+			ri.SV_Trace( &ctr, backEnd.refdef.vieworg, kZero, kZero, traceEnd,
+			             -1, CONTENTS_SOLID, G2_NOCOLLIDE, 0 );
+			if ( ctr.fraction < 1.0f ) {
+				underCeiling = true;
+			}
+			s_weatherViewIndoors = underCeiling;
+
+			// Diagnostic: print once per second so qconsole.log shows detection result
+			static int s_lastPrintTime = -9999;
+			if ( curTime - s_lastPrintTime > 1000 || curTime < s_lastPrintTime ) {
+				s_lastPrintTime = curTime;
+				ri.Printf( PRINT_ALL, "[WeatherIndoor] vieworg=(%.0f,%.0f,%.0f) indoors=%d svTrace=%s\n",
+				           backEnd.refdef.vieworg[0], backEnd.refdef.vieworg[1], backEnd.refdef.vieworg[2],
+				           (int)s_weatherViewIndoors,
+				           ri.SV_Trace ? "OK" : "NULL" );
+			}
+		}
+
+		if ( s_weatherViewIndoors ) {
+			return;
+		}
+	}
+
 	SetViewportAndScissor();
 	qglMatrixMode(GL_MODELVIEW);
 	qglLoadMatrixf(backEnd.viewParms.world.modelMatrix);
@@ -1888,25 +1936,36 @@ void R_WorldEffectCommand(const char *command)
 	}
 
 	// Create A Rain Storm
+	// SOF2 sends "rain init <count>" to initialize, plus "rain fog/height/alpha/..." as modifiers.
+	// Only create a cloud for "rain init"; silently ignore other rain subcommands.
 	//---------------------
 	else if (Q_stricmp(token, "rain") == 0)
 	{
-		if (mParticleClouds.full())
+		token = COM_ParseExt(&command, qfalse);
+		if (Q_stricmp(token, "init") == 0)
 		{
-			COM_EndParseSession();
-			return;
+			// "rain init <count>" — create the rain particle cloud
+			token = COM_ParseExt(&command, qfalse);
+			int count = token[0] ? atoi(token) : 1000;
+			if (count <= 0) count = 1000;
+
+			if (!mParticleClouds.full())
+			{
+				CParticleCloud& nCloud = mParticleClouds.push_back();
+				nCloud.Initialize(count, "gfx/world/rain.jpg", 3);
+				nCloud.mHeight		= 80.0f;
+				nCloud.mWidth		= 1.2f;
+				nCloud.mGravity		= 2000.0f;
+				nCloud.mFilterMode	= 1;
+				nCloud.mBlendMode	= 1;
+				nCloud.mFade		= 100.0f;
+				nCloud.mColor		= 0.5f;
+				nCloud.mOrientWithVelocity = true;
+				nCloud.mWaterParticles = true;
+				Com_DPrintf("WE: rain init %d — cloud created (%d total)\n", count, (int)mParticleClouds.size());
+			}
 		}
-		CParticleCloud& nCloud = mParticleClouds.push_back();
-		nCloud.Initialize(1000, "gfx/world/rain.jpg", 3);
-		nCloud.mHeight		= 80.0f;
-		nCloud.mWidth		= 1.2f;
-		nCloud.mGravity		= 2000.0f;
-		nCloud.mFilterMode	= 1;
-		nCloud.mBlendMode	= 1;
-		nCloud.mFade		= 100.0f;
-		nCloud.mColor		= 0.5f;
-		nCloud.mOrientWithVelocity = true;
-		nCloud.mWaterParticles = true;
+		// else: "rain fog", "rain height", "rain alpha", etc. — modifier subcommands, ignore silently
 	}
 
 	// Create A Rain Storm
@@ -2124,6 +2183,26 @@ void R_WorldEffectCommand(const char *command)
 	else if (Q_stricmp(token, "outsidepain") == 0)
 	{
 		mOutside.mOutsidePain = !mOutside.mOutsidePain;
+	}
+	// SOF2-specific: forward "exec <cmd>" to the command buffer (e.g. "exec set r_surfaceWeather 1")
+	else if (Q_stricmp(token, "exec") == 0)
+	{
+		// The rest of the command string is a console command to execute
+		token = COM_ParseExt(&command, qfalse);
+		if (token[0])
+		{
+			char cmd[256];
+			// Reassemble remaining tokens on this line into a command string
+			Q_strncpyz(cmd, token, sizeof(cmd));
+			while (1)
+			{
+				token = COM_ParseExt(&command, qfalse);
+				if (!token[0]) break;
+				Q_strcat(cmd, sizeof(cmd), " ");
+				Q_strcat(cmd, sizeof(cmd), token);
+			}
+			ri.Cmd_ExecuteString(cmd);
+		}
 	}
 	else
 	{

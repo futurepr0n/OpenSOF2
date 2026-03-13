@@ -1195,6 +1195,8 @@ void CL_ParseBinding( int key, qboolean down, unsigned time )
 	char buf[ MAX_STRING_CHARS ], *p = buf, *end;
 	qboolean allCommands, allowUpCmds;
 	const char *binding;
+	const int cmdKey = keynames[key].upper;
+	static const qboolean clVerboseKeyDebug = qfalse;
 	static int alphaLogCount = 0;
 
 	if( cls.state == CA_DISCONNECTED && Key_GetCatcher( ) == 0 )
@@ -1204,7 +1206,7 @@ void CL_ParseBinding( int key, qboolean down, unsigned time )
 		return;
 	Q_strncpyz( buf, binding, sizeof( buf ) );
 
-	if ( alphaLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
+	if ( clVerboseKeyDebug && alphaLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
 		Com_Printf( "[CL key] ParseBinding #%d key=%d down=%d upper=%d binding='%s' catcher=%d state=%d\n",
 			alphaLogCount + 1,
 			key,
@@ -1237,7 +1239,7 @@ void CL_ParseBinding( int key, qboolean down, unsigned time )
 			if ( allCommands || ( allowUpCmds && !down ) ) {
 				char cmd[1024];
 				Com_sprintf( cmd, sizeof( cmd ), "%c%s %d %d\n",
-					( down ) ? '+' : '-', p + 1, key, time );
+					( down ) ? '+' : '-', p + 1, cmdKey, time );
 				Cbuf_AddText( cmd );
 			}
 		}
@@ -1369,8 +1371,9 @@ Called by the system for both key up and key down events
 ===================
 */
 void CL_KeyEvent (int key, qboolean down, unsigned time) {
+	static const qboolean clVerboseKeyDebug = qfalse;
 	static int alphaEventLogCount = 0;
-	if ( alphaEventLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
+	if ( clVerboseKeyDebug && alphaEventLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
 		Com_Printf( "[CL key] Event #%d key=%d down=%d upper=%d catcher=%d state=%d time=%u\n",
 			alphaEventLogCount + 1,
 			key,

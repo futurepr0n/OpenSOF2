@@ -55,6 +55,7 @@ UI_ForceMenuOff
 */
 void UI_ForceMenuOff (void)
 {
+	UI_CloseSOF2NativeMenu( qfalse );
 	ui.Key_SetCatcher( ui.Key_GetCatcher() & ~KEYCATCH_UI );
 	ui.Key_ClearStates();
 	ui.Cvar_Set( "cl_paused", "0" );
@@ -79,6 +80,9 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID )
 
 	if ( !menuname ) {
 		UI_ForceMenuOff();
+		return;
+	}
+	if ( UI_HandleSOF2NativeSetActiveMenu( menuname, menuID ) ) {
 		return;
 	}
 	Com_Printf( "UI_SetActiveMenu: %s\n", menuname );
@@ -117,9 +121,12 @@ void UI_SetActiveMenu( const char* menuname,const char *menuID )
 		// clear it when hiding (menuname == NULL).
 		// Guard: only touch keyCatchers if the DLL is still alive (not crashed above).
 		if ( uie ) {
-			if ( menuname )
+			if ( menuname ) {
 				trap_Key_SetCatcher( KEYCATCH_UI );   // Force UI-only; clears any KEYCATCH_CONSOLE
-			else
+				// Menusx86 is sensitive to stale mouse-button state on entry.
+				// Clear it even if the catcher was already UI and did not change.
+				trap_Key_ClearStates();
+			} else
 				trap_Key_SetCatcher( trap_Key_GetCatcher() & ~KEYCATCH_UI );
 		}
 		return;
