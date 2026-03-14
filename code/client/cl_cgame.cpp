@@ -725,16 +725,27 @@ static void CG_R_SetColor_SOF2( const void *colorOrPacked ) {
 static qboolean CG_SOF2_RefEntitySeemsValid( const unsigned char *raw ) {
 	if ( !raw ) return qfalse;
 	const int sof2ReType = *(const int *)( raw + 0x00 );
+	const int sof2Renderfx = *(const int *)( raw + 0x04 );
 	const int sof2hModel = *(const int *)( raw + 0x08 );
 	const void *sof2Ghoul2 = *(void * const *)( raw + 0xCC );
 	const float *sof2Origin = (const float *)( raw + 0x34 );
-	return ( sof2ReType >= RT_MODEL &&
-		sof2ReType <= RT_MAX_REF_ENTITY_TYPE &&
-		( ( sof2hModel > 0 && sof2hModel < 32768 ) || sof2Ghoul2 != NULL ) &&
+	const float *sof2Scale = (const float *)( raw + 0x6C );
+	const qboolean hasUsableOrigin =
 		( fabsf( sof2Origin[0] ) > 0.01f ||
 		  fabsf( sof2Origin[1] ) > 0.01f ||
-		  fabsf( sof2Origin[2] ) > 0.01f ||
-		  sof2Ghoul2 != NULL ) ) ? qtrue : qfalse;
+		  fabsf( sof2Origin[2] ) > 0.01f ) ? qtrue : qfalse;
+	const qboolean looksLikeBrushMover =
+		( sof2ReType == RT_MODEL &&
+		  sof2Renderfx == 0x40 &&
+		  sof2Ghoul2 == NULL &&
+		  fabsf( sof2Scale[0] ) < 0.001f &&
+		  fabsf( sof2Scale[1] ) < 0.001f &&
+		  fabsf( sof2Scale[2] ) < 0.001f ) ? qtrue : qfalse;
+
+	return ( sof2ReType >= RT_MODEL &&
+		sof2ReType < RT_MAX_REF_ENTITY_TYPE &&
+		( ( sof2hModel > 0 && sof2hModel < 32768 ) || sof2Ghoul2 != NULL ) &&
+		( hasUsableOrigin || sof2Ghoul2 != NULL || looksLikeBrushMover ) ) ? qtrue : qfalse;
 }
 
 static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out ) {
@@ -783,6 +794,7 @@ static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out 
 
 static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	static int addRefEntityLogCount = 0;
+	static int invalidReTypeLogCount = 0;
 	const refEntity_t *submitEnt = ent;
 	refEntity_t converted;
 	if ( !ent ) {
@@ -819,6 +831,22 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	if ( useSOF2Layout ) {
 		CG_ConvertSOF2RefEntity( raw, &converted );
 		submitEnt = &converted;
+	}
+
+	if ( submitEnt->reType < RT_MODEL || submitEnt->reType >= RT_MAX_REF_ENTITY_TYPE ) {
+		if ( invalidReTypeLogCount < 16 ) {
+			Com_Printf(
+				"[CG scene] skip invalid reType=%d mode=%s rawType=%d hModel=%d rawHModel=%d org=(%.1f,%.1f,%.1f) rawOrg=(%.1f,%.1f,%.1f)\n",
+				(int)submitEnt->reType,
+				useSOF2Layout ? "sof2" : "openjk",
+				*(const int *)( raw + 0x00 ),
+				(int)submitEnt->hModel,
+				sof2hModel,
+				submitEnt->origin[0], submitEnt->origin[1], submitEnt->origin[2],
+				sof2Origin[0], sof2Origin[1], sof2Origin[2] );
+			++invalidReTypeLogCount;
+		}
+		return;
 	}
 
 	if ( s_cgFrameRefEntityCount < MAX_REFENTITIES ) {

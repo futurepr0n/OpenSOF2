@@ -5455,7 +5455,14 @@ extern cvar_t	*g_skippingcin;
 
 	if ( pm.useEvent )
 	{
-		//TODO: Use
+		if ( ent->s.number == 0 )
+		{
+			Com_Printf( "[USE] pm.useEvent buttons=0x%08x view=(%.1f %.1f %.1f)\n",
+				ucmd->buttons,
+				ent->client->ps.viewangles[0],
+				ent->client->ps.viewangles[1],
+				ent->client->ps.viewangles[2] );
+		}
 		TryUse( ent );
 	}
 

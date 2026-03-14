@@ -338,8 +338,22 @@ void IN_Button3Down(void) {IN_KeyDown(&in_buttons[3]);}
 void IN_Button3Up(void) {IN_KeyUp(&in_buttons[3]);}
 void IN_Button4Down(void) {IN_KeyDown(&in_buttons[4]);}
 void IN_Button4Up(void) {IN_KeyUp(&in_buttons[4]);}
-void IN_Button5Down(void) {IN_KeyDown(&in_buttons[5]);}
-void IN_Button5Up(void) {IN_KeyUp(&in_buttons[5]);}
+void IN_Button5Down(void) {
+	static int s_useDownLogCount = 0;
+	if ( s_useDownLogCount < 32 ) {
+		Com_Printf( "[USE-CL] +use down\n" );
+		++s_useDownLogCount;
+	}
+	IN_KeyDown(&in_buttons[5]);
+}
+void IN_Button5Up(void) {
+	static int s_useUpLogCount = 0;
+	if ( s_useUpLogCount < 32 ) {
+		Com_Printf( "[USE-CL] -use up\n" );
+		++s_useUpLogCount;
+	}
+	IN_KeyUp(&in_buttons[5]);
+}
 void IN_Button6Down(void) {IN_KeyDown(&in_buttons[6]);}
 void IN_Button6Up(void) {IN_KeyUp(&in_buttons[6]);}
 void IN_Button7Down(void) {IN_KeyDown(&in_buttons[7]);}
@@ -822,6 +836,20 @@ void CL_CmdButtons( usercmd_t *cmd ) {
 			cmd->buttons |= 1 << i;
 		}
 		in_buttons[i].wasPressed = qfalse;
+	}
+
+	if ( cmd->buttons & BUTTON_USE ) {
+		static int s_useClientCmdLogCount = 0;
+		if ( s_useClientCmdLogCount < 64 ) {
+			Com_Printf(
+				"[USE-CL] buttons=0x%08X button5(active=%d wasPressed=%d downtime=%d msec=%d)\n",
+				(unsigned int)cmd->buttons,
+				(int)in_buttons[5].active,
+				(int)in_buttons[5].wasPressed,
+				in_buttons[5].downtime,
+				in_buttons[5].msec );
+			++s_useClientCmdLogCount;
+		}
 	}
 
 	if ( Key_GetCatcher( ) ) {

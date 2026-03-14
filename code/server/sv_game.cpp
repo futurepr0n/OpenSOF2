@@ -626,26 +626,136 @@ static void SV_Traced_Cbuf_ExecuteText( int exec_when, const char *text ) {
 	Cbuf_ExecuteText( exec_when, text );
 }
 
+static int SV_FindEntityNumByPointer( gentity_t *gEnt );
+static const char *SV_SOF2_ModelConfigString( int modelIndex );
+static int sv_trace_log_armed = 0;
+static int sv_trace_log_count = 0;
+static int sv_trace_log_reason = 0; // 1=movement, 2=use
+static qboolean sv_trace_use_latched = qfalse;
+
+static qboolean SV_ShouldLogTouchDebug( void ) {
+	if ( sv_trace_use_latched ) {
+		return qtrue;
+	}
+	if ( sv_trace_log_armed && ( sv_trace_log_reason == 1 || sv_trace_log_reason == 2 ) ) {
+		return qtrue;
+	}
+	return qfalse;
+}
+
 // --- SV_AreaEntities wrapper: SOF2 game DLL expects entity INDICES, not pointers ---
 // OpenJK's SV_AreaEntities fills the output array with gentity_t* pointers, but
 // SOF2's gamex86.dll treats the output as int[] entity indices (used as array index
 // into g_entityLookupTable). This wrapper converts pointers to indices.
-static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *entityList, int maxcount ) {
+static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *entityList, int maxcount, int /*worldIndex*/ ) {
 	// Temp array for pointers — cap at MAX_GENTITIES to avoid stack overflow
 	gentity_t *ptrBuf[MAX_GENTITIES];
+	int outCount = 0;
+	static int s_areaEntitiesCallLogCount = 0;
 	if ( maxcount > MAX_GENTITIES ) maxcount = MAX_GENTITIES;
 	int count = SV_AreaEntities( mins, maxs, ptrBuf, maxcount );
 
-	// Convert each gentity_t* pointer to its entity number
+	// Convert each gentity_t* pointer to the live slot index expected by retail.
+	// s.number can carry stale or non-slot values; G_TouchTriggers indexes the
+	// returned list directly into g_entityLookupTable with no validation.
 	for ( int i = 0; i < count; i++ ) {
 		if ( ptrBuf[i] ) {
-			entityList[i] = SOF2_ENT_NUMBER( ptrBuf[i] );
-		} else {
-			entityList[i] = -1;  // shouldn't happen, but be safe
+			const int entNum = SV_FindEntityNumByPointer( ptrBuf[i] );
+			if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+				entityList[outCount++] = entNum;
+				SOF2_ENT_NUMBER( ptrBuf[i] ) = entNum;
+				SOF2_ENT_SERVERINDEX( ptrBuf[i] ) = entNum;
+			}
 		}
 	}
 
-	return count;
+	if ( s_areaEntitiesCallLogCount < 64 ) {
+		int triggerCount = 0;
+		int itemCount = 0;
+		for ( int i = 0; i < outCount; ++i ) {
+			gentity_t *ent = SV_GentityNum( entityList[i] );
+			if ( !ent ) {
+				continue;
+			}
+			if ( SOF2_ENT_CONTENTS( ent ) & CONTENTS_TRIGGER ) {
+				++triggerCount;
+			}
+			if ( SOF2_ENT_ETYPE( ent ) == ET_ITEM ) {
+				++itemCount;
+			}
+		}
+
+		Com_Printf(
+			"[AREA69] #%d mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) raw=%d out=%d triggers=%d items=%d reason=%d latched=%d\n",
+			s_areaEntitiesCallLogCount + 1,
+			mins[0], mins[1], mins[2],
+			maxs[0], maxs[1], maxs[2],
+			count,
+			outCount,
+			triggerCount,
+			itemCount,
+			sv_trace_log_reason,
+			(int)sv_trace_use_latched );
+		++s_areaEntitiesCallLogCount;
+	}
+
+	if ( SV_ShouldLogTouchDebug() ) {
+		static int s_useAreaSummaryLogCount = 0;
+		static int s_useAreaDetailLogCount = 0;
+		int triggerCount = 0;
+		int itemCount = 0;
+
+		for ( int i = 0; i < outCount; ++i ) {
+			gentity_t *ent = SV_GentityNum( entityList[i] );
+			if ( !ent ) {
+				continue;
+			}
+			if ( SOF2_ENT_CONTENTS( ent ) & CONTENTS_TRIGGER ) {
+				++triggerCount;
+			}
+			if ( SOF2_ENT_ETYPE( ent ) == ET_ITEM ) {
+				++itemCount;
+			}
+		}
+
+		if ( s_useAreaSummaryLogCount < 24 ) {
+			Com_Printf(
+				"[TOUCH %s] EntitiesInBox mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) count=%d triggers=%d items=%d\n",
+				( sv_trace_log_reason == 2 ) ? "use" : "move",
+				mins[0], mins[1], mins[2],
+				maxs[0], maxs[1], maxs[2],
+				outCount,
+				triggerCount,
+				itemCount );
+			++s_useAreaSummaryLogCount;
+		}
+
+		for ( int i = 0; i < outCount && s_useAreaDetailLogCount < 96; ++i ) {
+			gentity_t *ent = SV_GentityNum( entityList[i] );
+			if ( !ent ) {
+				continue;
+			}
+			if ( !( SOF2_ENT_CONTENTS( ent ) & CONTENTS_TRIGGER ) &&
+				SOF2_ENT_ETYPE( ent ) != ET_ITEM ) {
+				continue;
+			}
+			Com_Printf(
+				"[TOUCH %s] hitlist num=%d type=%d model=%d('%s') solid=0x%x contents=0x%x linked=%d bmodel=%d svf=0x%x\n",
+				( sv_trace_log_reason == 2 ) ? "use" : "move",
+				entityList[i],
+				SOF2_ENT_ETYPE( ent ),
+				SOF2_ENT_MODELINDEX( ent ),
+				SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ent ) ),
+				SOF2_ENT_SOLID( ent ),
+				SOF2_ENT_CONTENTS( ent ),
+				SOF2_ENT_LINKED( ent ),
+				(int)SV_SOF2_IsBrushModelEntity( ent ),
+				SOF2_ENT_SVFLAGS( ent ) );
+			++s_useAreaDetailLogCount;
+		}
+	}
+
+	return outCount;
 }
 
 // --- Signature-adapting wrappers for game_import_t slot type mismatches ---
@@ -691,6 +801,62 @@ static int   sv_GEntitySize  = 0;      // 0x560 = sizeof(CEntity), stored but NO
 static int   sv_numGEntities = 0;      // MAX_GENTITIES (1024)
 static void *sv_GameClients  = NULL;   // game client array (stride-based, unlike entities)
 static int   sv_GameClientSize = 0;    // sizeof(gclient_t) = 0x24C
+static byte  sv_sof2BrushModel[MAX_GENTITIES];
+static int SV_SOF2_EntitySlot( const gentity_t *gEnt ) {
+	int entNum;
+
+	if ( !gEnt ) {
+		return -1;
+	}
+
+	entNum = SOF2_ENT_NUMBER( gEnt );
+	if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+		return entNum;
+	}
+
+	entNum = SOF2_ENT_SERVERINDEX( gEnt );
+	if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+		return entNum;
+	}
+
+	return SV_FindEntityNumByPointer( (gentity_t *)gEnt );
+}
+
+static const char *SV_SOF2_ModelConfigString( int modelIndex ) {
+	const int csIndex = 32 + modelIndex;
+
+	if ( modelIndex <= 0 ) {
+		return "";
+	}
+	if ( csIndex < 0 || csIndex >= MAX_CONFIGSTRINGS ) {
+		return "";
+	}
+	if ( !sv.configstrings[csIndex] ) {
+		return "";
+	}
+
+	return sv.configstrings[csIndex];
+}
+
+qboolean SV_SOF2_IsBrushModelEntity( const gentity_t *gEnt ) {
+	const int entNum = SV_SOF2_EntitySlot( gEnt );
+	const int modelIndex = gEnt ? SOF2_ENT_MODELINDEX( gEnt ) : 0;
+	const char *modelName = SV_SOF2_ModelConfigString( modelIndex );
+
+	if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+		if ( modelName[0] == '*' ) {
+			sv_sof2BrushModel[entNum] = 1;
+			return qtrue;
+		}
+		if ( !Q_stricmpn( modelName, "models/", 7 ) ) {
+			sv_sof2BrushModel[entNum] = 0;
+			return qfalse;
+		}
+		return sv_sof2BrushModel[entNum] ? qtrue : qfalse;
+	}
+
+	return SOF2_ENT_BMODEL( gEnt ) ? qtrue : qfalse;
+}
 
 static int SV_FindEntityNumByPointer( gentity_t *gEnt ) {
 	int limit;
@@ -861,6 +1027,12 @@ void SV_SetBrushModel( gentity_t *ent, const char *name ) {
 		VectorCopy (mins, SOF2_ENT_MINS(ent));
 		VectorCopy (maxs, SOF2_ENT_MAXS(ent));
 		SOF2_ENT_BMODEL(ent) = 1;
+		{
+			const int entNum = SV_SOF2_EntitySlot( ent );
+			if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+				sv_sof2BrushModel[entNum] = 1;
+			}
+		}
 
 		SOF2_ENT_CONTENTS(ent) = CM_ModelContents( h, -1 );
 	}
@@ -872,6 +1044,12 @@ void SV_SetBrushModel( gentity_t *ent, const char *name ) {
 		VectorCopy (mins, SOF2_ENT_MINS(ent));
 		VectorCopy (maxs, SOF2_ENT_MAXS(ent));
 		SOF2_ENT_BMODEL(ent) = 1;
+		{
+			const int entNum = SV_SOF2_EntitySlot( ent );
+			if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+				sv_sof2BrushModel[entNum] = 1;
+			}
+		}
 
 		//rwwNOTE: We don't ever want to set contents -1, it includes CONTENTS_LIGHTSABER.
 		//Lots of stuff will explode if there's a brush with CONTENTS_LIGHTSABER that isn't attached to a client owner.
@@ -1020,18 +1198,72 @@ void SV_AdjustAreaPortalState( gentity_t *ent, qboolean open ) {
 SV_GameAreaEntities
 ==================
 */
-qboolean	SV_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t *gEnt ) {
+qboolean	SV_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t *gEnt, int /*worldIndex*/ ) {
 	const float	*origin, *angles;
 	clipHandle_t	ch;
 	trace_t			trace;
+	static int s_entityContactCallLogCount = 0;
 
 	// check for exact collision
+	if ( !SV_SOF2_IsBrushModelEntity( gEnt ) ) {
+		float *curOrigin = SOF2_ENT_CURORIGIN( gEnt );
+		float *curAngles = SOF2_ENT_CURANGLES( gEnt );
+		const float *stateOrigin = SOF2_ENT_S_ORIGIN( gEnt );
+		const float *stateAngles = SOF2_ENT_S_ANGLES( gEnt );
+		if ( curOrigin[0] == 0.0f && curOrigin[1] == 0.0f && curOrigin[2] == 0.0f &&
+			 ( stateOrigin[0] != 0.0f || stateOrigin[1] != 0.0f || stateOrigin[2] != 0.0f ) ) {
+			VectorCopy( stateOrigin, curOrigin );
+		}
+		if ( curAngles[0] == 0.0f && curAngles[1] == 0.0f && curAngles[2] == 0.0f &&
+			 ( stateAngles[0] != 0.0f || stateAngles[1] != 0.0f || stateAngles[2] != 0.0f ) ) {
+			VectorCopy( stateAngles, curAngles );
+		}
+	}
 	origin = SOF2_ENT_CURORIGIN(gEnt);
 	angles = SOF2_ENT_CURANGLES(gEnt);
 
 	ch = SV_ClipHandleForEntity( gEnt );
 	CM_TransformedBoxTrace ( &trace, vec3_origin, vec3_origin, mins, maxs,
 		ch, -1, origin, angles );
+
+	if ( s_entityContactCallLogCount < 96 ) {
+		Com_Printf(
+			"[CONTACT70] #%d num=%d type=%d model=%d('%s') solid=0x%x contents=0x%x linked=%d bmodel=%d startsolid=%d reason=%d latched=%d origin=(%.1f,%.1f,%.1f)\n",
+			s_entityContactCallLogCount + 1,
+			SV_SOF2_EntitySlot( gEnt ),
+			SOF2_ENT_ETYPE( gEnt ),
+			SOF2_ENT_MODELINDEX( gEnt ),
+			SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( gEnt ) ),
+			SOF2_ENT_SOLID( gEnt ),
+			SOF2_ENT_CONTENTS( gEnt ),
+			SOF2_ENT_LINKED( gEnt ),
+			(int)SV_SOF2_IsBrushModelEntity( gEnt ),
+			(int)trace.startsolid,
+			sv_trace_log_reason,
+			(int)sv_trace_use_latched,
+			origin[0], origin[1], origin[2] );
+		++s_entityContactCallLogCount;
+	}
+
+	if ( SV_ShouldLogTouchDebug() ) {
+		static int s_useContactLogCount = 0;
+		if ( s_useContactLogCount < 96 ) {
+			Com_Printf(
+				"[TOUCH %s] EntityContact num=%d type=%d model=%d('%s') solid=0x%x contents=0x%x linked=%d bmodel=%d startsolid=%d origin=(%.1f,%.1f,%.1f)\n",
+				( sv_trace_log_reason == 2 ) ? "use" : "move",
+				SV_SOF2_EntitySlot( gEnt ),
+				SOF2_ENT_ETYPE( gEnt ),
+				SOF2_ENT_MODELINDEX( gEnt ),
+				SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( gEnt ) ),
+				SOF2_ENT_SOLID( gEnt ),
+				SOF2_ENT_CONTENTS( gEnt ),
+				SOF2_ENT_LINKED( gEnt ),
+				(int)SV_SOF2_IsBrushModelEntity( gEnt ),
+				(int)trace.startsolid,
+				origin[0], origin[1], origin[2] );
+			++s_useContactLogCount;
+		}
+	}
 
 	return (qboolean)trace.startsolid;
 }
@@ -1739,6 +1971,7 @@ static void SV_LocateGameData_SOF2( void *gentities, int numEntities, int entity
 	sv_numGEntities   = numEntities;
 	sv_GameClients    = clients;
 	sv_GameClientSize = clientSize;
+	memset( sv_sof2BrushModel, 0, sizeof( sv_sof2BrushModel ) );
 	Com_Printf("[DBG] SV_LocateGameData: ents=%p num=%d size=0x%x clients=%p clientSize=0x%x\n",
 		gentities, numEntities, entitySize, clients, clientSize);
 	for ( i = 0; i < numEntities && i < MAX_GENTITIES; ++i ) {
@@ -1853,25 +2086,60 @@ static void SV_GP_SetSubGroups_Stub( ... ) {
 // SOF2 game DLL pushes 10 args: results, start, mins, maxs, end, passEnt, contentmask,
 //   eG2TraceType, useLod, traceFlags(always 0)
 // Set to 1 when game DLL has received a non-zero-move usercmd — trace logging starts then
-static int sv_trace_log_armed = 0;
-static int sv_trace_log_count = 0;
 
 static void SV_Trace_10args( trace_t *results, const vec3_t start,
 		const vec3_t mins, const vec3_t maxs, const vec3_t end,
 		int passEnt, int contentmask,
 		int eG2TraceType, int useLod, int /*traceFlags*/ ) {
-	if ( sv_trace_log_armed && sv_trace_log_count < 16 ) {
-		// Log start pointer address so we can compute pm.ps = start_ptr - 0x14
-		Com_Printf( "[GI trace] #%d start_ptr=%p=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) pass=%d mask=0x%X\n",
-			sv_trace_log_count + 1,
-			(void*)start,
-			start[0], start[1], start[2],
-			end[0], end[1], end[2],
-			passEnt, (unsigned int)contentmask );
-		sv_trace_log_count++;
-	}
 	SV_Trace( results, start, mins, maxs, end, passEnt, contentmask,
 		(EG2_Collision)eG2TraceType, useLod );
+
+	if ( sv_trace_log_armed && sv_trace_log_count < 24 ) {
+		gentity_t *hitEnt = NULL;
+		int modelindex = 0;
+		int modelindex2 = 0;
+		int solid = 0;
+		int svFlags = 0;
+		int eType = 0;
+		int linked = 0;
+		int bmodel = 0;
+
+		if ( results && results->entityNum >= 0 && results->entityNum < MAX_GENTITIES ) {
+			hitEnt = SV_GentityNum( results->entityNum );
+			if ( hitEnt ) {
+				modelindex = SOF2_ENT_MODELINDEX( hitEnt );
+				modelindex2 = *(int *)((byte *)hitEnt + 0x0AC);
+				solid = SOF2_ENT_SOLID( hitEnt );
+				svFlags = SOF2_ENT_SVFLAGS( hitEnt );
+				eType = SOF2_ENT_ETYPE( hitEnt );
+				linked = SOF2_ENT_LINKED( hitEnt );
+				bmodel = SV_SOF2_IsBrushModelEntity( hitEnt );
+			}
+		}
+
+		Com_Printf(
+			"[GI trace:%s] #%d start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) pass=%d mask=0x%X hit=%d frac=%.3f startsolid=%d allsolid=%d model=%d/%d solid=%d svf=0x%X etype=%d linked=%d bmodel=%d\n",
+			( sv_trace_log_reason == 2 ) ? "use" : "move",
+			sv_trace_log_count + 1,
+			start[0], start[1], start[2],
+			end[0], end[1], end[2],
+			mins ? mins[0] : 0.0f, mins ? mins[1] : 0.0f, mins ? mins[2] : 0.0f,
+			maxs ? maxs[0] : 0.0f, maxs ? maxs[1] : 0.0f, maxs ? maxs[2] : 0.0f,
+			passEnt,
+			(unsigned int)contentmask,
+			results ? results->entityNum : -1,
+			results ? results->fraction : 1.0f,
+			results ? (int)results->startsolid : 0,
+			results ? (int)results->allsolid : 0,
+			modelindex,
+			modelindex2,
+			solid,
+			(unsigned int)svFlags,
+			eType,
+			linked,
+			bmodel );
+		++sv_trace_log_count;
+	}
 }
 
 // gi[72]: SV_R_LightForPoint — renderer function (stub)
@@ -2032,6 +2300,7 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 	{
 		const usercmd_t *src = &svs.clients[0].lastUsercmd;
 		int *out = (int *)cmd;
+		unsigned int packedMove = 0;
 		out[0] = src->serverTime;
 		out[1] = src->angles[0];  // PITCH (OpenJK angles[0]) → DLL viewangles[0]
 		out[2] = src->angles[1];  // YAW   (OpenJK angles[1]) → DLL viewangles[1]
@@ -2058,12 +2327,36 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 				rawButtons &= ~1u;
 			}
 			out[4] = (int)rawButtons;
+			packedMove = (unsigned char)src->weapon
+			       | ( (unsigned char)src->forwardmove << 8 )
+			       | ( (unsigned char)src->rightmove   << 16 )
+			       | ( (unsigned char)src->upmove      << 24 );
+			if ( rawButtons & BUTTON_USE ) {
+				static int s_useForwardLogCount = 0;
+				if ( !sv_trace_use_latched ) {
+					sv_trace_log_armed = 1;
+					sv_trace_log_reason = 2;
+					sv_trace_log_count = 0;
+					sv_trace_use_latched = qtrue;
+				}
+				if ( s_useForwardLogCount < 64 ) {
+					Com_Printf(
+						"[USE-ENG] GetUsercmd forwarded buttons=0x%08X packed=0x%08X move=(%d,%d,%d) weapon=%u time=%d\n",
+						rawButtons,
+						packedMove,
+						(int)src->forwardmove,
+						(int)src->rightmove,
+						(int)src->upmove,
+						(unsigned int)src->weapon,
+						src->serverTime );
+					++s_useForwardLogCount;
+				}
+			} else {
+				sv_trace_use_latched = qfalse;
+			}
 		}
 
-		out[5] = (unsigned char)src->weapon
-		       | ( (unsigned char)src->forwardmove << 8 )
-		       | ( (unsigned char)src->rightmove   << 16 )
-		       | ( (unsigned char)src->upmove      << 24 );
+		out[5] = packedMove;
 
 		// Keep DLL viewangles aligned with the incoming command stream.
 		// This avoids cases where movement uses stale spawn orientation.
@@ -2089,6 +2382,7 @@ static void SV_GetUsercmd_SOF2( usercmd_t *cmd ) {
 		}
 		if ( src2->forwardmove || src2->rightmove || src2->upmove ) {
 			sv_trace_log_armed = 1;
+			sv_trace_log_reason = 1;
 			if ( svVerboseGetUsercmdLogs && getCmdMoveLogCount < 128 ) {
 				Com_Printf( "[GI GetUsercmd MOVE] #%d move=(%d,%d,%d) cmdTime=%d\n",
 					getCmdMoveLogCount + 1,

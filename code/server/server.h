@@ -78,6 +78,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define SOF2_ENT_S_OFFSET       8
 // =============================================================================
 
+qboolean SV_SOF2_IsBrushModelEntity( const gentity_t *gEnt );
+
 //=============================================================================
 
 //#define	PERS_SCORE				0		// !!! MUST NOT CHANGE, SERVER AND

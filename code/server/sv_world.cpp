@@ -61,7 +61,7 @@ be returned, otherwise a custom box tree will be constructed.
 ================
 */
 clipHandle_t SV_ClipHandleForEntity( const gentity_t *ent ) {
-	if ( SOF2_ENT_BMODEL(ent) ) {
+	if ( SV_SOF2_IsBrushModelEntity( ent ) ) {
 		// explicit hulls in the BSP model
 		return CM_InlineModel( SOF2_ENT_MODELINDEX(ent) );
 	}
@@ -235,8 +235,36 @@ void SV_LinkEntity( gentity_t *gEnt ) {
 		SV_UnlinkEntity( gEnt );	// unlink from old position
 	}
 
+	// Retail SOF2 renders many static items / triggers from entityState.origin,
+	// but some startup paths leave currentOrigin/currentAngles unset. If we link
+	// against a stale zero origin, touch/use queries never find the live object
+	// even though it renders in the right place.
+	if ( !SV_SOF2_IsBrushModelEntity( gEnt ) ) {
+		float *curOrigin = SOF2_ENT_CURORIGIN( gEnt );
+		float *curAngles = SOF2_ENT_CURANGLES( gEnt );
+		const float *stateOrigin = SOF2_ENT_S_ORIGIN( gEnt );
+		const float *stateAngles = SOF2_ENT_S_ANGLES( gEnt );
+		if ( curOrigin[0] == 0.0f && curOrigin[1] == 0.0f && curOrigin[2] == 0.0f &&
+			 ( stateOrigin[0] != 0.0f || stateOrigin[1] != 0.0f || stateOrigin[2] != 0.0f ) ) {
+			static int s_syncOriginLogCount = 0;
+			VectorCopy( stateOrigin, curOrigin );
+			if ( s_syncOriginLogCount < 32 ) {
+				Com_Printf(
+					"[SOF2 fix] link synced currentOrigin from s.origin ent=%d model=%d origin=(%.1f %.1f %.1f)\n",
+					SOF2_ENT_NUMBER( gEnt ),
+					SOF2_ENT_MODELINDEX( gEnt ),
+					curOrigin[0], curOrigin[1], curOrigin[2] );
+				++s_syncOriginLogCount;
+			}
+		}
+		if ( curAngles[0] == 0.0f && curAngles[1] == 0.0f && curAngles[2] == 0.0f &&
+			 ( stateAngles[0] != 0.0f || stateAngles[1] != 0.0f || stateAngles[2] != 0.0f ) ) {
+			VectorCopy( stateAngles, curAngles );
+		}
+	}
+
 	// encode the size into the entityState_t for client prediction
-	if ( SOF2_ENT_BMODEL(gEnt) ) {
+	if ( SV_SOF2_IsBrushModelEntity( gEnt ) ) {
 		SOF2_ENT_SOLID(gEnt) = SOLID_BMODEL;		// a solid_box will never create this value
 	} else if ( SOF2_ENT_CONTENTS(gEnt) & ( CONTENTS_SOLID | CONTENTS_BODY ) ) {
 		// assume that x/y are equal and symetric
@@ -270,7 +298,7 @@ void SV_LinkEntity( gentity_t *gEnt ) {
 	angles = SOF2_ENT_CURANGLES(gEnt);
 
 	// set the abs box
-	if ( SOF2_ENT_BMODEL(gEnt) && (angles[0] || angles[1] || angles[2]) )
+	if ( SV_SOF2_IsBrushModelEntity( gEnt ) && (angles[0] || angles[1] || angles[2]) )
 	{	// expand for rotation
 		float		max;
 		int			i;
@@ -659,7 +687,7 @@ void SV_ClipMoveToEntities( moveclip_t *clip ) {
 		angles = SOF2_ENT_CURANGLES(touch);
 
 
-		if ( !SOF2_ENT_BMODEL(touch) ) {
+		if ( !SV_SOF2_IsBrushModelEntity( touch ) ) {
 			angles = vec3_origin;	// boxes don't rotate
 		}
 

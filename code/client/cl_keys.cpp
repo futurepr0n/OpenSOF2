@@ -1198,6 +1198,7 @@ void CL_ParseBinding( int key, qboolean down, unsigned time )
 	const int cmdKey = keynames[key].upper;
 	static const qboolean clVerboseKeyDebug = qfalse;
 	static int alphaLogCount = 0;
+	static int spaceBindLogCount = 0;
 
 	if( cls.state == CA_DISCONNECTED && Key_GetCatcher( ) == 0 )
 		return;
@@ -1205,6 +1206,19 @@ void CL_ParseBinding( int key, qboolean down, unsigned time )
 	if( !binding || !binding[0] )
 		return;
 	Q_strncpyz( buf, binding, sizeof( buf ) );
+
+	if ( spaceBindLogCount < 64 && ( key == A_SPACE || key == A_SHIFT_SPACE ) ) {
+		Com_Printf(
+			"[USE-KEY] ParseBinding key=%d down=%d upper=%d binding='%s' catcher=%d state=%d time=%u\n",
+			key,
+			down ? 1 : 0,
+			cmdKey,
+			binding,
+			Key_GetCatcher(),
+			cls.state,
+			time );
+		++spaceBindLogCount;
+	}
 
 	if ( clVerboseKeyDebug && alphaLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
 		Com_Printf( "[CL key] ParseBinding #%d key=%d down=%d upper=%d binding='%s' catcher=%d state=%d\n",
@@ -1373,6 +1387,7 @@ Called by the system for both key up and key down events
 void CL_KeyEvent (int key, qboolean down, unsigned time) {
 	static const qboolean clVerboseKeyDebug = qfalse;
 	static int alphaEventLogCount = 0;
+	static int spaceEventLogCount = 0;
 	if ( clVerboseKeyDebug && alphaEventLogCount < 48 && (( key >= 'A' && key <= 'Z' ) || ( key >= 'a' && key <= 'z' )) ) {
 		Com_Printf( "[CL key] Event #%d key=%d down=%d upper=%d catcher=%d state=%d time=%u\n",
 			alphaEventLogCount + 1,
@@ -1383,6 +1398,16 @@ void CL_KeyEvent (int key, qboolean down, unsigned time) {
 			cls.state,
 			time );
 		++alphaEventLogCount;
+	}
+	if ( spaceEventLogCount < 64 && ( key == A_SPACE || key == A_SHIFT_SPACE ) ) {
+		Com_Printf(
+			"[USE-KEY] KeyEvent key=%d down=%d catcher=%d state=%d time=%u\n",
+			key,
+			down ? 1 : 0,
+			Key_GetCatcher(),
+			cls.state,
+			time );
+		++spaceEventLogCount;
 	}
 	if( down )
 		CL_KeyDownEvent( key, time );

@@ -1426,22 +1426,50 @@ qboolean ValidUseTarget( gentity_t *ent )
 {
 	if ( ent->e_UseFunc == useF_NULL )
 	{
+		if ( ent->s.number < MAX_GENTITIES )
+		{
+			Com_Printf( "[USE] reject ent=%d class='%s' reason=no_usefunc flags=0x%08x spawn=0x%08x eType=%d solid=%d model=%d model2=%d\n",
+				ent->s.number,
+				ent->classname ? ent->classname : "<null>",
+				ent->svFlags,
+				ent->spawnflags,
+				ent->s.eType,
+				ent->s.solid,
+				ent->s.modelindex,
+				ent->s.modelindex2 );
+		}
 		return qfalse;
 	}
 
 	if ( ent->svFlags & SVF_INACTIVE )
 	{//set by target_deactivate
+		Com_Printf( "[USE] reject ent=%d class='%s' reason=inactive flags=0x%08x spawn=0x%08x\n",
+			ent->s.number,
+			ent->classname ? ent->classname : "<null>",
+			ent->svFlags,
+			ent->spawnflags );
 		return qfalse;
 	}
 
 	if ( !(ent->svFlags & SVF_PLAYER_USABLE) )
 	{//Check for flag that denotes BUTTON_USE useability
+		Com_Printf( "[USE] reject ent=%d class='%s' reason=not_player_usable flags=0x%08x spawn=0x%08x usefunc=%d\n",
+			ent->s.number,
+			ent->classname ? ent->classname : "<null>",
+			ent->svFlags,
+			ent->spawnflags,
+			ent->e_UseFunc );
 		return qfalse;
 	}
 
 	//FIXME: This is only a temp fix..
 	if ( !Q_strncmp( ent->classname, "trigger", 7) )
 	{
+		Com_Printf( "[USE] reject ent=%d class='%s' reason=trigger flags=0x%08x spawn=0x%08x\n",
+			ent->s.number,
+			ent->classname ? ent->classname : "<null>",
+			ent->svFlags,
+			ent->spawnflags );
 		return qfalse;
 	}
 
@@ -1791,6 +1819,14 @@ void TryUse( gentity_t *ent )
 
 	if ( trace.fraction == 1.0f || trace.entityNum  >= ENTITYNUM_WORLD )
 	{
+		if ( ent->s.number == 0 )
+		{
+			Com_Printf( "[USE] trace miss frac=%.3f end=(%.1f %.1f %.1f)\n",
+				trace.fraction,
+				trace.endpos[0],
+				trace.endpos[1],
+				trace.endpos[2] );
+		}
 		//TODO: Play a failure sound
 		/*
 		if ( ent->s.number == 0 )
@@ -1802,6 +1838,21 @@ void TryUse( gentity_t *ent )
 	}
 
 	target = &g_entities[trace.entityNum];
+	if ( ent->s.number == 0 )
+	{
+		Com_Printf( "[USE] trace hit ent=%d class='%s' target='%s' flags=0x%08x spawn=0x%08x usefunc=%d eType=%d solid=%d model=%d model2=%d frac=%.3f\n",
+			trace.entityNum,
+			target->classname ? target->classname : "<null>",
+			target->targetname ? target->targetname : "<null>",
+			target->svFlags,
+			target->spawnflags,
+			target->e_UseFunc,
+			target->s.eType,
+			target->s.solid,
+			target->s.modelindex,
+			target->s.modelindex2,
+			trace.fraction );
+	}
 
 	if ( target && target->client && target->client->NPC_class == CLASS_VEHICLE )
 	{
@@ -1814,6 +1865,13 @@ void TryUse( gentity_t *ent )
 	//Check for a use command
 	if ( ValidUseTarget( target ) )
 	{
+		if ( ent->s.number == 0 )
+		{
+			Com_Printf( "[USE] accepted ent=%d class='%s' usefunc=%d\n",
+				trace.entityNum,
+				target->classname ? target->classname : "<null>",
+				target->e_UseFunc );
+		}
 		NPC_SetAnim( ent, SETANIM_TORSO, BOTH_BUTTON_HOLD, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD );
 		/*
 		if ( !VectorLengthSquared( ent->client->ps.velocity ) && !PM_CrouchAnim( ent->client->ps.legsAnim ) )
@@ -1832,8 +1890,20 @@ void TryUse( gentity_t *ent )
 		&& (target->client->playerTeam == ent->client->playerTeam || target->client->playerTeam == TEAM_NEUTRAL)
 		&& !(target->NPC->scriptFlags&SCF_NO_RESPONSE) )
 	{
+		if ( ent->s.number == 0 )
+		{
+			Com_Printf( "[USE] npc_response ent=%d class='%s'\n",
+				trace.entityNum,
+				target->classname ? target->classname : "<null>" );
+		}
 		NPC_UseResponse ( target, ent, qfalse );
 		return;
+	}
+	if ( ent->s.number == 0 )
+	{
+		Com_Printf( "[USE] trace hit unusable ent=%d class='%s'\n",
+			trace.entityNum,
+			target->classname ? target->classname : "<null>" );
 	}
 	/*
 	if ( ent->s.number == 0 )

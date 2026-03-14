@@ -223,6 +223,193 @@ static int SV_ClientThinkExceptionFilter( EXCEPTION_POINTERS *ep, int clientNum 
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
+typedef void (__thiscall *sof2_touch_method_t)( void *self, void *other, void *traceOrActivator );
+typedef void (__thiscall *sof2_use_method_t)( void *self, void *other, void *activator );
+
+static const char *SV_SOF2CompatModelName( int modelIndex ) {
+	const int csIndex = 32 + modelIndex;
+
+	if ( modelIndex <= 0 ) {
+		return "";
+	}
+	if ( csIndex < 0 || csIndex >= MAX_CONFIGSTRINGS ) {
+		return "";
+	}
+	if ( !sv.configstrings[csIndex] ) {
+		return "";
+	}
+
+	return sv.configstrings[csIndex];
+}
+
+static int SV_SOF2CompatBrushModelNum( int modelIndex ) {
+	const char *name = SV_SOF2CompatModelName( modelIndex );
+
+	if ( !name || name[0] != '*' ) {
+		return -1;
+	}
+
+	return atoi( name + 1 );
+}
+
+static void SV_SOF2CompatDispatchUse( int clientNum, gentity_t *playerEnt, usercmd_t *cmd ) {
+	gentity_t *nearby[64];
+	gentity_t *useSource = NULL;
+	gentity_t *traceHit = NULL;
+	playerState_t *ps;
+	vec3_t mins, maxs;
+	vec3_t eyeStart, eyeEnd, forward;
+	trace_t tr;
+	int count;
+	int traceBrushNum = -1;
+	int bestTriggerScore = 0x7fffffff;
+	qboolean dispatchedTriggerUse = qfalse;
+	static int s_useCompatAreaLogCount = 0;
+	static int s_useCompatTouchLogCount = 0;
+	static int s_useCompatTraceLogCount = 0;
+
+	if ( !playerEnt || !cmd || !( cmd->buttons & BUTTON_USE ) ) {
+		return;
+	}
+
+	ps = SV_GameClientNum( clientNum );
+	if ( !ps ) {
+		return;
+	}
+
+	mins[0] = ps->origin[0] - 15.0f;
+	mins[1] = ps->origin[1] - 15.0f;
+	mins[2] = ps->origin[2] - 46.0f;
+	maxs[0] = ps->origin[0] + 15.0f;
+	maxs[1] = ps->origin[1] + 15.0f;
+	maxs[2] = ps->origin[2] + 48.0f;
+
+	count = SV_AreaEntities( mins, maxs, nearby, ARRAY_LEN( nearby ) );
+	if ( s_useCompatAreaLogCount < 32 ) {
+		Com_Printf(
+			"[USE compat] area #%d origin=(%.1f,%.1f,%.1f) count=%d btn=0x%08X\n",
+			s_useCompatAreaLogCount + 1,
+			ps->origin[0], ps->origin[1], ps->origin[2],
+			count,
+			(unsigned int)cmd->buttons );
+		++s_useCompatAreaLogCount;
+	}
+
+	VectorCopy( ps->origin, eyeStart );
+	eyeStart[2] += ps->viewheight;
+	AngleVectors( ps->viewangles, forward, NULL, NULL );
+	VectorMA( eyeStart, 96.0f, forward, eyeEnd );
+
+	SV_Trace( &tr, eyeStart, NULL, NULL, eyeEnd, clientNum, MASK_PLAYERSOLID, G2_NOCOLLIDE, 0 );
+	if ( tr.entityNum >= 0 && tr.entityNum < MAX_GENTITIES ) {
+		traceHit = SV_GentityNum( tr.entityNum );
+		traceBrushNum = traceHit ? SV_SOF2CompatBrushModelNum( SOF2_ENT_MODELINDEX( traceHit ) ) : -1;
+
+		if ( s_useCompatTraceLogCount < 64 ) {
+			Com_Printf(
+				"[USE compat] trace #%d hit=%d frac=%.3f model=%d('%s') solid=0x%X contents=0x%X linked=%d\n",
+				s_useCompatTraceLogCount + 1,
+				tr.entityNum,
+				tr.fraction,
+				traceHit ? SOF2_ENT_MODELINDEX( traceHit ) : 0,
+				traceHit ? SV_SOF2CompatModelName( SOF2_ENT_MODELINDEX( traceHit ) ) : "",
+				traceHit ? (unsigned int)SOF2_ENT_SOLID( traceHit ) : 0u,
+				traceHit ? (unsigned int)SOF2_ENT_CONTENTS( traceHit ) : 0u,
+				traceHit ? (int)SOF2_ENT_LINKED( traceHit ) : 0 );
+			++s_useCompatTraceLogCount;
+		}
+	}
+
+	for ( int i = 0; i < count; ++i ) {
+		gentity_t *hit = nearby[i];
+		const int modelIndex = SOF2_ENT_MODELINDEX( hit );
+		const int brushNum = SV_SOF2CompatBrushModelNum( modelIndex );
+		int score = 0x40000000;
+
+		if ( !hit || hit == playerEnt ) {
+			continue;
+		}
+		if ( !( SOF2_ENT_CONTENTS( hit ) & CONTENTS_TRIGGER ) || !SOF2_ENT_LINKED( hit ) ) {
+			continue;
+		}
+
+		if ( traceBrushNum > 0 && brushNum > 0 ) {
+			score = abs( traceBrushNum - brushNum );
+			if ( brushNum > traceBrushNum ) {
+				score += 1000;
+			}
+		} else if ( brushNum > 0 ) {
+			score = 100;
+		}
+
+		if ( !useSource || score < bestTriggerScore ) {
+			useSource = hit;
+			bestTriggerScore = score;
+		}
+	}
+
+	if ( useSource ) {
+		void **vtable = *(void ***)useSource;
+
+		if ( s_useCompatTouchLogCount < 64 ) {
+			Com_Printf(
+				"[USE compat] touch/use #%d ent=%d model=%d('%s') traceBrush=%d score=%d contents=0x%X solid=0x%X\n",
+				s_useCompatTouchLogCount + 1,
+				SOF2_ENT_NUMBER( useSource ),
+				SOF2_ENT_MODELINDEX( useSource ),
+				SV_SOF2CompatModelName( SOF2_ENT_MODELINDEX( useSource ) ),
+				traceBrushNum,
+				bestTriggerScore,
+				(unsigned int)SOF2_ENT_CONTENTS( useSource ),
+				(unsigned int)SOF2_ENT_SOLID( useSource ) );
+			++s_useCompatTouchLogCount;
+		}
+
+		if ( vtable && vtable[0x70 / sizeof( void * )] ) {
+			__try {
+				( (sof2_use_method_t)vtable[0x70 / sizeof( void * )] )( useSource, playerEnt, playerEnt );
+				dispatchedTriggerUse = qtrue;
+			} __except( EXCEPTION_EXECUTE_HANDLER ) {
+				static int s_useCompatUseTriggerCrashLogCount = 0;
+				if ( s_useCompatUseTriggerCrashLogCount < 8 ) {
+					Com_Printf( "^1[USE compat] trigger use call crashed for ent=%d\n",
+						SOF2_ENT_NUMBER( useSource ) );
+					++s_useCompatUseTriggerCrashLogCount;
+				}
+			}
+		}
+
+		if ( !dispatchedTriggerUse && vtable && vtable[0x6c / sizeof( void * )] ) {
+			__try {
+				( (sof2_touch_method_t)vtable[0x6c / sizeof( void * )] )( useSource, playerEnt, playerEnt );
+			} __except( EXCEPTION_EXECUTE_HANDLER ) {
+				static int s_useCompatTouchCrashLogCount = 0;
+				if ( s_useCompatTouchCrashLogCount < 8 ) {
+					Com_Printf( "^1[USE compat] trigger touch call crashed for ent=%d\n",
+						SOF2_ENT_NUMBER( useSource ) );
+					++s_useCompatTouchCrashLogCount;
+				}
+			}
+		}
+	}
+
+	if ( traceHit && !dispatchedTriggerUse ) {
+		void **vtable = *(void ***)traceHit;
+		if ( vtable && vtable[0x70 / sizeof( void * )] ) {
+			__try {
+				( (sof2_use_method_t)vtable[0x70 / sizeof( void * )] )( traceHit, useSource ? useSource : playerEnt, playerEnt );
+			} __except( EXCEPTION_EXECUTE_HANDLER ) {
+				static int s_useCompatUseCrashLogCount = 0;
+				if ( s_useCompatUseCrashLogCount < 8 ) {
+					Com_Printf( "^1[USE compat] use call crashed for ent=%d\n",
+						SOF2_ENT_NUMBER( traceHit ) );
+					++s_useCompatUseCrashLogCount;
+				}
+			}
+		}
+	}
+}
+
 /*
 ==================
 SV_DirectConnect
@@ -645,6 +832,23 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 
 	cl->lastUsercmd = *cmd;
 
+	if ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) {
+		static int s_useClientThinkLogCount = 0;
+		if ( s_useClientThinkLogCount < 64 ) {
+			Com_Printf(
+				"[USE-ENG] SV_ClientThink cmd buttons=0x%08X move=(%d,%d,%d) ang=(%d,%d,%d) time=%d\n",
+				(unsigned int)cmd->buttons,
+				(int)cmd->forwardmove,
+				(int)cmd->rightmove,
+				(int)cmd->upmove,
+				cmd->angles[0],
+				cmd->angles[1],
+				cmd->angles[2],
+				cmd->serverTime );
+			++s_useClientThinkLogCount;
+		}
+	}
+
 	if ( cl->state != CS_ACTIVE ) {
 		return;		// may have been kicked during the last usercmd
 	}
@@ -882,6 +1086,52 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 					}
 				}
 			}
+
+			// One-time compatibility patch:
+			// ClientThink gates G_TouchTriggers behind a byte at ps+0x1FC.
+			// In the current port this flag remains non-zero during live gameplay,
+			// which suppresses both held-use doors and pickup touch processing.
+			// Replace the short JNZ at RVA 0x4D54C with NOPs so active gameplay
+			// always reaches G_TouchTriggers after gi_linkentity.
+			{
+				static bool s_clientThinkTouchGatePatchApplied = false;
+				if ( !s_clientThinkTouchGatePatchApplied ) {
+					unsigned char *patchAddr = (unsigned char *)( (char *)s_hGameDll + 0x4D54C );
+					if ( patchAddr[0] == 0x90 && patchAddr[1] == 0x90 ) {
+						Com_Printf( "[SOF2 fix] ClientThink touch gate patch already active at RVA 0x4D54C\n" );
+						s_clientThinkTouchGatePatchApplied = true;
+					} else if ( patchAddr[0] == 0x75 ) {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, 2, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							patchAddr[0] = 0x90;
+							patchAddr[1] = 0x90;
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, 2 );
+							VirtualProtect( patchAddr, 2, oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched ClientThink touch gate JNZ->NOPNOP at RVA 0x4D54C\n" );
+							s_clientThinkTouchGatePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] ClientThink touch gate patch FAILED: VirtualProtect error %lu at RVA 0x4D54C\n", GetLastError() );
+						}
+					} else if ( patchAddr[0] == 0x0F && patchAddr[1] == 0x85 ) {
+						DWORD oldProtect = 0;
+						if ( VirtualProtect( patchAddr, 6, PAGE_EXECUTE_READWRITE, &oldProtect ) ) {
+							memset( patchAddr, 0x90, 6 );
+							FlushInstructionCache( GetCurrentProcess(), patchAddr, 6 );
+							VirtualProtect( patchAddr, 6, oldProtect, &oldProtect );
+							Com_Printf( "[SOF2 fix] patched ClientThink touch gate JNZ(near)->NOPx6 at RVA 0x4D54C\n" );
+							s_clientThinkTouchGatePatchApplied = true;
+						} else {
+							Com_Printf( "[SOF2 fix] ClientThink touch gate patch FAILED: VirtualProtect error %lu at RVA 0x4D54C (near form)\n", GetLastError() );
+						}
+					} else {
+						Com_Printf(
+							"[SOF2 fix] ClientThink touch gate patch: unexpected bytes 0x%02X 0x%02X at RVA 0x4D54C\n",
+							patchAddr[0],
+							patchAddr[1] );
+						s_clientThinkTouchGatePatchApplied = true;
+					}
+				}
+			}
 		}
 		if ( sof2UnsafeRuntimePatches && s_hGameDll ) {
 			// --- One-time code patch: PM_Pmove JL→JLE at RVA 0x2f04 ---
@@ -1018,6 +1268,10 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 						clientNum );
 			thinkCrashCount++;
 		}
+	}
+
+	if ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) {
+		SV_SOF2CompatDispatchUse( clientNum, ent, cmd );
 	}
 
 	// Fix M (post-think): clear camera entity active flag AFTER ClientThink.

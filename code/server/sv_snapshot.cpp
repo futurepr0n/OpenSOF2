@@ -388,6 +388,7 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 	clientpvs = CM_ClusterPVS (clientcluster);
 
 	// SOF2: no Force powers — sightOn stays qfalse
+	static int s_debugDoorSnapshotLogCount = 0;
 
 	for ( e = 0 ; e < MAX_GENTITIES ; e++ ) {
 		ent = SV_GentityNum(e);
@@ -398,6 +399,15 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 
 		if (SOF2_ENT_EFLAGS(ent) & EF_PERMANENT)
 		{	// he's permanent, so don't send him down!
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=permanent flags=0x%x model=%d solid=0x%x linked=%d\n",
+					SOF2_ENT_EFLAGS( ent ),
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ),
+					(int)SOF2_ENT_LINKED( ent ) );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 
@@ -408,21 +418,53 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 
 		// never send entities that aren't linked in
 		if ( !SOF2_ENT_LINKED(ent) ) {
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=unlinked flags=0x%x model=%d solid=0x%x\n",
+					SOF2_ENT_EFLAGS( ent ),
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ) );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 
 		// entities can be flagged to explicitly not be sent to the client
 		if ( SOF2_ENT_SVFLAGS(ent) & SVF_NOCLIENT ) {
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=noclient svf=0x%x model=%d solid=0x%x\n",
+					SOF2_ENT_SVFLAGS( ent ),
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ) );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 
 		svEnt = SV_SvEntityForGentity( ent );
 		if ( !svEnt ) {
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=no-svent model=%d solid=0x%x linked=%d\n",
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ),
+					(int)SOF2_ENT_LINKED( ent ) );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 
 		// don't double add an entity through portals
 		if ( svEnt->snapshotCounter == sv.snapshotCounter ) {
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=already-added model=%d solid=0x%x snapshotCounter=%d\n",
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ),
+					svEnt->snapshotCounter );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 
@@ -443,19 +485,52 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 		// SOF2: no Force sight — skip force-see entity visibility check
 
 		// ignore if not touching a PV leaf
-		// check area
-		if ( !CM_AreasConnected( clientarea, svEnt->areanum ) ) {
-			// doors can legally straddle two areas, so
-			// we may need to check another one
-			if ( !CM_AreasConnected( clientarea, svEnt->areanum2 ) ) {
-				continue;		// blocked by a door
+		// check area. SOF2 regularly lands the eye point in area -1 while the
+		// rest of the visibility path still treats that as "don't area-cull".
+		// Keep the stricter connected-area test only when the client's leaf has
+		// a valid area.
+		if ( clientarea >= 0 ) {
+			if ( !CM_AreasConnected( clientarea, svEnt->areanum ) ) {
+				// doors can legally straddle two areas, so
+				// we may need to check another one
+				if ( !CM_AreasConnected( clientarea, svEnt->areanum2 ) ) {
+					if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+						Com_Printf(
+							"[SV snapshot] ent=2 skip=area clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
+							clientarea,
+							svEnt->areanum,
+							svEnt->areanum2,
+							SOF2_ENT_MODELINDEX( ent ),
+							SOF2_ENT_SOLID( ent ) );
+						++s_debugDoorSnapshotLogCount;
+					}
+					continue;		// blocked by a door
+				}
 			}
+		} else if ( e == 2 && s_debugDoorSnapshotLogCount < 16 ) {
+			Com_Printf(
+				"[SV snapshot] ent=2 allow area-skip clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
+				clientarea,
+				svEnt->areanum,
+				svEnt->areanum2,
+				SOF2_ENT_MODELINDEX( ent ),
+				SOF2_ENT_SOLID( ent ) );
+			++s_debugDoorSnapshotLogCount;
 		}
 
 		bitvector = clientpvs;
 
 		// check individual leafs
 		if ( !svEnt->numClusters ) {
+			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				Com_Printf(
+					"[SV snapshot] ent=2 skip=no-clusters area1=%d area2=%d model=%d solid=0x%x\n",
+					svEnt->areanum,
+					svEnt->areanum2,
+					SOF2_ENT_MODELINDEX( ent ),
+					SOF2_ENT_SOLID( ent ) );
+				++s_debugDoorSnapshotLogCount;
+			}
 			continue;
 		}
 		l = 0;
@@ -477,14 +552,43 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 					}
 				}
 				if ( l == svEnt->lastCluster ) {
+					if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+						Com_Printf(
+							"[SV snapshot] ent=2 skip=pvs cluster=%d lastCluster=%d numClusters=%d model=%d solid=0x%x\n",
+							clientcluster,
+							svEnt->lastCluster,
+							svEnt->numClusters,
+							SOF2_ENT_MODELINDEX( ent ),
+							SOF2_ENT_SOLID( ent ) );
+						++s_debugDoorSnapshotLogCount;
+					}
 					continue;		// not visible
 				}
 			} else {
+				if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+					Com_Printf(
+						"[SV snapshot] ent=2 skip=pvs-nooverflow cluster=%d numClusters=%d model=%d solid=0x%x\n",
+						clientcluster,
+						svEnt->numClusters,
+						SOF2_ENT_MODELINDEX( ent ),
+						SOF2_ENT_SOLID( ent ) );
+					++s_debugDoorSnapshotLogCount;
+				}
 				continue;
 			}
 		}
 
 		// add it
+		if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			Com_Printf(
+				"[SV snapshot] ent=2 add area1=%d area2=%d numClusters=%d model=%d solid=0x%x\n",
+				svEnt->areanum,
+				svEnt->areanum2,
+				svEnt->numClusters,
+				SOF2_ENT_MODELINDEX( ent ),
+				SOF2_ENT_SOLID( ent ) );
+			++s_debugDoorSnapshotLogCount;
+		}
 		SV_AddEntToSnapshot( svEnt, ent, eNums );
 
 		// if its a portal entity, add everything visible from its camera position
@@ -512,7 +616,9 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	clientSnapshot_t			*frame;
 	snapshotEntityNumbers_t		entityNumbers;
 	int							i;
+	int							clientNum;
 	gentity_t					*ent;
+	playerState_t				*clPS;
 	entityState_t				*state;
 	gentity_t					*clent;
 
@@ -533,9 +639,10 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 
 	// grab the current playerState_t
 	// SOF2: client data is in a separate array passed via LocateGameData (not embedded in CEntity)
+	clientNum = client - svs.clients;
+	clPS = SV_GameClientNum( clientNum );
 	{
-		int clientNum = client - svs.clients;
-		playerState_t *ps = SV_GameClientNum( clientNum );
+		playerState_t *ps = clPS;
 		if ( !ps ) {
 			return frame;
 		}
@@ -546,12 +653,30 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	//if in camera mode use camera position instead
 	if ( VM_Call( CG_CAMERA_POS, org))
 	{
-		// camera mode
+		int leafnum = CM_PointLeafnum( org );
+		int area = CM_LeafArea( leafnum );
+		int cluster = CM_LeafCluster( leafnum );
+		static int s_snapshotViewFallbackLogCount = 0;
+
+		if ( ( area < 0 || cluster < 0 ) && clPS ) {
+			vec3_t cameraOrg;
+
+			VectorCopy( org, cameraOrg );
+			VectorCopy( clPS->origin, org );
+			org[2] += clPS->viewheight;
+
+			if ( s_snapshotViewFallbackLogCount < 32 ) {
+				Com_Printf(
+					"[SV snapshot] fallback vieworg camera=(%.1f %.1f %.1f) leaf=%d area=%d cluster=%d -> player=(%.1f %.1f %.1f)\n",
+					cameraOrg[0], cameraOrg[1], cameraOrg[2],
+					leafnum, area, cluster,
+					org[0], org[1], org[2] );
+				++s_snapshotViewFallbackLogCount;
+			}
+		}
 	}
 	else
 	{
-		int clientNum = client - svs.clients;
-		playerState_t *clPS = SV_GameClientNum( clientNum );
 		if ( clPS ) {
 			VectorCopy( clPS->origin, org );
 			org[2] += clPS->viewheight;
