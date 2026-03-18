@@ -15,3 +15,243 @@ CGameRender #9 state=7 serverTime=2217 frameServerTime=2200 newSnapshots=0
 CGameRender #10 state=7 serverTime=2225 frameServerTime=2200 newSnapshots=0
 CGameRender #11 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
 CGameRender #12 state=7 serverTime=2241 frameServerTime=2200 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2244 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2265 frameServerTime=2250 newSnapshots=0
+CGameRender #5 state=7 serverTime=2301 frameServerTime=2300 newSnapshots=0
+CGameRender #6 state=7 serverTime=2321 frameServerTime=2300 newSnapshots=0
+CGameRender #7 state=7 serverTime=2341 frameServerTime=2350 newSnapshots=0
+CGameRender #8 state=7 serverTime=2380 frameServerTime=2350 newSnapshots=0
+CGameRender #9 state=7 serverTime=2387 frameServerTime=2350 newSnapshots=0
+CGameRender #10 state=7 serverTime=2396 frameServerTime=2400 newSnapshots=0
+CGameRender #11 state=7 serverTime=2416 frameServerTime=2400 newSnapshots=0
+CGameRender #12 state=7 serverTime=2452 frameServerTime=2450 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2260 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2268 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2302 frameServerTime=2300 newSnapshots=0
+CGameRender #8 state=7 serverTime=2323 frameServerTime=2300 newSnapshots=0
+CGameRender #9 state=7 serverTime=2342 frameServerTime=2350 newSnapshots=0
+CGameRender #10 state=7 serverTime=2376 frameServerTime=2350 newSnapshots=0
+CGameRender #11 state=7 serverTime=2405 frameServerTime=2400 newSnapshots=0
+CGameRender #12 state=7 serverTime=2476 frameServerTime=2450 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2210 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2231 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2250 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2258 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2266 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2273 frameServerTime=2250 newSnapshots=0
+CGameRender #9 state=7 serverTime=2280 frameServerTime=2250 newSnapshots=0
+CGameRender #10 state=7 serverTime=2289 frameServerTime=2250 newSnapshots=0
+CGameRender #11 state=7 serverTime=2296 frameServerTime=2300 newSnapshots=0
+CGameRender #12 state=7 serverTime=2316 frameServerTime=2300 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2212 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2253 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2260 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2267 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2294 frameServerTime=2300 newSnapshots=0
+CGameRender #9 state=7 serverTime=2352 frameServerTime=2350 newSnapshots=0
+CGameRender #10 state=7 serverTime=2360 frameServerTime=2350 newSnapshots=0
+CGameRender #11 state=7 serverTime=2394 frameServerTime=2400 newSnapshots=0
+CGameRender #12 state=7 serverTime=2414 frameServerTime=2400 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2253 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2260 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2267 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2296 frameServerTime=2300 newSnapshots=0
+CGameRender #9 state=7 serverTime=2371 frameServerTime=2350 newSnapshots=0
+CGameRender #10 state=7 serverTime=2379 frameServerTime=2350 newSnapshots=0
+CGameRender #11 state=7 serverTime=2415 frameServerTime=2400 newSnapshots=0
+CGameRender #12 state=7 serverTime=2435 frameServerTime=2400 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2214 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2294 frameServerTime=2250 newSnapshots=0
+CGameRender #5 state=7 serverTime=2333 frameServerTime=2300 newSnapshots=0
+CGameRender #6 state=7 serverTime=2369 frameServerTime=2350 newSnapshots=0
+CGameRender #7 state=7 serverTime=2405 frameServerTime=2400 newSnapshots=0
+CGameRender #8 state=7 serverTime=2426 frameServerTime=2400 newSnapshots=0
+CGameRender #9 state=7 serverTime=2471 frameServerTime=2450 newSnapshots=0
+CGameRender #10 state=7 serverTime=2479 frameServerTime=2450 newSnapshots=0
+CGameRender #11 state=7 serverTime=2515 frameServerTime=2500 newSnapshots=0
+CGameRender #12 state=7 serverTime=2541 frameServerTime=2550 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2233 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2253 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2261 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2268 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2309 frameServerTime=2300 newSnapshots=0
+CGameRender #9 state=7 serverTime=2356 frameServerTime=2350 newSnapshots=0
+CGameRender #10 state=7 serverTime=2382 frameServerTime=2350 newSnapshots=0
+CGameRender #11 state=7 serverTime=2389 frameServerTime=2400 newSnapshots=0
+CGameRender #12 state=7 serverTime=2457 frameServerTime=2450 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2290 frameServerTime=2250 newSnapshots=0
+CGameRender #5 state=7 serverTime=2318 frameServerTime=2300 newSnapshots=0
+CGameRender #6 state=7 serverTime=2368 frameServerTime=2350 newSnapshots=0
+CGameRender #7 state=7 serverTime=2375 frameServerTime=2350 newSnapshots=0
+CGameRender #8 state=7 serverTime=2382 frameServerTime=2350 newSnapshots=0
+CGameRender #9 state=7 serverTime=2417 frameServerTime=2400 newSnapshots=0
+CGameRender #10 state=7 serverTime=2437 frameServerTime=2450 newSnapshots=0
+CGameRender #11 state=7 serverTime=2472 frameServerTime=2450 newSnapshots=0
+CGameRender #12 state=7 serverTime=2480 frameServerTime=2450 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2232 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2251 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2260 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2267 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2274 frameServerTime=2250 newSnapshots=0
+CGameRender #9 state=7 serverTime=2281 frameServerTime=2250 newSnapshots=0
+CGameRender #10 state=7 serverTime=2288 frameServerTime=2250 newSnapshots=0
+CGameRender #11 state=7 serverTime=2297 frameServerTime=2300 newSnapshots=0
+CGameRender #12 state=7 serverTime=2319 frameServerTime=2300 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2211 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2232 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2251 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2262 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2269 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2278 frameServerTime=2250 newSnapshots=0
+CGameRender #9 state=7 serverTime=2285 frameServerTime=2250 newSnapshots=0
+CGameRender #10 state=7 serverTime=2292 frameServerTime=2250 newSnapshots=0
+CGameRender #11 state=7 serverTime=2299 frameServerTime=2300 newSnapshots=0
+CGameRender #12 state=7 serverTime=2321 frameServerTime=2300 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2214 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2237 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2259 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2267 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2274 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2281 frameServerTime=2250 newSnapshots=0
+CGameRender #9 state=7 serverTime=2290 frameServerTime=2250 newSnapshots=0
+CGameRender #10 state=7 serverTime=2297 frameServerTime=2300 newSnapshots=0
+CGameRender #11 state=7 serverTime=2317 frameServerTime=2300 newSnapshots=0
+CGameRender #12 state=7 serverTime=2336 frameServerTime=2300 newSnapshots=0
+CL_InitSOF2CGame enter
+cgameLibrary=30000000
+GetCGameAPI=30029430
+patched CGlassMgr::ResolveConstraints rva=0x16BB0
+patched CG_CamEnable rva=0x9E40 bytes=3
+patched CG_GetCameraMode rva=0x27D90 bytes=3
+patched CG_DrawSkyboxPortal rva=0xA2D0
+patched CG_DrawFPS rva=0xB180
+CGameRender #1 state=6 serverTime=0 frameServerTime=0 newSnapshots=0
+CGameRender #2 state=7 serverTime=2100 frameServerTime=2100 newSnapshots=0
+CGameRender #3 state=7 serverTime=2213 frameServerTime=2200 newSnapshots=0
+CGameRender #4 state=7 serverTime=2234 frameServerTime=2200 newSnapshots=0
+CGameRender #5 state=7 serverTime=2255 frameServerTime=2250 newSnapshots=0
+CGameRender #6 state=7 serverTime=2264 frameServerTime=2250 newSnapshots=0
+CGameRender #7 state=7 serverTime=2272 frameServerTime=2250 newSnapshots=0
+CGameRender #8 state=7 serverTime=2280 frameServerTime=2250 newSnapshots=0
+CGameRender #9 state=7 serverTime=2286 frameServerTime=2250 newSnapshots=0
+CGameRender #10 state=7 serverTime=2294 frameServerTime=2300 newSnapshots=0
+CGameRender #11 state=7 serverTime=2316 frameServerTime=2300 newSnapshots=0
+CGameRender #12 state=7 serverTime=2336 frameServerTime=2300 newSnapshots=0

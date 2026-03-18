@@ -2590,6 +2590,7 @@ void R_AddGhoulSurfaces( trRefEntity_t *ent ) {
 	skin_t			*skin;
 	int				modelCount;
 	mdxaBone_t		rootMatrix;
+	static int ghoul2SurfaceLogCount = 0;
 
 	// if we don't want ghoul2 models, then return
 	if (r_noGhoul2->integer)
@@ -2599,10 +2600,43 @@ void R_AddGhoulSurfaces( trRefEntity_t *ent ) {
 
 	assert (ent->e.ghoul2);	//entity is foo if it has a glm model handle but no ghoul2 pointer!
 	CGhoul2Info_v	&ghoul2 = *ent->e.ghoul2;
+	if ( ghoul2SurfaceLogCount < 48 ) {
+		Com_Printf(
+			"[R ghoul2] #%d enter hModel=%d ghoul2=%p handle=%d modelScale=(%.2f,%.2f,%.2f) origin=(%.1f,%.1f,%.1f)\n",
+			ghoul2SurfaceLogCount + 1,
+			(int)ent->e.hModel,
+			ent->e.ghoul2,
+			*(const int *)ent->e.ghoul2,
+			ent->e.modelScale[0], ent->e.modelScale[1], ent->e.modelScale[2],
+			ent->e.origin[0], ent->e.origin[1], ent->e.origin[2] );
+	}
 
 	if (!G2_SetupModelPointers(ghoul2))
 	{
+		if ( ghoul2SurfaceLogCount < 48 ) {
+			Com_Printf(
+				"[R ghoul2] #%d setup failed size=%d\n",
+				ghoul2SurfaceLogCount + 1,
+				(int)ghoul2.size() );
+			++ghoul2SurfaceLogCount;
+		}
 		return;
+	}
+
+	if ( ghoul2SurfaceLogCount < 48 ) {
+		const qboolean haveFirst = ( ghoul2.size() > 0 ) ? qtrue : qfalse;
+		const int firstValid = haveFirst ? (int)ghoul2[0].mValid : 0;
+		const int firstModel = haveFirst ? (int)ghoul2[0].mModel : 0;
+		const int firstIndex = haveFirst ? (int)ghoul2[0].mModelindex : -1;
+		const char *firstFile = ( haveFirst && ghoul2[0].mFileName[0] ) ? ghoul2[0].mFileName : "<none>";
+		Com_Printf(
+			"[R ghoul2] #%d setup ok size=%d first{valid=%d model=%d index=%d file='%s'}\n",
+			ghoul2SurfaceLogCount + 1,
+			(int)ghoul2.size(),
+			firstValid,
+			firstModel,
+			firstIndex,
+			firstFile );
 	}
 
 	int currentTime=G2API_GetTime(tr.refdef.time);
@@ -2613,7 +2647,20 @@ void R_AddGhoulSurfaces( trRefEntity_t *ent ) {
 	cull = R_GCullModel (ent );
 	if ( cull == CULL_OUT )
 	{
+		if ( ghoul2SurfaceLogCount < 48 ) {
+			Com_Printf(
+				"[R ghoul2] #%d culled out\n",
+				ghoul2SurfaceLogCount + 1 );
+			++ghoul2SurfaceLogCount;
+		}
 		return;
+	}
+	if ( ghoul2SurfaceLogCount < 48 ) {
+		Com_Printf(
+			"[R ghoul2] #%d cull=%d\n",
+			ghoul2SurfaceLogCount + 1,
+			cull );
+		++ghoul2SurfaceLogCount;
 	}
 	HackadelicOnClient=true;
 

@@ -286,6 +286,19 @@ static int SV_Traced_FS_FOpenFile( const char *path, int *handle, int mode ) {
 static void SV_Traced_SetConfigstring( int index, const char *val ) {
 	gi_call_count++;
 	fprintf(stderr, "[GI] gi_SetConfigstring called (#%d) index=%d\n", gi_call_count, index);
+	if ( val && val[0] ) {
+		const qboolean interesting =
+			( strstr( val, "legsModel" ) != NULL ) ||
+			( strstr( val, "torsoModel" ) != NULL ) ||
+			( strstr( val, "headModel" ) != NULL ) ||
+			( strstr( val, "mullins" ) != NULL ) ||
+			( strstr( val, "NPC_" ) != NULL ) ||
+			( strstr( val, "models/characters/" ) != NULL ) ||
+			( strstr( val, ".g2skin" ) != NULL ) ? qtrue : qfalse;
+		if ( interesting ) {
+			Com_Printf( "[GI cfg] index=%d value='%.192s'\n", index, val );
+		}
+	}
 	SV_SetConfigstring( index, val );
 }
 
@@ -632,6 +645,20 @@ static int sv_trace_log_armed = 0;
 static int sv_trace_log_count = 0;
 static int sv_trace_log_reason = 0; // 1=movement, 2=use
 static qboolean sv_trace_use_latched = qfalse;
+static qboolean sv_sof2SuppressUseTriggers = qfalse;
+static int sv_sof2SuppressUseTriggersUntil = 0;
+
+void SV_SOF2SuppressUseTriggers( qboolean suppress ) {
+	if ( suppress ) {
+		sv_sof2SuppressUseTriggers = qtrue;
+		sv_sof2SuppressUseTriggersUntil = sv.time + 2000;
+		return;
+	}
+
+	if ( sv.time >= sv_sof2SuppressUseTriggersUntil ) {
+		sv_sof2SuppressUseTriggers = qfalse;
+	}
+}
 
 static qboolean SV_ShouldLogTouchDebug( void ) {
 	if ( sv_trace_use_latched ) {
@@ -652,14 +679,37 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 	gentity_t *ptrBuf[MAX_GENTITIES];
 	int outCount = 0;
 	static int s_areaEntitiesCallLogCount = 0;
+	int suppressedBrushModelCount = 0;
+	int suppressedNonItemCount = 0;
+	const qboolean suppressUseTriggers =
+		( sv_sof2SuppressUseTriggers || ( sv_sof2SuppressUseTriggersUntil > sv.time ) ) ? qtrue : qfalse;
 	if ( maxcount > MAX_GENTITIES ) maxcount = MAX_GENTITIES;
 	int count = SV_AreaEntities( mins, maxs, ptrBuf, maxcount );
+
+	if ( !suppressUseTriggers && sv_sof2SuppressUseTriggers ) {
+		sv_sof2SuppressUseTriggers = qfalse;
+	}
 
 	// Convert each gentity_t* pointer to the live slot index expected by retail.
 	// s.number can carry stale or non-slot values; G_TouchTriggers indexes the
 	// returned list directly into g_entityLookupTable with no validation.
 	for ( int i = 0; i < count; i++ ) {
 		if ( ptrBuf[i] ) {
+			if ( suppressUseTriggers &&
+				( SOF2_ENT_CONTENTS( ptrBuf[i] ) & CONTENTS_TRIGGER ) ) {
+				continue;
+			}
+			if ( suppressUseTriggers &&
+				SOF2_ENT_ETYPE( ptrBuf[i] ) != ET_ITEM ) {
+				++suppressedNonItemCount;
+				continue;
+			}
+			if ( suppressUseTriggers &&
+				SOF2_ENT_LINKED( ptrBuf[i] ) &&
+				SV_SOF2_IsBrushModelEntity( ptrBuf[i] ) ) {
+				++suppressedBrushModelCount;
+				continue;
+			}
 			const int entNum = SV_FindEntityNumByPointer( ptrBuf[i] );
 			if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
 				entityList[outCount++] = entNum;
@@ -686,7 +736,7 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 		}
 
 		Com_Printf(
-			"[AREA69] #%d mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) raw=%d out=%d triggers=%d items=%d reason=%d latched=%d\n",
+			"[AREA69] #%d mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) raw=%d out=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d reason=%d latched=%d\n",
 			s_areaEntitiesCallLogCount + 1,
 			mins[0], mins[1], mins[2],
 			maxs[0], maxs[1], maxs[2],
@@ -694,6 +744,8 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 			outCount,
 			triggerCount,
 			itemCount,
+			suppressedNonItemCount,
+			suppressedBrushModelCount,
 			sv_trace_log_reason,
 			(int)sv_trace_use_latched );
 		++s_areaEntitiesCallLogCount;
@@ -720,13 +772,15 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 
 		if ( s_useAreaSummaryLogCount < 24 ) {
 			Com_Printf(
-				"[TOUCH %s] EntitiesInBox mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) count=%d triggers=%d items=%d\n",
+				"[TOUCH %s] EntitiesInBox mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) count=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d\n",
 				( sv_trace_log_reason == 2 ) ? "use" : "move",
 				mins[0], mins[1], mins[2],
 				maxs[0], maxs[1], maxs[2],
 				outCount,
 				triggerCount,
-				itemCount );
+				itemCount,
+				suppressedNonItemCount,
+				suppressedBrushModelCount );
 			++s_useAreaSummaryLogCount;
 		}
 
@@ -2435,6 +2489,43 @@ public:
 };
 static CHandlePoolStub g_handlePoolStub;
 
+// Per-entity Ghoul2 handle table.
+// The game DLL calls InitGhoul2Model(ghoul2, ...) where ghoul2 = &entityState[0xe4].
+// FinalizeEntity(entityData) is called each frame with entityData = entityState start.
+// We map entityState* → handle so FinalizeEntity can restore the correct handle each frame.
+struct SOF2EntityGhoul2Entry {
+	void *entityData;  // entityState_t* (ghoul2 address - 0xe4)
+	int   handle;
+};
+static const int SOF2_ENT_GHOUL2_MAX = 128;
+static SOF2EntityGhoul2Entry s_entityGhoul2Map[SOF2_ENT_GHOUL2_MAX];
+static int s_entityGhoul2Count = 0;
+
+static void SOF2_EntGhoul2_Store( void *ghoul2Ptr, int handle ) {
+	// entityData = ghoul2 address - 0xe4 (ghoul2 IS at entityState+0xe4)
+	void *entityData = (byte *)ghoul2Ptr - 0xE4;
+	for ( int i = 0; i < s_entityGhoul2Count; ++i ) {
+		if ( s_entityGhoul2Map[i].entityData == entityData ) {
+			s_entityGhoul2Map[i].handle = handle;
+			return;
+		}
+	}
+	if ( s_entityGhoul2Count < SOF2_ENT_GHOUL2_MAX ) {
+		s_entityGhoul2Map[s_entityGhoul2Count].entityData = entityData;
+		s_entityGhoul2Map[s_entityGhoul2Count].handle     = handle;
+		++s_entityGhoul2Count;
+	}
+}
+
+static int SOF2_EntGhoul2_Lookup( void *entityData ) {
+	for ( int i = 0; i < s_entityGhoul2Count; ++i ) {
+		if ( s_entityGhoul2Map[i].entityData == entityData ) {
+			return s_entityGhoul2Map[i].handle;
+		}
+	}
+	return 0;
+}
+
 // CWraith vtable layout — 78 slots verified from gamex86.dll xref analysis.
 // CRITICAL: All methods are __thiscall (callee-clean), so every stub MUST
 // declare the correct number of parameters to generate the proper RET N.
@@ -2468,10 +2559,14 @@ public:
 	CGhoul2Info_v mGhoul2;     // +0xE4 — properly constructed ghoul2 handle
 	char mExtraEnd[88];        // +0xE8 to +0x13F — buffer for any DLL reads past ghoul2
 
-	// Track the last entity ghoul2 used for context in bolt/surface operations
+	// Track the last entity ghoul2 for bolt/surface operations.
+	// mLastEntityGhoul2 is the pointer passed to InitGhoul2Model (entity's own ghoul2 field).
+	// mLastEntityGhoul2Handle is a fallback for callers that only provide a raw handle int.
 	CGhoul2Info_v *mLastEntityGhoul2;
+	int mLastEntityGhoul2Handle;
 
-	CWraithStub() : mPadding(0), mTimeStart(0), mTimeEnd(0), mFlags(0), mLastEntityGhoul2(NULL) {
+	CWraithStub() : mPadding(0), mTimeStart(0), mTimeEnd(0), mFlags(0),
+	                mLastEntityGhoul2(NULL), mLastEntityGhoul2Handle(0) {
 		memset(mPad2, 0, sizeof(mPad2));
 		memset(mModelPad, 0, sizeof(mModelPad));
 		memset(mExtraEnd, 0, sizeof(mExtraEnd));
@@ -2480,6 +2575,16 @@ public:
 	void Destroy() {
 		// Manual cleanup since we have no virtual destructor
 		re.G2API_CleanGhoul2Models(mGhoul2);
+	}
+
+	CGhoul2Info_v *GetLastEntityGhoul2() {
+		if (mLastEntityGhoul2) {
+			return mLastEntityGhoul2;
+		}
+		if (mLastEntityGhoul2Handle <= 0) {
+			return NULL;
+		}
+		return reinterpret_cast<CGhoul2Info_v *>(&mLastEntityGhoul2Handle);
 	}
 
 	CGhoul2Info_v *ResolveGhoul2Handle(int ghoul2Handle) {
@@ -2492,7 +2597,8 @@ public:
 			return NULL;
 		}
 
-		return reinterpret_cast<CGhoul2Info_v *>(&arr.Get(ghoul2Handle));
+		mLastEntityGhoul2Handle = ghoul2Handle;
+		return GetLastEntityGhoul2();
 	}
 
 	CGhoul2Info_v *ResolveModelOwner(int modelHandle, int *outIndex = NULL) {
@@ -2509,8 +2615,9 @@ public:
 			return &mGhoul2;
 		}
 
-		if (mLastEntityGhoul2 && mLastEntityGhoul2->IsValid() && idx < mLastEntityGhoul2->size()) {
-			return mLastEntityGhoul2;
+		CGhoul2Info_v *entityGhoul2 = GetLastEntityGhoul2();
+		if (entityGhoul2 && entityGhoul2->IsValid() && idx < entityGhoul2->size()) {
+			return entityGhoul2;
 		}
 
 		return NULL;
@@ -2569,7 +2676,8 @@ public:
 
 	// ===== vtable[9] (0x24): DebugPrint — 2 stack args =====
 	virtual int DebugPrint(const char *msg, int level) {
-		fprintf(stderr, "[WRAITH] DebugPrint(level=%d): '%s'\n", level, msg ? msg : "(null)");
+		(void)level;
+		Com_DPrintf( "Wraith: %s\n", msg ? msg : "(null)" );
 		return 0;
 	}
 
@@ -2595,8 +2703,9 @@ public:
 				return re.G2API_GetBoltMatrix(mGhoul2, modelHandle - 1, boltIndex,
 					(mdxaBone_t*)outMatrix, angles, origin, 0, NULL, vec3_origin);
 			}
-			if (mLastEntityGhoul2 && mLastEntityGhoul2->IsValid() && (modelHandle - 1) < mLastEntityGhoul2->size()) {
-				return re.G2API_GetBoltMatrix(*mLastEntityGhoul2, modelHandle - 1, boltIndex,
+			CGhoul2Info_v *entityGhoul2 = GetLastEntityGhoul2();
+			if (entityGhoul2 && entityGhoul2->IsValid() && (modelHandle - 1) < entityGhoul2->size()) {
+				return re.G2API_GetBoltMatrix(*entityGhoul2, modelHandle - 1, boltIndex,
 					(mdxaBone_t*)outMatrix, angles, origin, 0, NULL, vec3_origin);
 			}
 		}
@@ -2621,20 +2730,7 @@ public:
 	virtual int GetSurfaceIndex(int modelHandle, const char *surfaceName) {
 		CGhoul2Info *ghl = ResolveModel(modelHandle);
 		if (ghl && surfaceName && surfaceName[0]) {
-			int ret = re.G2API_GetSurfaceIndex(ghl, surfaceName);
-			static int surfaceLogCount = 0;
-			if (surfaceLogCount < 24) {
-				Com_Printf("[WRAITH21] model=%d surf='%s' ghl=%p ret=%d\n",
-					modelHandle, surfaceName, (void *)ghl, ret);
-				++surfaceLogCount;
-			}
-			return ret;
-		}
-		static int badSurfaceLogCount = 0;
-		if (badSurfaceLogCount < 12) {
-			Com_Printf("[WRAITH21] model=%d surf='%s' resolve failed ghl=%p\n",
-				modelHandle, surfaceName ? surfaceName : "(null)", (void *)ghl);
-			++badSurfaceLogCount;
+			return re.G2API_GetSurfaceIndex(ghl, surfaceName);
 		}
 		return -1;
 	}
@@ -2651,52 +2747,32 @@ public:
 	// ===== vtable[23] (0x5C): InitGhoul2Model — 6 stack args =====
 	virtual int InitGhoul2Model(CGhoul2Info_v *ghoul2, const char *fileName,
 	                            int modelIndex, int customSkin, int customShader, int modelFlags) {
-		const int beforeHandle = ghoul2 ? *(int *)ghoul2 : 0;
-		fprintf(stderr, "[WRAITH] InitGhoul2Model(ghoul2=%p, '%s', idx=%d, skin=%d, shader=%d, flags=%d)\n",
-			(void*)ghoul2, fileName ? fileName : "(null)", modelIndex, customSkin, customShader, modelFlags);
 		if (!fileName || !fileName[0]) return 0;
-		// Track entity ghoul2 for subsequent bolt/surface operations
-		mLastEntityGhoul2 = ghoul2;
 		int result = re.G2API_InitGhoul2Model(*ghoul2, fileName, modelIndex,
 			(qhandle_t)customSkin, (qhandle_t)customShader, modelFlags, 0);
-		fprintf(stderr, "[WRAITH] InitGhoul2Model -> G2API result=%d, handle=%d\n", result, result + 1);
-		static int initLogCount = 0;
-		if (initLogCount < 24) {
-			Com_Printf("[WRAITH23] ghoul2=%p before=%d after=%d file='%s' result=%d ret=%d\n",
-				(void *)ghoul2,
-				beforeHandle,
-				ghoul2 ? *(int *)ghoul2 : 0,
-				fileName ? fileName : "(null)",
-				result,
-				result + 1);
-			++initLogCount;
+		// Store pointer to entity's ghoul2 field for subsequent bolt/surface operations.
+		// Also store handle integer as fallback for handle-only callers.
+		mLastEntityGhoul2 = ghoul2;
+		mLastEntityGhoul2Handle = ghoul2 ? *(int *)ghoul2 : 0;
+		// Record per-entity mapping: entityState* → handle so FinalizeEntity
+		// can clear SVF_NOCLIENT on the entity once its ghoul2 setup is complete.
+		if ( ghoul2 && mLastEntityGhoul2Handle > 0 ) {
+			SOF2_EntGhoul2_Store( ghoul2, mLastEntityGhoul2Handle );
 		}
 		return result + 1;
 	}
 
 	// ===== vtable[24] (0x60): unknown — 2 stack args =====
-	virtual int Slot24(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] Slot24(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot24(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[25] (0x64): CheckSurfaceVisible — 2 stack args =====
-	virtual int Slot25_CheckSurfaceVisible(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] CheckSurfaceVisible(a1=%08X, a2=%08X)\n", a1, a2);
-		return 1;
-	}
+	virtual int Slot25_CheckSurfaceVisible(int a1, int a2) { (void)a1; (void)a2; return 1; }
 
 	// ===== vtable[26] (0x68): GetBoltInfo — 2 stack args =====
-	virtual int Slot26_GetBoltInfo(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] GetBoltInfo(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot26_GetBoltInfo(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[27] (0x6C): unknown — 2 stack args =====
-	virtual int Slot27(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] Slot27(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot27(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[28] (0x70): AddBoltByName — 2 stack args =====
 	virtual int Slot28_AddBoltByName(int modelHandle, const char *boneName) {
@@ -2709,66 +2785,38 @@ public:
 
 	// ===== vtable[29] (0x74): SetAnimIndex — 9 stack args =====
 	virtual int Slot29_SetAnimIndex(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) {
-		fprintf(stderr, "[WRAITH] SetAnimIndex(%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X)\n",
-			a1, a2, a3, a4, a5, a6, a7, a8, a9);
+		(void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7; (void)a8; (void)a9;
 		return 0;
 	}
 
 	// ===== vtable[30] (0x78): SetBoneAnim — 9 stack args =====
 	virtual int Slot30_SetBoneAnim(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) {
-		fprintf(stderr, "[WRAITH] SetBoneAnim(%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X,%08X)\n",
-			a1, a2, a3, a4, a5, a6, a7, a8, a9);
+		(void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7; (void)a8; (void)a9;
 		return 0;
 	}
 
 	// ===== vtable[31] (0x7C): PrecacheModel — 1 stack arg, returns a renderer model handle =====
 	virtual int PrecacheModel(const char *modelName) {
-		int handle = 0;
-
-		fprintf(stderr, "[WRAITH] PrecacheModel('%s')\n", modelName ? modelName : "(null)");
 		if (modelName && modelName[0]) {
-			handle = re.RegisterModel(modelName);
+			return re.RegisterModel(modelName);
 		}
-
-		fprintf(stderr, "[WRAITH] PrecacheModel -> handle=%d\n", handle);
-		return handle;
+		return 0;
 	}
 
 	// ===== vtable[32] (0x80): unknown — 2 stack args =====
-	virtual int Slot32(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] Slot32(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot32(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[33] (0x84): unknown — 2 stack args =====
-	virtual int Slot33(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] Slot33(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot33(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[34] (0x88): unknown — 2 stack args =====
-	virtual int Slot34(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] Slot34(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot34(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[35] (0x8C): RemoveBolt — 2 stack args =====
 	virtual int Slot35_RemoveBolt(int modelHandle, int boltIndex) {
 		CGhoul2Info *ghl = ResolveModel(modelHandle);
 		if (ghl) {
-			int ret = re.G2API_RemoveBolt(ghl, boltIndex);
-			static int removeBoltLogCount = 0;
-			if (removeBoltLogCount < 24) {
-				Com_Printf("[WRAITH35] model=%d bolt=%d ghl=%p ret=%d\n",
-					modelHandle, boltIndex, (void *)ghl, ret);
-				++removeBoltLogCount;
-			}
-			return ret;
-		}
-		static int removeBoltMissLogCount = 0;
-		if (removeBoltMissLogCount < 12) {
-			Com_Printf("[WRAITH35] model=%d bolt=%d resolve failed\n", modelHandle, boltIndex);
-			++removeBoltMissLogCount;
+			return re.G2API_RemoveBolt(ghl, boltIndex);
 		}
 		return 0;
 	}
@@ -2778,51 +2826,52 @@ public:
 		if (mGhoul2.IsValid() && modelIndex > 0 && (modelIndex - 1) < mGhoul2.size()) {
 			return re.G2API_RemoveGhoul2Model(mGhoul2, modelIndex - 1);
 		}
-		if (mLastEntityGhoul2 && mLastEntityGhoul2->IsValid() &&
-			modelIndex > 0 && (modelIndex - 1) < mLastEntityGhoul2->size()) {
-			return re.G2API_RemoveGhoul2Model(*mLastEntityGhoul2, modelIndex - 1);
+		CGhoul2Info_v *entityGhoul2 = GetLastEntityGhoul2();
+		if (entityGhoul2 && entityGhoul2->IsValid() &&
+			modelIndex > 0 && (modelIndex - 1) < entityGhoul2->size()) {
+			return re.G2API_RemoveGhoul2Model(*entityGhoul2, modelIndex - 1);
 		}
 		return 0;
 	}
 
 	// ===== vtable[37] (0x94): FinalizeEntity — 1 stack arg =====
+	// Called after a batch of entity ghoul2 model setups is complete.
+	// entityData = wraith pointer (not a game entity).
+	// Clears SVF_NOCLIENT on ALL entities in s_entityGhoul2Map so they appear in snapshots.
+	// (The game DLL re-sets SVF_NOCLIENT on entities that should remain server-side, e.g. player.)
 	virtual void FinalizeEntity(void *entityData) {
-		int entityHandle = 0;
+		(void)entityData;
+		if ( !sv_GEntities || sv_numGEntities <= 0 ) return;
+		void **tbl = (void **)sv_GEntities;
 
-		fprintf(stderr, "[WRAITH] FinalizeEntity(entityData=%p)\n", entityData);
-		if ( !entityData ) {
-			return;
-		}
+		// s_entityGhoul2Map[i].entityData = ghoul2Ptr - 0xe4 = entity_base + 8
+		for ( int i = 0; i < s_entityGhoul2Count; ++i ) {
+			byte *entState = (byte *)s_entityGhoul2Map[i].entityData;
+			byte *entity_base = entState - 8;
+			// Verify entity_base is a valid sv_GEntities slot
+			bool found = false;
+			for ( int ei = 0; ei < sv_numGEntities; ++ei ) {
+				if ( tbl[ei] == entity_base ) { found = true; break; }
+			}
+			if ( !found ) continue;  // not a game entity (e.g. wraith itself)
 
-		if ( mLastEntityGhoul2 ) {
-			entityHandle = *(int *)mLastEntityGhoul2;
+			int &svflags = *(int *)(entity_base + 0x114);
+			if ( svflags & 1 ) {
+				svflags &= ~1;  // clear SVF_NOCLIENT so entity appears in snapshots
+			}
 		}
-
-		memcpy( entityData, this, SOF2_WRAITH_ENTITY_BYTES );
-		if ( entityHandle > 0 ) {
-			*(int *)((byte *)entityData + SOF2_WRAITH_GHOUL2_OFFSET) = entityHandle;
-		}
-		fprintf(stderr, "[WRAITH] FinalizeEntity -> handle=%d vtable=%p\n",
-			entityHandle, *(void **)entityData);
 	}
 
 	// ===== vtable[38] (0x98): SetupModel — 1 stack arg =====
 	virtual void SetupModel(int modelHandle) {
 		mPadding = modelHandle;
-		fprintf(stderr, "[WRAITH] SetupModel(modelHandle=%08X)\n", modelHandle);
 	}
 
 	// ===== vtable[39] (0x9C): RemoveCallback — 2 stack args =====
-	virtual int Slot39_RemoveCallback(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] RemoveCallback(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot39_RemoveCallback(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[40] (0xA0): GetCachedModel — 2 stack args =====
-	virtual int Slot40_GetCachedModel(int a1, int a2) {
-		fprintf(stderr, "[WRAITH] GetCachedModel(a1=%08X, a2=%08X)\n", a1, a2);
-		return 0;
-	}
+	virtual int Slot40_GetCachedModel(int a1, int a2) { (void)a1; (void)a2; return 0; }
 
 	// ===== vtable[41] (0xA4): unknown — 2 stack args =====
 	virtual int Slot41(int a1, int a2) { return 0; }
@@ -2840,34 +2889,13 @@ public:
 	virtual int Slot43_SetSurfaceFlags(int modelHandle, int surfaceIndex, int flags) {
 		CGhoul2Info *ghl = ResolveModel(modelHandle);
 		if (!ghl || surfaceIndex < 0) {
-			static int surfaceFlagMissLogCount = 0;
-			if (surfaceFlagMissLogCount < 12) {
-				Com_Printf("[WRAITH43] model=%d surfIdx=%d flags=0x%x resolve failed ghl=%p\n",
-					modelHandle, surfaceIndex, flags, (void *)ghl);
-				++surfaceFlagMissLogCount;
-			}
 			return 0;
 		}
-
 		const char *surfaceName = re.G2API_GetSurfaceName(ghl, surfaceIndex);
 		if (!surfaceName || !surfaceName[0]) {
-			static int surfaceNameMissLogCount = 0;
-			if (surfaceNameMissLogCount < 12) {
-				Com_Printf("[WRAITH43] model=%d surfIdx=%d flags=0x%x empty name\n",
-					modelHandle, surfaceIndex, flags);
-				++surfaceNameMissLogCount;
-			}
 			return 0;
 		}
-
-		int ret = re.G2API_SetSurfaceOnOff(ghl, surfaceName, flags);
-		static int surfaceFlagLogCount = 0;
-		if (surfaceFlagLogCount < 24) {
-			Com_Printf("[WRAITH43] model=%d surfIdx=%d name='%s' flags=0x%x ret=%d\n",
-				modelHandle, surfaceIndex, surfaceName, flags, ret);
-			++surfaceFlagLogCount;
-		}
-		return ret;
+		return re.G2API_SetSurfaceOnOff(ghl, surfaceName, flags);
 	}
 
 	// ===== vtable[44] (0xB0): AttachModel — 3 stack args =====
@@ -2905,21 +2933,11 @@ public:
 	// ===== vtable[51] (0xCC): retail weapon path uses this to derive a secondary/buffer model handle.
 	// Returning 0 causes CWpnGameModel_SetMuzzleBolt to print "NULL_WraithID for buffer" and skip bolt setup.
 	virtual int Slot51_CopyBoltToSurface(int modelHandle, const char *primaryName, const char *secondaryName) {
-		static int slot51LogCount = 0;
-		if (slot51LogCount < 24) {
-			Com_Printf("[WRAITH51] model=%d primary='%s' secondary='%s'\n",
-				modelHandle,
-				primaryName ? primaryName : "(null)",
-				secondaryName ? secondaryName : "(null)");
-			++slot51LogCount;
-		}
-
-		// Conservative compatibility fallback: reuse the live weapon model handle when retail expects
-		// a secondary/buffer Wraith ID. This restores later AddBolt/SetSkin calls onto a valid model.
+		(void)primaryName; (void)secondaryName;
+		// Reuse the live weapon model handle when retail expects a secondary/buffer Wraith ID.
 		if (ResolveModel(modelHandle)) {
 			return modelHandle;
 		}
-
 		return 0;
 	}
 
@@ -2933,23 +2951,10 @@ public:
 	// Actual retail use: CG_Entity_AttachBolt calls this slot with 8 stack args.
 	virtual int Slot54_AttachBolt( int ghoul2Handle, int modelIndex, int boltIndex, float *outPos,
 		const float *angles, const float *origin, void * /*modelList*/, const float * /*scale*/ ) {
-		static int slot54LogCount = 0;
 		mdxaBone_t matrix;
 		vec3_t safeAngles = { 0.0f, 0.0f, 0.0f };
 		vec3_t safeOrigin = { 0.0f, 0.0f, 0.0f };
 		vec3_t scaleVec = { 1.0f, 1.0f, 1.0f };
-
-		if ( slot54LogCount < 12 ) {
-			Com_Printf(
-				"[WRAITH54] ghoul2=%d model=%d bolt=%d out=%p angles=%p origin=%p\n",
-				ghoul2Handle,
-				modelIndex,
-				boltIndex,
-				outPos,
-				angles,
-				origin );
-			++slot54LogCount;
-		}
 
 		if ( !outPos ) {
 			return 0;
@@ -3008,6 +3013,7 @@ public:
 	// Helper: convert SOF2 refEntity_t layout → OpenJK refEntity_t → re.AddRefEntityToScene
 	// SOF2 refEntity_t (from Ghidra CWeaponSystem_Update): axis@+0x0C, origin@+0x34, hModel@+0x6C
 	void SubmitSOF2RefEntityToScene(void *sof2Ent, const char *dbgSlot) {
+		(void)dbgSlot;
 		if (!sof2Ent) return;
 		const unsigned char *raw = (const unsigned char *)sof2Ent;
 		const int   sof2ReType   = *(const int  *)(raw + 0x00);
@@ -3015,14 +3021,6 @@ public:
 		const float *sof2Axis    = (const float *)(raw + 0x0C);
 		const float *sof2Origin  = (const float *)(raw + 0x34);
 		const int   sof2hModel   = *(const int  *)(raw + 0x6C);
-
-		static int submitLogCount = 0;
-		if (submitLogCount < 12) {
-			Com_Printf("[WRAITH%s] reType=%d hModel=%d renderfx=0x%x origin=(%.1f,%.1f,%.1f)\n",
-				dbgSlot, sof2ReType, sof2hModel, sof2Renderfx,
-				sof2Origin[0], sof2Origin[1], sof2Origin[2]);
-			submitLogCount++;
-		}
 
 		if (!sof2hModel) return;
 
@@ -3057,31 +3055,13 @@ public:
 	virtual int Slot65_CopyGhoul2Instance(int ghoul2Handle, int modelIndex) {
 		CGhoul2Info_v *ghoul2 = ResolveGhoul2Handle(ghoul2Handle);
 		if (!ghoul2 || !ghoul2->IsValid() || ghoul2->size() <= 0) {
-			static int slot65MissLogCount = 0;
-			if (slot65MissLogCount < 24) {
-				Com_Printf("[WRAITH65] ghoul2=%d model=%d resolve failed\n", ghoul2Handle, modelIndex);
-				++slot65MissLogCount;
-			}
 			return 0;
 		}
-
-		mLastEntityGhoul2 = ghoul2;
-
+		mLastEntityGhoul2Handle = ghoul2Handle;
 		int resolvedIndex = modelIndex;
-		if (resolvedIndex < 0) {
+		if (resolvedIndex < 0 || resolvedIndex >= ghoul2->size()) {
 			resolvedIndex = 0;
 		}
-		if (resolvedIndex >= ghoul2->size()) {
-			resolvedIndex = 0;
-		}
-
-		static int slot65LogCount = 0;
-		if (slot65LogCount < 24) {
-			Com_Printf("[WRAITH65] ghoul2=%d size=%d requested=%d resolved=%d ret=%d\n",
-				ghoul2Handle, ghoul2->size(), modelIndex, resolvedIndex, resolvedIndex + 1);
-			++slot65LogCount;
-		}
-
 		return resolvedIndex + 1;
 	}
 
@@ -3122,6 +3102,12 @@ public:
 
 static CWraithStub *g_wraithStub = NULL;
 
+// Accessible from sv_snapshot.cpp for ghoul2 scan
+void SV_GetGEntityTable( void ***outTable, int *outCount ) {
+	if ( outTable ) *outTable = sv_GEntities ? (void **)sv_GEntities : NULL;
+	if ( outCount ) *outCount = sv_numGEntities;
+}
+
 // Accessible from cl_cgame.cpp — cgame DLL needs the same CWraithStub
 void *SV_GetWraithStubPtr( void ) {
 	if ( !g_wraithStub ) {
@@ -3131,13 +3117,10 @@ void *SV_GetWraithStubPtr( void ) {
 }
 
 static qboolean SV_G2_InitWraithSurfaceMap( void **outPtr ) {
-	fprintf(stderr, "[GI] gi_G2_InitWraithSurfaceMap called outPtr=%p\n", (void*)outPtr);
 	if (!g_wraithStub) {
 		g_wraithStub = new CWraithStub();
 	}
 	if (outPtr) *outPtr = g_wraithStub;
-	fprintf(stderr, "[GI] gi_G2_InitWraithSurfaceMap: wraith=%p vtable=%p\n",
-		(void*)g_wraithStub, *(void**)g_wraithStub);
 	return g_wraithStub ? qtrue : qfalse;
 }
 
@@ -3229,6 +3212,10 @@ void SV_InitGameProgs (void) {
 	void *gi[113];
 	int   i;
 	memset( gi, 0, sizeof(gi) );
+
+	// Reset per-entity ghoul2 table on every map load
+	s_entityGhoul2Count = 0;
+	memset( s_entityGhoul2Map, 0, sizeof(s_entityGhoul2Map) );
 
 	// unload anything we have now
 	if ( ge ) {

@@ -1294,6 +1294,7 @@ R_AddEntitySurfaces
 void R_AddEntitySurfaces (void) {
 	trRefEntity_t	*ent;
 	shader_t		*shader;
+	static int ghoul2EntityLogCount = 0;
 
 	if ( !r_drawentities->integer ) {
 		return;
@@ -1355,6 +1356,34 @@ void R_AddEntitySurfaces (void) {
 			R_RotateForEntity( ent, &tr.viewParms, &tr.ori );
 
 			tr.currentModel = R_GetModelByHandle( ent->e.hModel );
+			if ( ent->e.ghoul2 && ghoul2EntityLogCount < 48 ) {
+				const int ghoul2Handle = *(const int *)ent->e.ghoul2;
+				Com_Printf(
+					"[R entity] #%d hModel=%d model=%p type=%d ghoul2=%p handle=%d reType=%d renderfx=0x%x origin=(%.1f,%.1f,%.1f)\n",
+					ghoul2EntityLogCount + 1,
+					(int)ent->e.hModel,
+					tr.currentModel,
+					tr.currentModel ? (int)tr.currentModel->type : -1,
+					ent->e.ghoul2,
+					ghoul2Handle,
+					(int)ent->e.reType,
+					(unsigned int)ent->e.renderfx,
+					ent->e.origin[0], ent->e.origin[1], ent->e.origin[2] );
+				++ghoul2EntityLogCount;
+			}
+			// Retail SOF2 submits animated characters with a live Ghoul2 handle but our
+			// interim hModel derivation can still resolve to a non-Ghoul model handle.
+			// Prefer the Ghoul2 path whenever the handle is valid so character refs do
+			// not get misrouted into brush/MD3 rendering.
+			if ( ent->e.ghoul2 && G2API_HaveWeGhoul2Models( *((CGhoul2Info_v *)ent->e.ghoul2) ) ) {
+				if ( ( ent->e.renderfx & RF_THIRD_PERSON ) && !tr.viewParms.isPortal ) {
+					if ( !( ent->e.renderfx & RF_SHADOW_ONLY ) ) {
+						break;
+					}
+				}
+				R_AddGhoulSurfaces( ent );
+				break;
+			}
 			if (!tr.currentModel) {
 				R_AddDrawSurf( &entitySurface, tr.defaultShader, 0, 0 );
 			} else {

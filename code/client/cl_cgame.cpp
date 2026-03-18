@@ -234,8 +234,52 @@ static int         s_cgCvarUpdatesThisRender = 0;
 static int         s_cgRenderDepth = 0;
 static refEntity_t s_cgFrameRefEntities[MAX_REFENTITIES];
 static int         s_cgFrameRefEntityCount = 0;
+static int         s_cgFrameGhoul2Handles[MAX_REFENTITIES];
+static qboolean    s_cgFrameGhoul2HandleValid[MAX_REFENTITIES];
 static refEntity_t s_cgLastRefEntities[MAX_REFENTITIES];
 static int         s_cgLastRefEntityCount = 0;
+static int         s_cgLastGhoul2Handles[MAX_REFENTITIES];
+static qboolean    s_cgLastGhoul2HandleValid[MAX_REFENTITIES];
+static int         s_cgTempGhoul2Handle = 0;
+#define CG_SOF2_GHOUL2_COMPAT_MODELS 16
+typedef struct cg_sof2_ghoul2_model_compat_s {
+	int   modelindex;                                   // +0x00
+	byte  reserved04[0x38 - 0x04];                      // +0x04
+	byte *boneBegin;                                    // +0x38
+	byte *boneEnd;                                      // +0x3C
+	byte *boneCapacity;                                 // +0x40
+	byte  reserved44[0x5A - 0x44];                      // +0x44
+	char  fileMarker;                                   // +0x5A
+	byte  reserved5B[0xA8 - 0x5B];                      // +0x5B
+	int   flags;                                        // +0xA8
+	byte  reservedAC[0xB4 - 0xAC];                      // +0xAC
+	float angles[3];                                    // +0xB4
+	float origin[3];                                    // +0xC0
+	byte  valid;                                        // +0xCC
+	byte  reservedCD[0xD0 - 0xCD];                      // +0xCD
+} cg_sof2_ghoul2_model_compat_t;
+static_assert( sizeof( cg_sof2_ghoul2_model_compat_t ) == 0xD0, "SOF2 Ghoul2 compat model record must match retail 0xD0 stride" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, boneBegin ) == 0x38, "SOF2 Ghoul2 compat boneBegin offset mismatch" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, fileMarker ) == 0x5A, "SOF2 Ghoul2 compat fileMarker offset mismatch" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, flags ) == 0xA8, "SOF2 Ghoul2 compat flags offset mismatch" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, angles ) == 0xB4, "SOF2 Ghoul2 compat angles offset mismatch" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, origin ) == 0xC0, "SOF2 Ghoul2 compat origin offset mismatch" );
+static_assert( offsetof( cg_sof2_ghoul2_model_compat_t, valid ) == 0xCC, "SOF2 Ghoul2 compat valid offset mismatch" );
+typedef struct cg_sof2_ghoul2_compat_view_s {
+	int   handle;
+	void *begin;
+	void *end;
+	void *capacity;
+} cg_sof2_ghoul2_compat_view_t;
+typedef struct cg_sof2_ghoul2_compat_runtime_s {
+	cg_sof2_ghoul2_compat_view_t view;
+	cg_sof2_ghoul2_model_compat_t models[CG_SOF2_GHOUL2_COMPAT_MODELS];
+} cg_sof2_ghoul2_compat_runtime_t;
+static cg_sof2_ghoul2_compat_runtime_t s_cgGhoul2CompatViews[8];
+static int         s_cgGhoul2CompatViewNext = 0;
+static const void *s_cgGhoul2VectorPtrs[64];
+static int         s_cgGhoul2VectorHandles[64];
+static int         s_cgGhoul2VectorCacheCount = 0;
 static int         s_polyLogThisScene = 0;
 
 // Flicker fix: track whether DrawInformation submitted a scene this frame.
@@ -546,33 +590,300 @@ static void CG_CM_GetTerrainBounds( vec3_t mins, vec3_t maxs ) {
 	VectorSet( maxs, 65536, 65536, 65536 );
 }
 
+static CGhoul2Info_v *CG_G2_GetGhoul2InfoByHandle( int handle );
+static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent );
+static CGhoul2Info_v *CG_WrapGhoul2HandleTemp( int handle );
+static CGhoul2Info_v *CG_WrapGhoul2HandleForScene( int handle, int slot, qboolean lastCache );
+static CGhoul2Info_v *CG_MakeGhoul2CompatView( int handle );
+static CGhoul2Info_v *CG_ResolveGhoul2ForRenderer( const void *pGhoul2, int slot, qboolean lastCache, int *outHandle );
+static qhandle_t CG_G2_DeriveSceneModelHandle( int handle );
+static const char *CL_SOF2_ModelNameForBaseline( int modelIndex );
+
 // ----- Slot 117: G2API_HaveWeGhoul2Models -----
 // The cgame DLL passes a pointer (may be NULL for entities without Ghoul2 models).
 // At the ABI level, CGhoul2Info_v& and CGhoul2Info_v* are identical (both pointers).
 static qboolean CG_G2API_HaveWeGhoul2Models( void *pGhoul2 ) {
-	if ( !pGhoul2 ) return qfalse;
-	return re.G2API_HaveWeGhoul2Models( *(CGhoul2Info_v *)pGhoul2 );
+	static int haveModelsLogCount = 0;
+	static int haveModelsNullCount = 0;
+	int resolvedHandle = 0;
+	if ( !pGhoul2 ) {
+		if ( haveModelsNullCount < 4 ) {
+			Com_Printf( "[CG g2] HaveModels pGhoul2=NULL (caller=%p)\n", _ReturnAddress() );
+			++haveModelsNullCount;
+		}
+		return qfalse;
+	}
+	CGhoul2Info_v *ghoul2 = CG_ResolveGhoul2ForRenderer( pGhoul2, -1, qfalse, &resolvedHandle );
+	if ( !ghoul2 ) {
+		if ( haveModelsLogCount < 96 ) {
+			Com_Printf(
+				"[CG g2] HaveModels raw=%p resolvedHandle=%d g2=%p ret=0 caller=%p\n",
+				pGhoul2,
+				resolvedHandle,
+				ghoul2,
+				_ReturnAddress() );
+			++haveModelsLogCount;
+		}
+		return qfalse;
+	}
+	{
+		const qboolean haveModels = re.G2API_HaveWeGhoul2Models( *ghoul2 );
+		if ( haveModelsLogCount < 96 ) {
+			Com_Printf(
+				"[CG g2] HaveModels raw=%p resolvedHandle=%d g2=%p ret=%d caller=%p\n",
+				pGhoul2,
+				resolvedHandle,
+				ghoul2,
+				(int)haveModels,
+				_ReturnAddress() );
+			++haveModelsLogCount;
+		}
+		return haveModels;
+	}
 }
 
 // ----- Slot 118: G2_GetGhoul2InfoByHandle -----
-// Returns CGhoul2Info_v* from a handle. The DLL uses this to get a reference.
 static CGhoul2Info_v *CG_G2_GetGhoul2InfoByHandle( int handle ) {
-	// Return a pointer to the CGhoul2Info_v wrapper. Since handles are just
-	// indices into the renderer's array, and the DLL only reads mItem from
-	// the returned pointer, we return it from a static to keep it alive.
-	static CGhoul2Info_v g2Temp;
-	// Avoid the destructor freeing the handle by directly setting mItem
-	// CGhoul2Info_v has mItem at offset 0
-	*(int *)&g2Temp = handle;
-	return &g2Temp;
+	static int infoLogCount = 0;
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+
+	if ( !arr.IsValid( handle ) ) {
+		if ( infoLogCount < 32 ) {
+			Com_Printf( "[CG g2] GetInfoByHandle invalid handle=%d\n", handle );
+			++infoLogCount;
+		}
+		return NULL;
+	}
+
+	CGhoul2Info_v *result = CG_MakeGhoul2CompatView( handle );
+	if ( infoLogCount < 32 ) {
+		cg_sof2_ghoul2_compat_view_t *compat = (cg_sof2_ghoul2_compat_view_t *)result;
+		Com_Printf( "[CG g2] GetInfoByHandle handle=%d compat=%p size=%d range=(%p,%p)\n",
+			handle,
+			result,
+			(int)arr.Get( handle ).size(),
+			compat->begin,
+			compat->end );
+		++infoLogCount;
+	}
+	return result;
+}
+
+static qboolean CG_SOF2_Ghoul2LooksLikeHandle( uintptr_t value ) {
+	if ( value == 0 || value >= 0x10000u ) {
+		return qfalse;
+	}
+
+	return re.TheGhoul2InfoArray().IsValid( (int)value ) ? qtrue : qfalse;
+}
+
+static CGhoul2Info_v *CG_WrapGhoul2HandleTemp( int handle ) {
+	s_cgTempGhoul2Handle = handle;
+	return (CGhoul2Info_v *)&s_cgTempGhoul2Handle;
+}
+
+static CGhoul2Info_v *CG_MakeGhoul2CompatView( int handle ) {
+	cg_sof2_ghoul2_compat_runtime_t *runtime =
+		&s_cgGhoul2CompatViews[s_cgGhoul2CompatViewNext % (int)( sizeof( s_cgGhoul2CompatViews ) / sizeof( s_cgGhoul2CompatViews[0] ) )];
+	cg_sof2_ghoul2_compat_view_t *view = &runtime->view;
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	const std::vector<CGhoul2Info> &ghoul2 = arr.Get( handle );
+	s_cgGhoul2CompatViewNext++;
+
+	Com_Memset( runtime->models, 0, sizeof( runtime->models ) );
+	view->handle = handle;
+
+	int compatCount = (int)ghoul2.size();
+	if ( compatCount > CG_SOF2_GHOUL2_COMPAT_MODELS ) {
+		compatCount = CG_SOF2_GHOUL2_COMPAT_MODELS;
+	}
+
+	for ( int i = 0; i < compatCount; ++i ) {
+		const CGhoul2Info &src = ghoul2[i];
+		cg_sof2_ghoul2_model_compat_t &dst = runtime->models[i];
+		dst.modelindex = src.mModelindex;
+		dst.boneBegin = src.mBlist.empty() ? NULL : (byte *)src.mBlist.data();
+		dst.boneEnd = src.mBlist.empty() ? NULL : (byte *)src.mBlist.data() + src.mBlist.size() * sizeof( boneInfo_t );
+		dst.boneCapacity = dst.boneEnd;
+		dst.fileMarker = src.mFileName[0] ? src.mFileName[0] : '\0';
+		dst.flags = src.mFlags;
+		dst.angles[0] = dst.angles[1] = dst.angles[2] = 0.0f;
+		dst.origin[0] = dst.origin[1] = dst.origin[2] = 0.0f;
+		dst.valid = ( src.mModelindex >= 0 && src.mValid ) ? 1 : 0;
+	}
+
+	view->begin = compatCount > 0 ? runtime->models : NULL;
+	view->end = compatCount > 0 ? runtime->models + compatCount : NULL;
+	view->capacity = compatCount > 0 ? runtime->models + compatCount : NULL;
+	return (CGhoul2Info_v *)view;
+}
+
+static int CG_G2_FindHandleByCompatPtr( const void *ptr ) {
+	if ( !ptr ) {
+		return 0;
+	}
+
+	for ( int i = 0; i < (int)( sizeof( s_cgGhoul2CompatViews ) / sizeof( s_cgGhoul2CompatViews[0] ) ); ++i ) {
+		if ( ptr == &s_cgGhoul2CompatViews[i].view ) {
+			return s_cgGhoul2CompatViews[i].view.handle;
+		}
+	}
+
+	return 0;
+}
+
+static int CG_G2_FindHandleByVectorPtr( const void *ptr ) {
+	if ( !ptr || (uintptr_t)ptr < 0x10000u ) {
+		return 0;
+	}
+
+	for ( int i = 0; i < s_cgGhoul2VectorCacheCount; ++i ) {
+		if ( s_cgGhoul2VectorPtrs[i] == ptr ) {
+			return s_cgGhoul2VectorHandles[i];
+		}
+	}
+
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	for ( int handle = 512; handle < 8192; ++handle ) {
+		if ( !arr.IsValid( handle ) ) {
+			continue;
+		}
+
+		if ( &arr.Get( handle ) == ptr ) {
+			if ( s_cgGhoul2VectorCacheCount < (int)( sizeof( s_cgGhoul2VectorPtrs ) / sizeof( s_cgGhoul2VectorPtrs[0] ) ) ) {
+				s_cgGhoul2VectorPtrs[s_cgGhoul2VectorCacheCount] = ptr;
+				s_cgGhoul2VectorHandles[s_cgGhoul2VectorCacheCount] = handle;
+				++s_cgGhoul2VectorCacheCount;
+			}
+			return handle;
+		}
+	}
+
+	return 0;
+}
+
+static CGhoul2Info_v *CG_ResolveGhoul2ForRenderer( const void *pGhoul2, int slot, qboolean lastCache, int *outHandle ) {
+	static int tinyRejectLogCount = 0;
+	if ( outHandle ) {
+		*outHandle = 0;
+	}
+	if ( !pGhoul2 ) {
+		return NULL;
+	}
+
+	const uintptr_t value = (uintptr_t)pGhoul2;
+	if ( CG_SOF2_Ghoul2LooksLikeHandle( value ) ) {
+		if ( outHandle ) {
+			*outHandle = (int)value;
+		}
+		return ( slot >= 0 ) ? CG_WrapGhoul2HandleForScene( (int)value, slot, lastCache ) : CG_WrapGhoul2HandleTemp( (int)value );
+	}
+
+	const int compatHandle = CG_G2_FindHandleByCompatPtr( pGhoul2 );
+	if ( compatHandle > 0 ) {
+		if ( outHandle ) {
+			*outHandle = compatHandle;
+		}
+		return ( slot >= 0 ) ? CG_WrapGhoul2HandleForScene( compatHandle, slot, lastCache ) : CG_WrapGhoul2HandleTemp( compatHandle );
+	}
+
+	const int vectorHandle = CG_G2_FindHandleByVectorPtr( pGhoul2 );
+	if ( vectorHandle > 0 ) {
+		if ( outHandle ) {
+			*outHandle = vectorHandle;
+		}
+		return ( slot >= 0 ) ? CG_WrapGhoul2HandleForScene( vectorHandle, slot, lastCache ) : CG_WrapGhoul2HandleTemp( vectorHandle );
+	}
+
+	if ( value < 0x10000u ) {
+		if ( tinyRejectLogCount < 32 ) {
+			Com_Printf( "[CG g2] reject tiny non-handle ghoul2=%p slot=%d last=%d\n",
+				pGhoul2, slot, (int)lastCache );
+			++tinyRejectLogCount;
+		}
+		return NULL;
+	}
+
+	const int embeddedHandle = *(const int *)pGhoul2;
+	if ( CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)embeddedHandle ) ) {
+		if ( outHandle ) {
+			*outHandle = embeddedHandle;
+		}
+		return ( slot >= 0 ) ? CG_WrapGhoul2HandleForScene( embeddedHandle, slot, lastCache ) : CG_WrapGhoul2HandleTemp( embeddedHandle );
+	}
+
+	return (CGhoul2Info_v *)pGhoul2;
+}
+
+static CGhoul2Info_v *CG_WrapGhoul2HandleForScene( int handle, int slot, qboolean lastCache ) {
+	int *handleSlots = lastCache ? s_cgLastGhoul2Handles : s_cgFrameGhoul2Handles;
+	qboolean *validSlots = lastCache ? s_cgLastGhoul2HandleValid : s_cgFrameGhoul2HandleValid;
+
+	if ( slot < 0 ) {
+		slot = 0;
+	}
+	if ( slot >= MAX_REFENTITIES ) {
+		slot = MAX_REFENTITIES - 1;
+	}
+
+	handleSlots[slot] = handle;
+	validSlots[slot] = qtrue;
+	return (CGhoul2Info_v *)&handleSlots[slot];
+}
+
+static qhandle_t CG_G2_DeriveSceneModelHandle( int handle ) {
+	if ( handle <= 0 ) {
+		return 0;
+	}
+
+	IGhoul2InfoArray &arr = re.TheGhoul2InfoArray();
+	if ( !arr.IsValid( handle ) ) {
+		return 0;
+	}
+
+	std::vector<CGhoul2Info> &ghoul2 = arr.Get( handle );
+	for ( size_t i = 0; i < ghoul2.size(); ++i ) {
+		CGhoul2Info &model = ghoul2[i];
+		if ( model.mModelindex == -1 || !model.mValid ) {
+			continue;
+		}
+		if ( model.mModel > 0 ) {
+			return model.mModel;
+		}
+		if ( model.mFileName[0] ) {
+			model.mModel = re.RegisterModel( model.mFileName );
+			if ( model.mModel > 0 ) {
+				return model.mModel;
+			}
+		}
+	}
+
+	return 0;
 }
 
 // ----- Slot 119: G2API_SetGhoul2ModelIndexes -----
+// Retail CG_AddEntity calls this import with only two arguments:
+//   (ghoul2Handle, modelList)
+// The third skinList argument used by OpenJK's native cgame syscall path is not
+// valid on this retail ABI boundary. Passing it through or even dereferencing it
+// can fault immediately with tiny garbage values like 0x4400.
 static void CG_G2API_SetGhoul2ModelIndexes( unsigned int ghoul2Handle,
 		qhandle_t *modelList ) {
-	if ( ghoul2Handle == 0 ) return;
-	CGhoul2Info_v &g2 = *(CGhoul2Info_v *)&ghoul2Handle;
-	re.G2API_SetGhoul2ModelIndexes( g2, modelList, NULL );
+	static int modelIndexLogCount = 0;
+	int resolvedHandle = 0;
+	CGhoul2Info_v *g2 = CG_ResolveGhoul2ForRenderer(
+		(const void *)(uintptr_t)ghoul2Handle, -1, qfalse, &resolvedHandle );
+	if ( modelIndexLogCount < 48 ) {
+		const int firstModel = modelList ? modelList[0] : -1;
+		Com_Printf(
+			"[CG g2] SetModelIndexes raw=0x%08X resolvedHandle=%d g2=%p modelList=%p firstModel=%d skinList=NULL(retail)\n",
+			ghoul2Handle, resolvedHandle, g2, modelList, firstModel );
+		++modelIndexLogCount;
+	}
+	if ( !g2 ) {
+		return;
+	}
+	re.G2API_SetGhoul2ModelIndexes( *g2, modelList, NULL );
 }
 
 // ----- Slot 120: G2API_ReRegisterModels -----
@@ -586,10 +897,21 @@ static qboolean CG_G2API_GetBoltMatrix( unsigned int ghoul2Handle,
 		int modelIndex, int boltIndex, mdxaBone_t *matrix,
 		const vec3_t angles, const vec3_t position, int frameNum,
 		qhandle_t *modelList, float scale ) {
-	if ( ghoul2Handle == 0 ) return qfalse;
-	CGhoul2Info_v &g2 = *(CGhoul2Info_v *)&ghoul2Handle;
+	static int boltMatrixLogCount = 0;
+	int resolvedHandle = 0;
+	CGhoul2Info_v *g2 = CG_ResolveGhoul2ForRenderer(
+		(const void *)(uintptr_t)ghoul2Handle, -1, qfalse, &resolvedHandle );
+	if ( boltMatrixLogCount < 48 && ( ghoul2Handle != 0 || boltIndex < 0 ) ) {
+		Com_Printf(
+			"[CG g2] GetBoltMatrix raw=0x%08X resolvedHandle=%d g2=%p modelIndex=%d boltIndex=%d frame=%d modelList=%p scale=%.2f\n",
+			ghoul2Handle, resolvedHandle, g2, modelIndex, boltIndex, frameNum, modelList, scale );
+		++boltMatrixLogCount;
+	}
+	if ( !g2 ) {
+		return qfalse;
+	}
 	vec3_t scaleVec = { scale, scale, scale };
-	return re.G2API_GetBoltMatrix( g2, modelIndex, boltIndex, matrix,
+	return re.G2API_GetBoltMatrix( *g2, modelIndex, boltIndex, matrix,
 		angles, position, frameNum, modelList, scaleVec );
 }
 
@@ -610,9 +932,23 @@ static qboolean CG_G2API_SetBoneAnglesOffset( unsigned int ghoul2Handle,
 }
 
 // ----- Slot 134: R_AddMiniRefEntityToScene -----
-// SOF2-specific mini entity — just add as regular entity
+// Route mini-entity submits through the same SOF2/OpenJK bridge as slot 131.
 static void CG_R_AddMiniRefEntityToScene( const refEntity_t *ent ) {
-	if ( ent ) re.AddRefEntityToScene( ent );
+	static int miniLogCount = 0;
+	if ( !ent ) {
+		return;
+	}
+	if ( miniLogCount < 24 ) {
+		Com_Printf(
+			"[CG scene] AddMiniRefEntity #%d raw=%p type=%d hModel=%d org=(%.1f,%.1f,%.1f)\n",
+			miniLogCount + 1,
+			ent,
+			(int)ent->reType,
+			(int)ent->hModel,
+			ent->origin[0], ent->origin[1], ent->origin[2] );
+		++miniLogCount;
+	}
+	CG_R_AddRefEntityToScene_Wrapper( ent );
 }
 
 // ----- Slot 137: R_AddDirectedLightToScene -----
@@ -637,6 +973,7 @@ static void CG_R_ClearScene_Wrapper( void ) {
 		clearSceneLogCount++;
 	}
 	s_cgFrameRefEntityCount = 0;
+	memset( s_cgFrameGhoul2HandleValid, 0, sizeof( s_cgFrameGhoul2HandleValid ) );
 	s_polyLogThisScene = 0;
 	s_renderSceneSubmitted = qfalse;  // scene cleared — will need a new RenderScene call
 	re.ClearScene();
@@ -795,6 +1132,8 @@ static void CG_ConvertSOF2RefEntity( const unsigned char *raw, refEntity_t *out 
 static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	static int addRefEntityLogCount = 0;
 	static int invalidReTypeLogCount = 0;
+	static int ghoul2HandleLogCount = 0;
+	static int ghoul2SubmitLogCount = 0;
 	const refEntity_t *submitEnt = ent;
 	refEntity_t converted;
 	if ( !ent ) {
@@ -831,6 +1170,88 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 	if ( useSOF2Layout ) {
 		CG_ConvertSOF2RefEntity( raw, &converted );
 		submitEnt = &converted;
+	}
+
+	int remappedGhoul2Handle = 0;
+	CGhoul2Info_v *resolvedGhoul2 = CG_ResolveGhoul2ForRenderer(
+		submitEnt->ghoul2,
+		( s_cgFrameRefEntityCount < MAX_REFENTITIES ) ? s_cgFrameRefEntityCount : ( MAX_REFENTITIES - 1 ),
+		qfalse,
+		&remappedGhoul2Handle );
+	if ( resolvedGhoul2 && resolvedGhoul2 != submitEnt->ghoul2 ) {
+		if ( submitEnt != &converted ) {
+			converted = *submitEnt;
+			submitEnt = &converted;
+		}
+		converted.ghoul2 = resolvedGhoul2;
+
+		if ( ghoul2HandleLogCount < 24 ) {
+			Com_Printf(
+				"[CG scene] remapped ghoul2 handle=%d mode=%s hModel=%d reType=%d raw=%p\n",
+				remappedGhoul2Handle,
+				useSOF2Layout ? "sof2" : "openjk",
+				(int)submitEnt->hModel,
+				(int)submitEnt->reType,
+				ent->ghoul2 );
+			++ghoul2HandleLogCount;
+		}
+	}
+
+	if ( remappedGhoul2Handle > 0 && submitEnt->hModel == 0 ) {
+		const qhandle_t ghoulModel = CG_G2_DeriveSceneModelHandle( remappedGhoul2Handle );
+		if ( ghoulModel > 0 ) {
+			if ( submitEnt != &converted ) {
+				converted = *submitEnt;
+				submitEnt = &converted;
+			}
+			converted.hModel = ghoulModel;
+			if ( ghoul2HandleLogCount < 24 ) {
+				Com_Printf(
+					"[CG scene] derived hModel=%d from ghoul2 handle=%d mode=%s\n",
+					(int)ghoulModel,
+					remappedGhoul2Handle,
+					useSOF2Layout ? "sof2" : "openjk" );
+				++ghoul2HandleLogCount;
+			}
+		}
+	}
+
+	if ( ghoul2SubmitLogCount < 64 && ( submitEnt->ghoul2 != NULL || sof2Ghoul2 != NULL || ent->ghoul2 != NULL ) ) {
+		Com_Printf(
+			"[CG scene] ghoul2 submit mode=%s raw=%p rawField=%p submit=%p resolved=%p handle=%d hModel=%d rawHModel=%d reType=%d rawType=%d org=(%.1f,%.1f,%.1f)\n",
+			useSOF2Layout ? "sof2" : "openjk",
+			ent->ghoul2,
+			sof2Ghoul2,
+			submitEnt->ghoul2,
+			resolvedGhoul2,
+			remappedGhoul2Handle,
+			(int)submitEnt->hModel,
+			sof2hModel,
+			(int)submitEnt->reType,
+			*(const int *)( raw + 0x00 ),
+			submitEnt->origin[0], submitEnt->origin[1], submitEnt->origin[2] );
+		++ghoul2SubmitLogCount;
+	}
+	if ( useSOF2Layout && ghoul2SubmitLogCount <= 16 ) {
+		const int rawBC = *(const int *)( raw + 0xBC );
+		const int rawC0 = *(const int *)( raw + 0xC0 );
+		const int rawC4 = *(const int *)( raw + 0xC4 );
+		const int rawC8 = *(const int *)( raw + 0xC8 );
+		const int rawCC = *(const int *)( raw + 0xCC );
+		const int rawD0 = *(const int *)( raw + 0xD0 );
+		const int rawD4 = *(const int *)( raw + 0xD4 );
+		const int rawD8 = *(const int *)( raw + 0xD8 );
+		Com_Printf(
+			"[CG scene] ghoul2 rawfields mode=sof2 @BC=%08X @C0=%08X @C4=%08X @C8=%08X @CC=%08X @D0=%08X @D4=%08X @D8=%08X valid{BC=%d,C0=%d,C4=%d,C8=%d,CC=%d,D0=%d,D4=%d,D8=%d}\n",
+			rawBC, rawC0, rawC4, rawC8, rawCC, rawD0, rawD4, rawD8,
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawBC ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC0 ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC4 ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC8 ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawCC ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD0 ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD4 ),
+			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD8 ) );
 	}
 
 	if ( submitEnt->reType < RT_MODEL || submitEnt->reType >= RT_MAX_REF_ENTITY_TYPE ) {
@@ -996,6 +1417,13 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 			s_cgLastRefEntityCount = s_cgFrameRefEntityCount;
 			memcpy( s_cgLastRefEntities, s_cgFrameRefEntities,
 				sizeof( refEntity_t ) * s_cgFrameRefEntityCount );
+			memset( s_cgLastGhoul2HandleValid, 0, sizeof( s_cgLastGhoul2HandleValid ) );
+			for ( int i = 0; i < s_cgFrameRefEntityCount; ++i ) {
+				if ( s_cgFrameGhoul2HandleValid[i] ) {
+					s_cgLastRefEntities[i].ghoul2 =
+						CG_WrapGhoul2HandleForScene( s_cgFrameGhoul2Handles[i], i, qtrue );
+				}
+			}
 		}
 		else if ( replayedRefEntities > 0 ) {
 			s_cgLastRefEntityCount = replayedRefEntities;
@@ -1173,6 +1601,23 @@ static void CG_UI_MenuReset( void ) {
 // Called from CG_SetLoadingLevelshot. Cosmetic only.
 static void CG_UI_SetInfoScreenText( const char * /*text*/ ) {
 	// no-op — loading screen text widget not implemented
+}
+
+// ----- Slots 105-108: GenericParser2 API stubs -----
+// Retail SOF2 exposes GP_GetBaseParseGroup / GP_GetSubGroups / GP_GetNext here.
+// The reference character-loading pass also used these signatures. Returning the
+// later synthetic interface object keeps control flow alive, but it is the wrong
+// ABI if cgame is actually expecting GenericParser2 helpers during body/weapon
+// setup.
+static void CG_GP_GetBaseParseGroup( int /*handle*/ ) {
+	// no-op — retail cgame reads state from its own parser object.
+}
+
+static int CG_GP_GetSubGroups( void ) {
+	return 0;
+}
+
+static void CG_GP_GetNext( void * /*dest*/ ) {
 }
 
 // ----- Slots 105-108: unresolved retail helpers -----
@@ -1597,37 +2042,27 @@ static int CL_GetCurrentSnapshotNumber_wrapper( int *snapshotNumber, int *server
 
 static void CL_GetGameState_wrapper( gameState_t *gs ) {
 	static int logCount = 0;
-	static int compatMaskCount = 0;
-	int cs20Offset = cl.gameState.stringOffsets[20];
-	int cs21Offset = cl.gameState.stringOffsets[21];
-	const char *cs20 = cs20Offset ? cl.gameState.stringData + cs20Offset : "";
-	const char *cs21 = cs21Offset ? cl.gameState.stringData + cs21Offset : "";
+	const int cs32Offset = cl.gameState.stringOffsets[32];
+	const int cs33Offset = cl.gameState.stringOffsets[33];
+	const char *cs32 = cs32Offset ? cl.gameState.stringData + cs32Offset : "";
+	const char *cs33 = cs33Offset ? cl.gameState.stringData + cs33Offset : "";
 	if ( logCount < 6 ) {
 		const char *serverInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
 		const char *systemInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SYSTEMINFO ];
 		const char *mapName = Info_ValueForKey( serverInfo, "mapname" );
 		Com_Printf(
-			"[SNAP] CL_GetGameState #%d gs=%p dataCount=%d map='%s' cs20='%s' cs21='%s' serverinfo='%.96s' systeminfo='%.96s'\n",
+			"[SNAP] CL_GetGameState #%d gs=%p dataCount=%d map='%s' cs32='%s' cs33='%s' serverinfo='%.96s' systeminfo='%.96s'\n",
 			logCount + 1,
 			(void *)gs,
 			cl.gameState.dataCount,
 			mapName ? mapName : "",
-			cs20,
-			cs21,
+			cs32,
+			cs33,
 			serverInfo ? serverInfo : "",
 			systemInfo ? systemInfo : "" );
 		logCount++;
 	}
 	CL_GetGameState( gs );
-	if ( cls.state == CA_PRIMED && compatMaskCount < 2 ) {
-		if ( cs20Offset || cs21Offset ) {
-			Com_Printf( "[CG init] masking cs20/cs21 for compatibility test: cs20='%s' cs21='%s'\n",
-				cs20, cs21 );
-		}
-		gs->stringOffsets[20] = 0;
-		gs->stringOffsets[21] = 0;
-		++compatMaskCount;
-	}
 }
 
 static qboolean CL_GetSnapshot_wrapper( int snapshotNumber, snapshot_t *snapshot ) {
@@ -2253,7 +2688,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	// [118] G2_GetGhoul2InfoByHandle
 	import.G2_GetGhoul2InfoByHandle   = CG_G2_GetGhoul2InfoByHandle;
 	// [119] G2API_SetGhoul2ModelIndexes
-	import.G2API_SetGhoul2ModelIndexes = CG_G2API_SetGhoul2ModelIndexes;
+	((void **)&import)[119] = (void *)CG_G2API_SetGhoul2ModelIndexes;
 	// [120] G2API_ReRegisterModels
 	import.G2API_ReRegisterModels     = CG_G2API_ReRegisterModels;
 	// [124] RE_MarkFragments
@@ -2379,18 +2814,25 @@ qboolean CL_InitSOF2CGame( void ) {
 		slots[61] = (void *)CG_UI_MenuReset;                 // [61] UI_MenuReset ← verified
 		slots[62] = (void *)CG_UI_SetInfoScreenText;         // [62] UI_SetInfoScreenText ← verified
 
-		// --- Slots 105-108: unresolved retail helpers ---
-		// [105]/[106] now bridge to a non-null interface object so retail
-		// object+0x548 virtual dispatch stays alive.
-		slots[105] = (void *)CG_SOF2_Import105_Bridge;
-		slots[106] = (void *)CG_SOF2_Import106_Bridge;
+		// --- GenericParser2 slots 105, 106, 108 ---
+		// Retail sof2.exe exposes GP_GetBaseParseGroup / GP_GetSubGroups / GP_GetNext.
+		// The known-good character reference pass also used these signatures here.
+		slots[105] = (void *)CG_GP_GetBaseParseGroup;
+		slots[106] = (void *)CG_GP_GetSubGroups;
 		slots[107] = (void *)CG_SOF2_Import107_Trace;
-		slots[108] = (void *)CG_SOF2_Import108_Trace;
+		slots[108] = (void *)CG_GP_GetNext;
 
 		// --- Slot 116: G2_InitWraithSurfaceMap ---
 		// CG_InitWraith calls this with (void**) expecting qboolean.
 		// Must return CWraithStub* — the DLL calls through its 78-entry vtable.
 		slots[116] = (void *)CG_G2_InitWraithSurfaceMap;       // [116] G2_InitWraithSurfaceMap ← verified CRASH FIX
+		slots[117] = (void *)CG_G2API_HaveWeGhoul2Models;      // [117] G2API_HaveWeGhoul2Models
+		slots[118] = (void *)CG_G2_GetGhoul2InfoByHandle;      // [118] G2_GetGhoul2InfoByHandle
+		slots[119] = (void *)CG_G2API_SetGhoul2ModelIndexes;   // [119] G2API_SetGhoul2ModelIndexes
+		slots[120] = (void *)CG_G2API_ReRegisterModels;        // [120] G2API_ReRegisterModels
+		slots[121] = (void *)CG_G2API_GetBoltMatrix;           // [121] G2API_GetBoltMatrix
+		slots[122] = (void *)CG_G2API_SetBoneAnglesOffset;     // [122] G2API_SetBoneAnglesOffset
+		slots[123] = (void *)re.G2API_CleanGhoul2Models;       // [123] G2API_CleanGhoul2Models
 
 		// --- Sound / scene crossover 78-82 ---
 		// Retail cgame uses slot 81 from CG_DrawInformation as the primary
@@ -3140,6 +3582,7 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 
 	static int snapshotInterestingSummaryCount = 0;
 	static int snapshotInterestingEntityLogCount = 0;
+	static int snapshotPlayerLikeLogCount = 0;
 	if ( snapshotInterestingSummaryCount < 8 ) {
 		int moverCount = 0;
 		int modeledCount = 0;
@@ -3167,20 +3610,58 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 
 			if ( snapshotInterestingEntityLogCount < 96 && ( isMover || hasModel || solidBmodel ) ) {
 				Com_Printf(
-					"[SNAP interesting] snap=%d idx=%d num=%d type=%d model=%d model2=%d solid=0x%x flags=0x%x event=%d client=%d weapon=%d skin=%d\n",
+					"[SNAP interesting] snap=%d idx=%d num=%d type=%d model=%d('%s') model2=%d('%s') solid=0x%x flags=0x%x event=%d client=%d weapon=%d skin=%d npcType=%d team=%d bolt=%d boltTo=%d soundSet=%d\n",
 					snapshotNumber,
 					i,
 					ent->number,
 					ent->eType,
 					ent->modelindex,
+					CL_SOF2_ModelNameForBaseline( ent->modelindex ),
 					ent->modelindex2,
+					CL_SOF2_ModelNameForBaseline( ent->modelindex2 ),
 					ent->solid,
 					ent->eFlags,
 					ent->event,
 					ent->clientNum,
 					ent->weapon,
-					ent->skinIndex );
+					ent->skinIndex,
+					ent->npcType,
+					ent->teamNum,
+					ent->boltIndex,
+					ent->boltToPlayer,
+					ent->soundSetIndex );
 				++snapshotInterestingEntityLogCount;
+			}
+
+			if ( snapshotPlayerLikeLogCount < 160 &&
+				( ent->eType == ET_PLAYER ||
+				  ent->clientNum != 0 ||
+				  ent->weapon != 0 ||
+				  ent->npcType != 0 ||
+				  ent->teamNum != 0 ) ) {
+				Com_Printf(
+					"[SNAP playerlike] snap=%d idx=%d num=%d type=%d model=%d('%s') model2=%d('%s') solid=0x%x flags=0x%x client=%d weapon=%d skin=%d npcType=%d team=%d bolt=%d boltTo=%d soundSet=%d event=%d parm=%d\n",
+					snapshotNumber,
+					i,
+					ent->number,
+					ent->eType,
+					ent->modelindex,
+					CL_SOF2_ModelNameForBaseline( ent->modelindex ),
+					ent->modelindex2,
+					CL_SOF2_ModelNameForBaseline( ent->modelindex2 ),
+					ent->solid,
+					ent->eFlags,
+					ent->clientNum,
+					ent->weapon,
+					ent->skinIndex,
+					ent->npcType,
+					ent->teamNum,
+					ent->boltIndex,
+					ent->boltToPlayer,
+					ent->soundSetIndex,
+					ent->event,
+					ent->eventParm );
+				++snapshotPlayerLikeLogCount;
 			}
 		}
 

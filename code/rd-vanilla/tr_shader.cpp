@@ -1441,11 +1441,8 @@ static qboolean ParseStage( shaderStage_t *stage, const char **text )
 				blendDstBits = NameToDstBlendMode( token );
 			}
 
-			// clear depth mask for blended surfaces, but not for GL_ONE GL_ZERO
-			// which is effectively opaque (src*1 + dst*0 = src) and needs depth write
-			// to avoid Z-fighting and alternate-frame flashing on alpha-tested foliage
-			if ( !depthMaskExplicit &&
-				!( blendSrcBits == GLS_SRCBLEND_ONE && blendDstBits == GLS_DSTBLEND_ZERO ) )
+			// clear depth mask for blended surfaces
+			if ( !depthMaskExplicit )
 			{
 				depthMaskBits = 0;
 			}

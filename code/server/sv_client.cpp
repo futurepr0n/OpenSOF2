@@ -824,6 +824,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	static int startupThinkLogs = 0;
 	static int sof2MoveLogCount = 0;
 	static int sof2OriginLogCount = 0;
+	static qboolean s_useCompatLatched[MAX_CLIENTS];
 	const qboolean sof2VerboseSvLogs = qfalse;
 	const qboolean sof2VerboseGuardLogs = qfalse;
 	const int clientNum = (int)(cl - svs.clients);
@@ -850,8 +851,10 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	}
 
 	if ( cl->state != CS_ACTIVE ) {
+		SV_SOF2SuppressUseTriggers( qfalse );
 		return;		// may have been kicked during the last usercmd
 	}
+	SV_SOF2SuppressUseTriggers( ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) ? qtrue : qfalse );
 	if ( sof2VerboseSvLogs && startupThinkLogs < 8 && ent ) {
 		playerState_t *ps = SV_GameClientNum( clientNum );
 		Com_Printf(
@@ -1270,9 +1273,17 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 		}
 	}
 
-	if ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) {
-		SV_SOF2CompatDispatchUse( clientNum, ent, cmd );
+	if ( clientNum >= 0 && clientNum < MAX_CLIENTS ) {
+		if ( cmd->buttons & BUTTON_USE ) {
+			if ( clientNum == 0 && !s_useCompatLatched[clientNum] ) {
+				SV_SOF2CompatDispatchUse( clientNum, ent, cmd );
+			}
+			s_useCompatLatched[clientNum] = qtrue;
+		} else {
+			s_useCompatLatched[clientNum] = qfalse;
+		}
 	}
+	SV_SOF2SuppressUseTriggers( qfalse );
 
 	// Fix M (post-think): clear camera entity active flag AFTER ClientThink.
 	// ICARUS scripts re-set the camera flag during ClientThink (it runs inside G_ClientThink).

@@ -320,6 +320,7 @@ int SV_AreaEntities( const vec3_t mins, const vec3_t maxs, gentity_t **elist, in
 // to be returned that doesn't actually intersect the area on an exact
 // test.
 // returns the number of pointers filled in
+void SV_SOF2SuppressUseTriggers( qboolean suppress );
 // The world entity is never returned in this list.
 
 

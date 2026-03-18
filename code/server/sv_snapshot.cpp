@@ -26,6 +26,9 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "../client/vmachine.h"
 #include "server.h"
 
+// SOF2: entity pointer table accessor declared in sv_game.cpp
+extern void SV_GetGEntityTable( void ***outTable, int *outCount );
+
 /*
 =============================================================================
 
@@ -686,6 +689,49 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		}
 	}
 	// SOF2: no serverViewOrg in playerState_t — skip copy
+
+	// One-time entity dump per map load: trajectory + ghoul2 data for all linked entities.
+	// Writes to Debug/entity_dump.txt for diagnosing ghost rotation and invisible NPCs.
+	{
+		static int dumpServerId = -1;
+		if ( dumpServerId != sv.serverId ) {
+			dumpServerId = sv.serverId;
+			void **tbl = NULL; int numEnts = 0;
+			SV_GetGEntityTable( &tbl, &numEnts );
+			FILE *df = fopen( "entity_dump.txt", "w" );
+			if ( df ) {
+				if ( tbl && numEnts > 0 ) {
+					fprintf( df, "=== entity dump serverId=%d numEnts=%d ===\n", sv.serverId, numEnts );
+					for ( int ei = 0; ei < numEnts; ++ei ) {
+						void *ep = tbl[ei];
+						if ( !ep ) continue;
+						const byte linked = *(const byte *)((const byte *)ep + 0x108);
+						if ( !linked ) continue;  // skip unlinked
+						const entityState_t *es = (const entityState_t *)((const byte *)ep + 8);
+						const int svf  = *(const int *)((const byte *)ep + 0x114);
+						// Log entities with model, ghoul2 handle, or non-stationary trajectory
+						const int hasMdl   = es->modelindex || es->soundSetIndex;
+						const int hasTraj  = (es->pos.trType != TR_STATIONARY) || (es->apos.trType != TR_STATIONARY);
+						if ( !hasMdl && !hasTraj ) continue;
+						fprintf( df,
+							"ei=%d et=%d ef=0x%x svf=0x%x mdl=%d g2=%d"
+							" pos.tr=%d base=(%.1f,%.1f,%.1f) delta=(%.3f,%.3f,%.3f)"
+							" apos.tr=%d base=(%.1f,%.1f,%.1f) delta=(%.3f,%.3f,%.3f)\n",
+							ei, es->eType, es->eFlags, svf,
+							es->modelindex, es->soundSetIndex,
+							(int)es->pos.trType,
+							es->pos.trBase[0], es->pos.trBase[1], es->pos.trBase[2],
+							es->pos.trDelta[0], es->pos.trDelta[1], es->pos.trDelta[2],
+							(int)es->apos.trType,
+							es->apos.trBase[0], es->apos.trBase[1], es->apos.trBase[2],
+							es->apos.trDelta[0], es->apos.trDelta[1], es->apos.trDelta[2] );
+					}
+					fprintf( df, "=== end dump ===\n" );
+				}
+				fclose( df );
+			}
+		}
+	}
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints

@@ -1829,11 +1829,24 @@ void G2API_SetGhoul2ModelIndexes(CGhoul2Info_v &ghoul2, qhandle_t *modelList, qh
 {
 	G2ERROR(ghoul2.IsValid(),"Invalid ghlInfo");
 	int i;
+	if ( !skinList ) {
+		// SOF2 retail cgame passes a single handle table through slot 119.
+		// OpenJK's renderer-side API split this into modelList/skinList, but the
+		// live SOF2 path currently only provides the one table. Use it as the
+		// skin lookup source instead of dereferencing NULL and aborting character
+		// setup before any Ghoul2 entities reach the scene.
+		skinList = modelList;
+	}
 	for (i=0; i<ghoul2.size(); i++)
 	{
 		if (ghoul2[i].mModelindex != -1)
 		{
-			ghoul2[i].mSkin = skinList[ghoul2[i].mCustomSkin];
+			if ( skinList ) {
+				ghoul2[i].mSkin = skinList[ghoul2[i].mCustomSkin];
+			}
+			else {
+				ghoul2[i].mSkin = ghoul2[i].mCustomSkin;
+			}
 		}
 	}
 }
