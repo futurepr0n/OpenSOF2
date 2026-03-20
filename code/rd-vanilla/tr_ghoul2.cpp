@@ -741,7 +741,7 @@ R_ACullModel
 =============
 */
 static int R_GCullModel( trRefEntity_t *ent ) {
-	if ( ent->e.renderfx & RF_NODEPTH ) {
+	if ( ent->e.renderfx & RF_SOF2_DEBUG_NOCULL ) {
 		return CULL_IN;
 	}
 

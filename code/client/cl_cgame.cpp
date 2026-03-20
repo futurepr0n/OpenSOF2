@@ -606,7 +606,7 @@ static void CG_DebugAddCharacterProbe( const refdef_t *refdef ) {
 		ent.customSkin = probe->skin;
 		ent.renderfx = RF_NOSHADOW;
 		if ( s_sof2DebugCharacterProbeNoCull && s_sof2DebugCharacterProbeNoCull->integer ) {
-			ent.renderfx |= RF_NODEPTH;
+			ent.renderfx |= RF_SOF2_DEBUG_NOCULL;
 		}
 
 		VectorCopy( probe->origin, ent.origin );
@@ -644,7 +644,7 @@ static void CG_DebugAddCharacterProbe( const refdef_t *refdef ) {
 		ent.customSkin = probe->skin;
 		ent.renderfx = RF_NOSHADOW;
 		if ( s_sof2DebugCharacterProbeNoCull && s_sof2DebugCharacterProbeNoCull->integer ) {
-			ent.renderfx |= RF_NODEPTH;
+			ent.renderfx |= RF_SOF2_DEBUG_NOCULL;
 		}
 
 		VectorMA( refdef->vieworg, 112.0f, refdef->viewaxis[0], ent.origin );
@@ -5033,7 +5033,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		re.AddLightToScene( (const float *) VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case CG_R_RENDERSCENE:
-		re.RenderScene( (const refdef_t *) VMA(1) );
+		CG_SubmitSOF2Refdef( (refdef_t *) VMA(1) );
 		return 0;
 	case CG_R_SETCOLOR:
 		re.SetColor( (const float *) VMA(1) );
@@ -5595,6 +5595,7 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 				++fallbackReplayLogCount;
 			}
 		}
+		CG_DebugAddCharacterProbe( &s_lastGoodRefdef );
 		re.RenderScene( &s_lastGoodRefdef );
 	}
 }
