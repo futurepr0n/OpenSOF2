@@ -654,10 +654,10 @@ void SV_SOF2SuppressUseTriggers( qboolean suppress ) {
 		sv_sof2SuppressUseTriggersUntil = sv.time + 2000;
 		return;
 	}
-
-	if ( sv.time >= sv_sof2SuppressUseTriggersUntil ) {
-		sv_sof2SuppressUseTriggers = qfalse;
-	}
+	// Always clear immediately — the timeout was preventing legitimate trigger
+	// interactions for up to 2 seconds after a single use action.
+	sv_sof2SuppressUseTriggers = qfalse;
+	sv_sof2SuppressUseTriggersUntil = 0;
 }
 
 static qboolean SV_ShouldLogTouchDebug( void ) {
@@ -2497,7 +2497,7 @@ struct SOF2EntityGhoul2Entry {
 	void *entityData;  // entityState_t* (ghoul2 address - 0xe4)
 	int   handle;
 };
-static const int SOF2_ENT_GHOUL2_MAX = 128;
+static const int SOF2_ENT_GHOUL2_MAX = MAX_GENTITIES; // must match sv_numGEntities capacity
 static SOF2EntityGhoul2Entry s_entityGhoul2Map[SOF2_ENT_GHOUL2_MAX];
 static int s_entityGhoul2Count = 0;
 
@@ -2514,6 +2514,9 @@ static void SOF2_EntGhoul2_Store( void *ghoul2Ptr, int handle ) {
 		s_entityGhoul2Map[s_entityGhoul2Count].entityData = entityData;
 		s_entityGhoul2Map[s_entityGhoul2Count].handle     = handle;
 		++s_entityGhoul2Count;
+	} else {
+		Com_Printf( "WARNING: SOF2_EntGhoul2_Store: table full (%d entries) — entity will not appear in snapshots\n",
+		            SOF2_ENT_GHOUL2_MAX );
 	}
 }
 

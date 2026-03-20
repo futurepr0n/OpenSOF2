@@ -741,6 +741,9 @@ R_ACullModel
 =============
 */
 static int R_GCullModel( trRefEntity_t *ent ) {
+	if ( ent->e.renderfx & RF_NODEPTH ) {
+		return CULL_IN;
+	}
 
 	// scale the radius if need be
 	float largestScale = ent->e.modelScale[0];
@@ -2235,6 +2238,99 @@ void G2API_SetSurfaceOnOffFromSkin (CGhoul2Info *ghlInfo, qhandle_t renderSkin)
 	}
 }
 
+static const shader_t *R_FindSOF2SkinShaderByName( const skin_t *skin, const char *name ) {
+	int j;
+
+	if ( !skin || !name || !name[0] ) {
+		return NULL;
+	}
+
+	for ( j = 0; j < skin->numSurfaces; j++ ) {
+		if ( !strcmp( skin->surfaces[j]->name, name ) ) {
+			return skin->surfaces[j]->shader;
+		}
+	}
+
+	return NULL;
+}
+
+static qboolean R_SOF2SurfaceStartsWith( const char *surfaceName, const char *prefix ) {
+	return ( surfaceName && prefix && !Q_stricmpn( surfaceName, prefix, (int)strlen( prefix ) ) ) ? qtrue : qfalse;
+}
+
+static const shader_t *R_FindSOF2SkinShaderFallback( const skin_t *skin, const char *surfaceName, const char **matchedAliasOut ) {
+	const char *matchedAlias = NULL;
+	const shader_t *shader = NULL;
+
+	if ( matchedAliasOut ) {
+		*matchedAliasOut = NULL;
+	}
+	if ( !skin || !surfaceName || !surfaceName[0] ) {
+		return NULL;
+	}
+
+	if ( strstr( surfaceName, "hood" ) ) {
+		matchedAlias = "hood";
+	}
+	else if ( strstr( surfaceName, "backpack" ) ) {
+		matchedAlias = "backpack_lrg";
+	}
+	else if ( strstr( surfaceName, "scarf" ) ) {
+		matchedAlias = "scarf";
+	}
+	else if ( strstr( surfaceName, "helmet" ) || strstr( surfaceName, "chin_strap" ) ) {
+		matchedAlias = "helmet_chin_strap";
+	}
+	else if ( strstr( surfaceName, "cap" ) || strstr( surfaceName, "hat" ) ) {
+		matchedAlias = "caps";
+	}
+	else if ( R_SOF2SurfaceStartsWith( surfaceName, "arm_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "hand_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "fingers_" ) ) {
+		matchedAlias = "arms";
+	}
+	else if ( R_SOF2SurfaceStartsWith( surfaceName, "hip_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "leg_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "foot_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "torso_" ) ||
+			  strstr( surfaceName, "coat" ) ) {
+		matchedAlias = "body";
+	}
+	else if ( R_SOF2SurfaceStartsWith( surfaceName, "mouth_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "teeth_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "head_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "eyeball_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "ear_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "face" ) ) {
+		matchedAlias = "face";
+	}
+
+	if ( matchedAlias ) {
+		shader = R_FindSOF2SkinShaderByName( skin, matchedAlias );
+	}
+	if ( !shader && matchedAlias && !Q_stricmp( matchedAlias, "face" ) ) {
+		shader = R_FindSOF2SkinShaderByName( skin, "head" );
+		if ( !shader ) {
+			shader = R_FindSOF2SkinShaderByName( skin, "avmed" );
+		}
+		if ( !shader ) {
+			shader = R_FindSOF2SkinShaderByName( skin, "face_2sided" );
+		}
+	}
+	if ( !shader && matchedAlias && !Q_stricmp( matchedAlias, "body" ) ) {
+		shader = R_FindSOF2SkinShaderByName( skin, "body_2sided" );
+	}
+	if ( !shader && matchedAlias && !Q_stricmp( matchedAlias, "helmet_chin_strap" ) ) {
+		shader = R_FindSOF2SkinShaderByName( skin, "caps" );
+	}
+
+	if ( shader && matchedAliasOut ) {
+		*matchedAliasOut = matchedAlias;
+	}
+
+	return shader;
+}
+
 // set up each surface ready for rendering in the back end
 void RenderSurfaces(CRenderSurface &RS)
 {
@@ -2276,6 +2372,7 @@ void RenderSurfaces(CRenderSurface &RS)
 		{
 			int		j;
 			qboolean matchedSkinSurface = qfalse;
+			const char *matchedAlias = NULL;
 
 			// match the surface name to something in the skin file
 			shader = R_GetShaderByHandle( surfInfo->shaderIndex );	//tr.defaultShader;
@@ -2287,6 +2384,26 @@ void RenderSurfaces(CRenderSurface &RS)
 					shader = RS.skin->surfaces[j]->shader;
 					matchedSkinSurface = qtrue;
 					break;
+				}
+			}
+
+			if ( !matchedSkinSurface ) {
+				const shader_t *fallbackShader = R_FindSOF2SkinShaderFallback( RS.skin, surfInfo->name, &matchedAlias );
+				if ( fallbackShader ) {
+					shader = fallbackShader;
+					matchedSkinSurface = qtrue;
+
+					static int sof2SkinFallbackLogCount = 0;
+					if ( sof2SkinFallbackLogCount < 64 ) {
+						ri.Printf( PRINT_ALL,
+							"[SOF2 g2] skin fallback model='%s' surf='%s' alias='%s' shader='%s' skin='%s'\n",
+							RS.currentModel->name,
+							surfInfo->name,
+							matchedAlias ? matchedAlias : "<none>",
+							shader ? shader->name : "<null>",
+							RS.skin->name );
+						sof2SkinFallbackLogCount++;
+					}
 				}
 			}
 

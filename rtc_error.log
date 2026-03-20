@@ -634,3 +634,30 @@ Message: Run-Time Check Failure #0 - The value of ESP was not properly saved acr
 
 -----------------
 
+
+--- RTC ERROR ---
+Type: 1
+File: :0
+Module: E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe
+Message: Run-Time Check Failure #0 - The value of ESP was not properly saved across a function call.  This is usually a result of calling a function declared with one calling convention with a function pointer declared with a different calling convention.
+
+-----------------
+
+
+--- RTC ERROR ---
+Type: 1
+File: :0
+Module: E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe
+Message: Run-Time Check Failure #0 - The value of ESP was not properly saved across a function call.  This is usually a result of calling a function declared with one calling convention with a function pointer declared with a different calling convention.
+
+-----------------
+
+
+--- RTC ERROR ---
+Type: 1
+File: :0
+Module: E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe
+Message: Run-Time Check Failure #0 - The value of ESP was not properly saved across a function call.  This is usually a result of calling a function declared with one calling convention with a function pointer declared with a different calling convention.
+
+-----------------
+

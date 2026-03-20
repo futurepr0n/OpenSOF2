@@ -692,6 +692,7 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 
 	// One-time entity dump per map load: trajectory + ghoul2 data for all linked entities.
 	// Writes to Debug/entity_dump.txt for diagnosing ghost rotation and invisible NPCs.
+#ifdef _DEBUG
 	{
 		static int dumpServerId = -1;
 		if ( dumpServerId != sv.serverId ) {
@@ -732,6 +733,7 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 			}
 		}
 	}
+#endif // _DEBUG
 
 	// add all the entities directly visible to the eye, which
 	// may include portal entities that merge other viewpoints

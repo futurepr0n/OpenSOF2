@@ -291,6 +291,389 @@ static qboolean    s_lastGoodRefdefValid = qfalse;
 static refdef_t    s_firstSubmittedRefdef;
 static qboolean    s_firstSubmittedRefdefValid = qfalse;
 static int         s_sceneSubmitsThisFrame = 0;
+static cvar_t     *s_sof2DebugCharacterProbe = NULL;
+static cvar_t     *s_sof2DebugCharacterProbeFocus = NULL;
+static cvar_t     *s_sof2DebugCharacterProbeNoCull = NULL;
+static qboolean    s_sof2DebugCharacterProbeInit = qfalse;
+#define SOF2_DEBUG_NPC_PROBE_MAX 16
+typedef struct cg_debug_npc_probe_s {
+	qboolean valid;
+	char classname[64];
+	char setskin[64];
+	char skinPath[MAX_QPATH];
+	char modelPath[MAX_QPATH];
+	vec3_t origin;
+	vec3_t angles;
+	CGhoul2Info_v ghoul2;
+	qhandle_t model;
+	qhandle_t skin;
+} cg_debug_npc_probe_t;
+
+static cg_debug_npc_probe_t s_sof2DebugNpcProbes[SOF2_DEBUG_NPC_PROBE_MAX];
+static int        s_sof2DebugNpcProbeCount = 0;
+static char       s_sof2DebugNpcProbeMap[64];
+
+static void CG_DebugGetCurrentMapName( char *buffer, int bufferSize ) {
+	buffer[0] = '\0';
+	if ( cl.gameState.stringOffsets[ CS_SERVERINFO ] ) {
+		const char *serverInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
+		const char *mapName = Info_ValueForKey( serverInfo, "mapname" );
+		if ( mapName && mapName[0] ) {
+			Q_strncpyz( buffer, mapName, bufferSize );
+		}
+	}
+}
+
+static void CG_DebugParseVec3String( const char *text, vec3_t out ) {
+	VectorClear( out );
+	if ( text && text[0] ) {
+		sscanf( text, "%f %f %f", &out[0], &out[1], &out[2] );
+	}
+}
+
+static qboolean CG_DebugResolveSkinPath( const char *classname, const char *setskin, char *skinPath, int skinPathSize ) {
+	skinPath[0] = '\0';
+	if ( setskin && setskin[0] ) {
+		Com_sprintf( skinPath, skinPathSize, "models/characters/skins/%s.g2skin", setskin );
+		return qtrue;
+	}
+	if ( classname && classname[0] ) {
+		if ( strstr( classname, "Mullins_Young" ) ) {
+			Q_strncpyz( skinPath, "models/characters/skins/mullins_young.g2skin", skinPathSize );
+			return qtrue;
+		}
+		if ( strstr( classname, "Czech_Rain_Soldier" ) ) {
+			Q_strncpyz( skinPath, "models/characters/skins/rainsuit2.g2skin", skinPathSize );
+			return qtrue;
+		}
+		if ( strstr( classname, "Czech_Soldier" ) ) {
+			Q_strncpyz( skinPath, "models/characters/skins/czech_soldier_w1.g2skin", skinPathSize );
+			return qtrue;
+		}
+	}
+	return qfalse;
+}
+
+static qboolean CG_DebugResolveModelPathFromSkin( const char *skinPath, char *modelPath, int modelPathSize ) {
+	char *fileText = NULL;
+	const char *parse;
+	char family[MAX_QPATH];
+	qboolean inModelsBlock = qfalse;
+	long fileLen;
+
+	modelPath[0] = '\0';
+	family[0] = '\0';
+
+	fileLen = FS_ReadFile( skinPath, (void **)&fileText );
+	if ( fileLen <= 0 || !fileText ) {
+		return qfalse;
+	}
+
+	parse = fileText;
+	while ( 1 ) {
+		const char *token = COM_Parse( &parse );
+		if ( !token[0] ) {
+			break;
+		}
+		if ( !Q_stricmp( token, "models" ) ) {
+			inModelsBlock = qtrue;
+			continue;
+		}
+		if ( !inModelsBlock ) {
+			continue;
+		}
+		if ( token[0] == '}' ) {
+			if ( family[0] ) {
+				break;
+			}
+			continue;
+		}
+		if ( token[0] >= '0' && token[0] <= '9' ) {
+			token = COM_Parse( &parse );
+			if ( token[0] ) {
+				Q_strncpyz( family, token, sizeof( family ) );
+				break;
+			}
+		}
+	}
+
+	FS_FreeFile( fileText );
+
+	if ( !family[0] ) {
+		return qfalse;
+	}
+
+	Com_sprintf( modelPath, modelPathSize, "models/characters/%s/%s.glm", family, family );
+	return qtrue;
+}
+
+static void CG_DebugRegisterNpcProbe( const char *classname, const char *setskin, const vec3_t origin, const vec3_t angles ) {
+	cg_debug_npc_probe_t *probe;
+	int g2Result;
+
+	if ( s_sof2DebugNpcProbeCount >= SOF2_DEBUG_NPC_PROBE_MAX ) {
+		return;
+	}
+
+	probe = &s_sof2DebugNpcProbes[s_sof2DebugNpcProbeCount];
+	*probe = cg_debug_npc_probe_t();
+
+	Q_strncpyz( probe->classname, classname, sizeof( probe->classname ) );
+	Q_strncpyz( probe->setskin, setskin, sizeof( probe->setskin ) );
+	VectorCopy( origin, probe->origin );
+	VectorCopy( angles, probe->angles );
+
+	if ( !CG_DebugResolveSkinPath( classname, setskin, probe->skinPath, sizeof( probe->skinPath ) ) ) {
+		return;
+	}
+	if ( !CG_DebugResolveModelPathFromSkin( probe->skinPath, probe->modelPath, sizeof( probe->modelPath ) ) ) {
+		Com_Printf( "[G2NPCPROBE] failed to derive model from skin '%s' classname='%s'\n",
+			probe->skinPath, probe->classname );
+		return;
+	}
+
+	probe->model = re.RegisterModel( probe->modelPath );
+	probe->skin = re.RegisterSkin( probe->skinPath );
+	if ( !probe->model || !probe->skin ) {
+		Com_Printf( "[G2NPCPROBE] register failed classname='%s' model='%s'(%d) skin='%s'(%d)\n",
+			probe->classname, probe->modelPath, (int)probe->model, probe->skinPath, (int)probe->skin );
+		return;
+	}
+
+	g2Result = re.G2API_InitGhoul2Model(
+		probe->ghoul2,
+		probe->modelPath,
+		probe->model,
+		0,
+		0,
+		0,
+		0 );
+	if ( g2Result < 0 || probe->ghoul2.size() <= 0 ) {
+		Com_Printf( "[G2NPCPROBE] InitGhoul2Model failed classname='%s' model='%s' result=%d size=%d\n",
+			probe->classname, probe->modelPath, g2Result, (int)probe->ghoul2.size() );
+		return;
+	}
+
+	re.G2API_SetBoneAnim(
+		&probe->ghoul2[0],
+		"model_root",
+		0,
+		30,
+		BONE_ANIM_OVERRIDE_LOOP,
+		1.0f,
+		0,
+		-1,
+		150 );
+	re.G2API_SetSkin( &probe->ghoul2[0], probe->skin, probe->skin );
+
+	probe->valid = qtrue;
+	++s_sof2DebugNpcProbeCount;
+
+	if ( s_sof2DebugNpcProbeCount <= 16 ) {
+		Com_Printf(
+			"[G2NPCPROBE] #%d classname='%s' setskin='%s' model='%s' skin='%s' origin=(%.1f,%.1f,%.1f)\n",
+			s_sof2DebugNpcProbeCount,
+			probe->classname,
+			probe->setskin,
+			probe->modelPath,
+			probe->skinPath,
+			probe->origin[0], probe->origin[1], probe->origin[2] );
+	}
+}
+
+static void CG_DebugBuildNpcProbesForCurrentMap( void ) {
+	char mapName[64];
+	const char *parse;
+
+	if ( !s_sof2DebugCharacterProbeInit ) {
+		s_sof2DebugCharacterProbeInit = qtrue;
+		s_sof2DebugCharacterProbe = Cvar_Get( "sof2_debugCharacterProbe", "1", 0 );
+		s_sof2DebugCharacterProbeFocus = Cvar_Get( "sof2_debugCharacterProbeFocus", "0", 0 );
+		s_sof2DebugCharacterProbeNoCull = Cvar_Get( "sof2_debugCharacterProbeNoCull", "1", 0 );
+	}
+
+	if ( !s_sof2DebugCharacterProbe || !s_sof2DebugCharacterProbe->integer ) {
+		return;
+	}
+
+	CG_DebugGetCurrentMapName( mapName, sizeof( mapName ) );
+	if ( !mapName[0] ) {
+		return;
+	}
+	if ( s_sof2DebugNpcProbeMap[0] && !Q_stricmp( s_sof2DebugNpcProbeMap, mapName ) ) {
+		return;
+	}
+
+	Q_strncpyz( s_sof2DebugNpcProbeMap, mapName, sizeof( s_sof2DebugNpcProbeMap ) );
+	s_sof2DebugNpcProbeCount = 0;
+	parse = CM_EntityString();
+
+	while ( parse && parse[0] && s_sof2DebugNpcProbeCount < SOF2_DEBUG_NPC_PROBE_MAX ) {
+		const char *token = COM_Parse( &parse );
+		char classname[64];
+		char setskin[64];
+		vec3_t origin;
+		vec3_t angles;
+
+		if ( !token[0] ) {
+			break;
+		}
+		if ( token[0] != '{' ) {
+			continue;
+		}
+
+		classname[0] = '\0';
+		setskin[0] = '\0';
+		VectorClear( origin );
+		VectorClear( angles );
+
+		while ( 1 ) {
+			char key[MAX_TOKEN_CHARS];
+			token = COM_Parse( &parse );
+			if ( !token[0] || token[0] == '}' ) {
+				break;
+			}
+			Q_strncpyz( key, token, sizeof( key ) );
+			token = COM_Parse( &parse );
+			if ( !token[0] ) {
+				break;
+			}
+
+			if ( !Q_stricmp( key, "classname" ) ) {
+				Q_strncpyz( classname, token, sizeof( classname ) );
+			} else if ( !Q_stricmp( key, "setskin" ) ) {
+				Q_strncpyz( setskin, token, sizeof( setskin ) );
+			} else if ( !Q_stricmp( key, "origin" ) ) {
+				CG_DebugParseVec3String( token, origin );
+			} else if ( !Q_stricmp( key, "angles" ) ) {
+				CG_DebugParseVec3String( token, angles );
+			} else if ( !Q_stricmp( key, "angle" ) ) {
+				VectorClear( angles );
+				angles[YAW] = (float)atof( token );
+			}
+		}
+
+		if ( Q_stricmpn( classname, "NPC_", 4 ) == 0 ) {
+			CG_DebugRegisterNpcProbe( classname, setskin, origin, angles );
+		}
+	}
+}
+
+static void CG_DebugAddCharacterProbe( const refdef_t *refdef ) {
+	static int probeSubmitLogCount = 0;
+	static int probeFocusLogCount = 0;
+	int focusProbeIndex = -1;
+	float focusProbeDistSq = 0.0f;
+	qboolean allowFocusProbe = qfalse;
+
+	if ( !refdef ) {
+		return;
+	}
+	if ( cls.state != CA_ACTIVE || ( refdef->rdflags & RDF_NOWORLDMODEL ) ) {
+		return;
+	}
+
+	CG_DebugBuildNpcProbesForCurrentMap();
+	if ( !s_sof2DebugCharacterProbe || !s_sof2DebugCharacterProbe->integer ) {
+		return;
+	}
+	allowFocusProbe = ( s_sof2DebugCharacterProbeFocus && s_sof2DebugCharacterProbeFocus->integer ) ? qtrue : qfalse;
+
+	for ( int i = 0; i < s_sof2DebugNpcProbeCount; ++i ) {
+		cg_debug_npc_probe_t *probe = &s_sof2DebugNpcProbes[i];
+		refEntity_t ent;
+
+		if ( !probe->valid ) {
+			continue;
+		}
+
+		if ( allowFocusProbe ) {
+			vec3_t delta;
+			float distSq;
+
+			VectorSubtract( probe->origin, refdef->vieworg, delta );
+			distSq = DotProduct( delta, delta );
+			if ( focusProbeIndex < 0 || distSq < focusProbeDistSq ) {
+				focusProbeIndex = i;
+				focusProbeDistSq = distSq;
+			}
+		}
+
+		memset( &ent, 0, sizeof( ent ) );
+		ent.reType = RT_MODEL;
+		ent.hModel = probe->model;
+		ent.ghoul2 = &probe->ghoul2;
+		ent.customSkin = probe->skin;
+		ent.renderfx = RF_NOSHADOW;
+		if ( s_sof2DebugCharacterProbeNoCull && s_sof2DebugCharacterProbeNoCull->integer ) {
+			ent.renderfx |= RF_NODEPTH;
+		}
+
+		VectorCopy( probe->origin, ent.origin );
+		VectorCopy( probe->origin, ent.oldorigin );
+		VectorCopy( probe->origin, ent.lightingOrigin );
+		AnglesToAxis( probe->angles, ent.axis );
+		VectorCopy( probe->angles, ent.angles );
+
+		ent.modelScale[0] = 1.0f;
+		ent.modelScale[1] = 1.0f;
+		ent.modelScale[2] = 1.0f;
+
+		re.AddRefEntityToScene( &ent );
+
+		if ( probeSubmitLogCount < 24 ) {
+			Com_Printf(
+				"[G2NPCPROBE] submit #%d classname='%s' model=%d skin=%d org=(%.1f,%.1f,%.1f)\n",
+				probeSubmitLogCount + 1,
+				probe->classname,
+				(int)ent.hModel,
+				(int)ent.customSkin,
+				ent.origin[0], ent.origin[1], ent.origin[2] );
+			++probeSubmitLogCount;
+		}
+	}
+
+	if ( allowFocusProbe && focusProbeIndex >= 0 ) {
+		const cg_debug_npc_probe_t *probe = &s_sof2DebugNpcProbes[focusProbeIndex];
+		refEntity_t ent;
+
+		memset( &ent, 0, sizeof( ent ) );
+		ent.reType = RT_MODEL;
+		ent.hModel = probe->model;
+		ent.ghoul2 = (CGhoul2Info_v *)&probe->ghoul2;
+		ent.customSkin = probe->skin;
+		ent.renderfx = RF_NOSHADOW;
+		if ( s_sof2DebugCharacterProbeNoCull && s_sof2DebugCharacterProbeNoCull->integer ) {
+			ent.renderfx |= RF_NODEPTH;
+		}
+
+		VectorMA( refdef->vieworg, 112.0f, refdef->viewaxis[0], ent.origin );
+		VectorMA( ent.origin, 28.0f, refdef->viewaxis[1], ent.origin );
+		ent.origin[2] -= 52.0f;
+		VectorCopy( ent.origin, ent.oldorigin );
+		VectorCopy( ent.origin, ent.lightingOrigin );
+		AnglesToAxis( probe->angles, ent.axis );
+		VectorCopy( probe->angles, ent.angles );
+		ent.modelScale[0] = 1.0f;
+		ent.modelScale[1] = 1.0f;
+		ent.modelScale[2] = 1.0f;
+
+		re.AddRefEntityToScene( &ent );
+
+		if ( probeFocusLogCount < 12 ) {
+			Com_Printf(
+				"[G2NPCPROBE] focus #%d classname='%s' model=%d skin=%d worldOrg=(%.1f,%.1f,%.1f) drawOrg=(%.1f,%.1f,%.1f) dist=%.1f\n",
+				probeFocusLogCount + 1,
+				probe->classname,
+				(int)probe->model,
+				(int)probe->skin,
+				probe->origin[0], probe->origin[1], probe->origin[2],
+				ent.origin[0], ent.origin[1], ent.origin[2],
+				sqrtf( focusProbeDistSq ) );
+			++probeFocusLogCount;
+		}
+	}
+}
 
 static void CL_LogPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, const char *source ) {
 	if ( cls.state != CA_ACTIVE || !verts || numVerts <= 0 ) {
@@ -1402,6 +1785,8 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		}
 	}
 
+	CG_DebugAddCharacterProbe( localRefdef );
+
 	__try {
 		if ( !s_firstSubmittedRefdefValid ) {
 			s_firstSubmittedRefdef = *localRefdef;
@@ -1575,6 +1960,87 @@ static void CG_R_SetLightStyle( int index, float r, float g, float b ) {
 	int ib = (int)(b * 255.0f) & 0xFF;
 	int color = (ir) | (ig << 8) | (ib << 16);
 	re.SetLightStyle( index, color );
+}
+
+static qboolean CG_IsWeatherWhitespace( char c ) {
+	return ( c == ' ' || c == '\t' || c == '\r' || c == '\n' ) ? qtrue : qfalse;
+}
+
+static qboolean CG_IsKnownWorldEffectToken( const char *token ) {
+	static const char *const kValidTokens[] = {
+		"clear",
+		"freeze",
+		"zone",
+		"wind",
+		"constantwind",
+		"gustingwind",
+		"windzone",
+		"lightrain",
+		"rain",
+		"acidrain",
+		"heavyrain",
+		"snow",
+		"spacedust",
+		"sand",
+		"fog",
+		"heavyrainfog",
+		"light_fog",
+		"outsideshake",
+		"outsidepain",
+		"lightning",
+		"exec"
+	};
+
+	if ( !token || !token[0] ) {
+		return qfalse;
+	}
+
+	for ( size_t i = 0; i < ARRAY_LEN( kValidTokens ); ++i ) {
+		if ( !Q_stricmp( token, kValidTokens[i] ) ) {
+			return qtrue;
+		}
+	}
+
+	return qfalse;
+}
+
+static void CG_R_WorldEffectCommand_Filtered( const char *command ) {
+	char token[64];
+	int tokenLen = 0;
+	static int invalidLogCount = 0;
+	static int validLogCount = 0;
+	const char *cursor = command ? command : "";
+
+	while ( *cursor && CG_IsWeatherWhitespace( *cursor ) ) {
+		++cursor;
+	}
+
+	while ( cursor[tokenLen] &&
+		!CG_IsWeatherWhitespace( cursor[tokenLen] ) &&
+		tokenLen < (int)sizeof( token ) - 1 ) {
+		token[tokenLen] = cursor[tokenLen];
+		++tokenLen;
+	}
+	token[tokenLen] = '\0';
+
+	if ( !CG_IsKnownWorldEffectToken( token ) ) {
+		if ( invalidLogCount < 32 ) {
+			Com_Printf(
+				"[CG weather] suppressed invalid command: '%s' token='%s' caller=%p\n",
+				command ? command : "(null)",
+				token[0] ? token : "(empty)",
+				_ReturnAddress() );
+		}
+		++invalidLogCount;
+		return;
+	}
+
+	if ( validLogCount < 12 ) {
+		Com_Printf( "[CG weather] cmd='%s'\n", command ? command : "" );
+		++validLogCount;
+	}
+
+	re.WorldEffectCommand( command );
 }
 
 // ----- Slot 59: UI_LoadMenuData(menuData, category) -----
@@ -2744,7 +3210,7 @@ qboolean CL_InitSOF2CGame( void ) {
 	// [144] R_ModelBounds
 	import.R_ModelBounds              = re.ModelBounds;
 	// [145] R_WorldEffectCommand
-	import.R_WorldEffectCommand       = re.WorldEffectCommand;
+	import.R_WorldEffectCommand       = CG_R_WorldEffectCommand_Filtered;
 	// [146] R_GetModelBounds — stub
 
 	// [147] R_RegisterFont (SOF2 extra param)
@@ -2901,7 +3367,7 @@ qboolean CL_InitSOF2CGame( void ) {
 		// Verified via Ghidra xref analysis of cgamex86.dll.
 		slots[150] = (void *)CG_GetEntityToken;              // [150] GetEntityToken ← verified (CG_ParseSpawnVars)
 		// slots[151]: unknown, single xref from undefined code — leave sentinel
-		slots[152] = (void *)re.WorldEffectCommand;          // [152] RE_WorldEffectCommand ← verified (weather)
+		slots[152] = (void *)CG_R_WorldEffectCommand_Filtered; // [152] RE_WorldEffectCommand ← verified (weather)
 		slots[153] = (void *)CG_R_IsOutside;                 // [153] R_IsOutside ← verified (rain check)
 		slots[154] = (void *)CG_R_GetWindVector;             // [154] R_GetWindVector ← verified (particle wind)
 		// slots[155-156]: weather stubs (undefined callers) — leave sentinel
@@ -4665,7 +5131,7 @@ Ghoul2 Insert End
 		return 0;
 
 	case CG_R_WORLD_EFFECT_COMMAND:
-		re.WorldEffectCommand( (const char *) VMA(1) );
+		CG_R_WorldEffectCommand_Filtered( (const char *) VMA(1) );
 		return 0;
 
 	case CG_CIN_PLAYCINEMATIC:
@@ -5088,12 +5554,16 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 	s_firstSubmittedRefdefValid = qfalse;
 	s_sceneSubmitsThisFrame = 0;
 	__try {
+		// Retail SOF2 drives its main scene submission from DrawInformation.
+		// A local HUD experiment switched active gameplay over to DrawActiveFrame,
+		// but the current logs show that path reaching CA_ACTIVE with no scene
+		// submits at all. Keep the known-good retail path here.
 		cge->DrawInformation( timei );
 	} __except ( CG_LogDrawInformationException( GetExceptionInformation() ) ) {
 	}
 	s_cgRenderDepth--;
 
-	// Flicker fix: if DrawInformation crashed before submitting a scene (it called
+	// Fallback: if DrawInformation crashed before submitting a scene (it called
 	// ClearScene which wiped the buffer, but never called RenderScene), submit a
 	// fallback scene using the last known camera so the screen doesn't go blank.
 	// Camera-follow fix: update vieworg/viewaxis from current playerState so the
