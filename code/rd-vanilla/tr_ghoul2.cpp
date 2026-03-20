@@ -2261,6 +2261,7 @@ static qboolean R_SOF2SurfaceStartsWith( const char *surfaceName, const char *pr
 static const shader_t *R_FindSOF2SkinShaderFallback( const skin_t *skin, const char *surfaceName, const char **matchedAliasOut ) {
 	const char *matchedAlias = NULL;
 	const shader_t *shader = NULL;
+	const qboolean isFrontHead = ( strstr( surfaceName, "head_frnt_" ) != NULL ) ? qtrue : qfalse;
 
 	if ( matchedAliasOut ) {
 		*matchedAliasOut = NULL;
@@ -2296,22 +2297,48 @@ static const shader_t *R_FindSOF2SkinShaderFallback( const skin_t *skin, const c
 			  strstr( surfaceName, "coat" ) ) {
 		matchedAlias = "body";
 	}
-	else if ( R_SOF2SurfaceStartsWith( surfaceName, "mouth_" ) ||
+	else if ( strstr( surfaceName, "head_frnt_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "mouth_" ) ||
 			  R_SOF2SurfaceStartsWith( surfaceName, "teeth_" ) ||
-			  R_SOF2SurfaceStartsWith( surfaceName, "head_" ) ||
 			  R_SOF2SurfaceStartsWith( surfaceName, "eyeball_" ) ||
-			  R_SOF2SurfaceStartsWith( surfaceName, "ear_" ) ||
 			  R_SOF2SurfaceStartsWith( surfaceName, "face" ) ) {
 		matchedAlias = "face";
+	}
+	else if ( R_SOF2SurfaceStartsWith( surfaceName, "head_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "ear_" ) ) {
+		matchedAlias = "head";
 	}
 
 	if ( matchedAlias ) {
 		shader = R_FindSOF2SkinShaderByName( skin, matchedAlias );
 	}
 	if ( !shader && matchedAlias && !Q_stricmp( matchedAlias, "face" ) ) {
+		if ( isFrontHead ) {
+			shader = R_FindSOF2SkinShaderByName( skin, "face_2sided" );
+			if ( !shader ) {
+				shader = R_FindSOF2SkinShaderByName( skin, "head" );
+			}
+			if ( !shader ) {
+				shader = R_FindSOF2SkinShaderByName( skin, "avmed" );
+			}
+		}
+		else {
+			shader = R_FindSOF2SkinShaderByName( skin, "head" );
+			if ( !shader ) {
+				shader = R_FindSOF2SkinShaderByName( skin, "avmed" );
+			}
+			if ( !shader ) {
+				shader = R_FindSOF2SkinShaderByName( skin, "face_2sided" );
+			}
+		}
+	}
+	if ( !shader && matchedAlias && !Q_stricmp( matchedAlias, "head" ) ) {
 		shader = R_FindSOF2SkinShaderByName( skin, "head" );
 		if ( !shader ) {
 			shader = R_FindSOF2SkinShaderByName( skin, "avmed" );
+		}
+		if ( !shader ) {
+			shader = R_FindSOF2SkinShaderByName( skin, "face" );
 		}
 		if ( !shader ) {
 			shader = R_FindSOF2SkinShaderByName( skin, "face_2sided" );

@@ -11,6 +11,7 @@ Get SOF2 character models to appear in-map at their actual world positions, usin
 - SOF2 `.g2skin` material-group mapping is now partially working in the renderer.
 - Czech soldier / rain-soldier probes are visible in-world.
 - Mullins (`suit_long_coat`) is also reaching the renderer and skin fallback is active.
+- Mullins should be treated as the player-side model family reference, not as the desired visible NPC outcome for `pra2`.
 - This is still a debug probe path, not the real retail NPC gameplay/render path.
 
 ## What Was Added
@@ -36,6 +37,12 @@ Examples seen in `pra2`:
 - `NPC_Czech_Rain_Soldier_* -> models/characters/snow/snow.glm`
 - `NPC_Czech_Soldier -> models/characters/average_sleeves/average_sleeves.glm`
 
+Important interpretation:
+- `NPC_Mullins_Young` is still useful as a model/skin validation target in the probe path.
+- The actual gameplay goal remains:
+  - Mullins as the first-person player model path
+  - Czech/rain-soldier families as the visible world NPCs
+
 ### 2. Ghoul2 probe setup
 
 File:
@@ -46,7 +53,7 @@ Behavior:
 - Initializes Ghoul2 with `re.G2API_InitGhoul2Model(...)`.
 - Applies the selected skin with `re.G2API_SetSkin(...)`.
 - Starts a simple looping bone anim on `model_root`.
-- Submits the probe as a normal `refEntity_t` at the NPC’s world origin.
+- Submits the probe as a normal `refEntity_t` at the NPC's world origin.
 
 ### 3. SOF2 `.g2skin` surface fallback
 
@@ -70,7 +77,8 @@ Problem solved:
 Renderer fallback now maps:
 - lower body / torso / feet / coat -> `body`
 - arms / hands / fingers -> `arms`
-- face / mouth / teeth / head / eyes / ears -> `face`, then `head`, then `avmed`, then `face_2sided`
+- front-face surfaces -> `face`, then `face_2sided`, then scalp materials only as fallback
+- side/back head and ears -> `head`, then `avmed`, then facial materials only as last resort
 - hood -> `hood`
 - backpack -> `backpack_lrg`
 - scarf -> `scarf`
@@ -103,11 +111,11 @@ The visible NPCs are still part of a debug probe path:
 
 ## Current Problems Still Open
 
-### 1. Probe visibility / flicker
+### 1. Probe stability
 
 Observed:
-- probe characters can flicker in and out
-- recent pass replaced `RF_NODEPTH` abuse with a dedicated debug no-cull flag so they should stop rendering through walls while still skipping Ghoul2 early cull
+- the major flicker was stopped by injecting `CG_DebugAddCharacterProbe(&s_lastGoodRefdef)` on the fallback render path before `re.RenderScene(...)`
+- the probe path is still debug-only and must be kept stable while skin issues are resolved
 
 Files involved:
 - `code/client/cl_cgame.cpp`
@@ -127,7 +135,21 @@ Example:
 Interpretation:
 - the current alias table still needs additional mapping for `average_sleeves` neck/collar surfaces, likely to `body`, `scarf`, or another material group used by the Czech soldier skin.
 
-### 3. Real retail NPC path still not active
+### 3. Mullins front-face / scalp split
+
+Observed:
+- the side/back-of-head artifact is fixed when scalp surfaces use `head` / `avmed`
+- the front face can still drop out if `head_frnt_*` falls through to scalp materials too early
+
+Interpretation:
+- `head_frnt_*` should prefer facial materials first:
+  - `face`
+  - `face_2sided`
+- only then should it fall back to scalp materials:
+  - `head`
+  - `avmed`
+
+### 4. Real retail NPC path still not active
 
 The current visible result does **not** mean the retail NPC/player render path is fixed. It means:
 - model loading
@@ -156,15 +178,19 @@ From the recent `qconsole.log`:
 
 ## Recommended Next Steps
 
-1. Stabilize the probe render path.
-   - confirm the new dedicated no-cull flag removes “visible through walls”
-   - check whether flicker drops once depth testing is restored
+1. Keep the probe render path stable.
+   - preserve the user-confirmed fallback render-path probe injection that stopped the major flicker
+   - keep the dedicated no-cull flag limited to early Ghoul2 cull bypass, not depth disable
 
 2. Finish the `average_sleeves` skin alias table.
    - map `collar_l` / `collar_r`
    - inspect whether `backpack_lrg` / `scarf` should be applied more broadly
 
-3. Only after the probe path is visually stable:
+3. Finish the Mullins front-face / scalp split.
+   - keep `head_side_*` / `head_bck_*` on scalp materials
+   - keep `head_frnt_*` on facial materials
+
+4. Only after the probe path is visually stable:
    - return to the real retail NPC/player path
    - compare retail `cgamex86.dll` character submit behavior with the now-working probe setup
    - bridge the real player/NPC entities into the same successful Ghoul2 + skin setup
