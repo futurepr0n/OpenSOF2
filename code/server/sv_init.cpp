@@ -479,6 +479,16 @@ void SV_SpawnServer( const char *server, ForceReload_e eForceReload, qboolean bA
 	ge->ConnectNavs();  // SOF2: ConnectNavs(void) — no args
 	fprintf(stderr, "[DBG] SV_SpawnServer: ConnectNavs done\n");
 #endif
+	if ( ge->PostLoadInit ) {
+		fprintf(stderr, "[DBG] SV_SpawnServer: calling ge->PostLoadInit\n");
+		__try {
+			ge->PostLoadInit();
+		}
+		__except ( 1 ) {
+			Com_Printf("^3[SV] suppressed exception during ge->PostLoadInit()\n");
+		}
+		fprintf(stderr, "[DBG] SV_SpawnServer: PostLoadInit done\n");
+	}
 
 	// create a baseline for more efficient communications
 	fprintf(stderr, "[DBG] SV_SpawnServer: calling SV_CreateBaseline\n");

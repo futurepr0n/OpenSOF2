@@ -252,6 +252,111 @@ static int SV_SOF2CompatBrushModelNum( int modelIndex ) {
 	return atoi( name + 1 );
 }
 
+static int SV_SOF2CompatEntityNumFromPointer( gentity_t *ent ) {
+	if ( !ent ) {
+		return -1;
+	}
+
+	if ( SOF2_ENT_NUMBER( ent ) >= 0 && SOF2_ENT_NUMBER( ent ) < MAX_GENTITIES &&
+		SV_GentityNum( SOF2_ENT_NUMBER( ent ) ) == ent ) {
+		return SOF2_ENT_NUMBER( ent );
+	}
+
+	for ( int i = 0; i < MAX_GENTITIES; ++i ) {
+		if ( SV_GentityNum( i ) == ent ) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerEnt ) {
+	static byte s_touchCompatLatched[MAX_CLIENTS][MAX_GENTITIES];
+	static int s_touchCompatLogCount = 0;
+	gentity_t *nearby[64];
+	byte touchedThisFrame[MAX_GENTITIES];
+	playerState_t *ps;
+	vec3_t mins, maxs;
+	int count;
+
+	if ( !playerEnt || clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return;
+	}
+
+	ps = SV_GameClientNum( clientNum );
+	if ( !ps ) {
+		return;
+	}
+
+	memset( touchedThisFrame, 0, sizeof( touchedThisFrame ) );
+
+	mins[0] = ps->origin[0] - 15.0f;
+	mins[1] = ps->origin[1] - 15.0f;
+	mins[2] = ps->origin[2] - 46.0f;
+	maxs[0] = ps->origin[0] + 15.0f;
+	maxs[1] = ps->origin[1] + 15.0f;
+	maxs[2] = ps->origin[2] + 48.0f;
+
+	count = SV_AreaEntities( mins, maxs, nearby, ARRAY_LEN( nearby ) );
+	for ( int i = 0; i < count; ++i ) {
+		gentity_t *hit = nearby[i];
+		int entNum;
+		void **vtable;
+
+		if ( !hit || hit == playerEnt ) {
+			continue;
+		}
+		if ( !( SOF2_ENT_CONTENTS( hit ) & CONTENTS_TRIGGER ) || !SOF2_ENT_LINKED( hit ) ) {
+			continue;
+		}
+
+		entNum = SV_SOF2CompatEntityNumFromPointer( hit );
+		if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+			continue;
+		}
+
+		touchedThisFrame[entNum] = 1;
+		if ( s_touchCompatLatched[clientNum][entNum] ) {
+			continue;
+		}
+
+		vtable = *(void ***)hit;
+		if ( !vtable || !vtable[0x6c / sizeof( void * )] ) {
+			continue;
+		}
+
+		if ( s_touchCompatLogCount < 64 ) {
+			Com_Printf(
+				"[MOVE compat] touch #%d ent=%d model=%d('%s') solid=0x%X contents=0x%X\n",
+				s_touchCompatLogCount + 1,
+				entNum,
+				SOF2_ENT_MODELINDEX( hit ),
+				SV_SOF2CompatModelName( SOF2_ENT_MODELINDEX( hit ) ),
+				(unsigned int)SOF2_ENT_SOLID( hit ),
+				(unsigned int)SOF2_ENT_CONTENTS( hit ) );
+			++s_touchCompatLogCount;
+		}
+
+		__try {
+			( (sof2_touch_method_t)vtable[0x6c / sizeof( void * )] )( hit, playerEnt, playerEnt );
+			s_touchCompatLatched[clientNum][entNum] = 1;
+		} __except( EXCEPTION_EXECUTE_HANDLER ) {
+			static int s_touchCompatCrashLogCount = 0;
+			if ( s_touchCompatCrashLogCount < 8 ) {
+				Com_Printf( "^1[MOVE compat] touch call crashed for ent=%d\n", entNum );
+				++s_touchCompatCrashLogCount;
+			}
+		}
+	}
+
+	for ( int entNum = 0; entNum < MAX_GENTITIES; ++entNum ) {
+		if ( !touchedThisFrame[entNum] ) {
+			s_touchCompatLatched[clientNum][entNum] = 0;
+		}
+	}
+}
+
 static void SV_SOF2CompatDispatchUse( int clientNum, gentity_t *playerEnt, usercmd_t *cmd ) {
 	gentity_t *nearby[64];
 	gentity_t *useSource = NULL;
@@ -1281,6 +1386,9 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			s_useCompatLatched[clientNum] = qtrue;
 		} else {
 			s_useCompatLatched[clientNum] = qfalse;
+			if ( clientNum == 0 ) {
+				SV_SOF2CompatDispatchMoveTriggers( clientNum, ent );
+			}
 		}
 	}
 	SV_SOF2SuppressUseTriggers( qfalse );

@@ -407,6 +407,35 @@ static qboolean CG_DebugResolveModelPathFromSkin( const char *skinPath, char *mo
 	return qtrue;
 }
 
+static void CG_DebugPrimeProbeSurfaces( cg_debug_npc_probe_t *probe ) {
+	int hoodBefore, capsBefore, hoodAfter, capsAfter;
+
+	if ( !probe || probe->ghoul2.size() <= 0 ) {
+		return;
+	}
+	if ( !strstr( probe->modelPath, "models/characters/snow/snow.glm" ) ) {
+		return;
+	}
+
+	hoodBefore = re.G2API_GetSurfaceRenderStatus( &probe->ghoul2[0], "hood" );
+	capsBefore = re.G2API_GetSurfaceRenderStatus( &probe->ghoul2[0], "caps" );
+	re.G2API_SetSurfaceOnOff( &probe->ghoul2[0], "hood", 0 );
+	re.G2API_SetSurfaceOnOff( &probe->ghoul2[0], "caps", 0 );
+	hoodAfter = re.G2API_GetSurfaceRenderStatus( &probe->ghoul2[0], "hood" );
+	capsAfter = re.G2API_GetSurfaceRenderStatus( &probe->ghoul2[0], "caps" );
+
+	if ( s_sof2DebugNpcProbeCount < 16 ) {
+		Com_Printf(
+			"[G2NPCPROBE] rain surfaces classname='%s' hood=%d->%d caps=%d->%d skin='%s'\n",
+			probe->classname,
+			hoodBefore,
+			hoodAfter,
+			capsBefore,
+			capsAfter,
+			probe->skinPath );
+	}
+}
+
 static void CG_DebugRegisterNpcProbe( const char *classname, const char *setskin, const vec3_t origin, const vec3_t angles ) {
 	cg_debug_npc_probe_t *probe;
 	int g2Result;
@@ -465,6 +494,7 @@ static void CG_DebugRegisterNpcProbe( const char *classname, const char *setskin
 		-1,
 		150 );
 	re.G2API_SetSkin( &probe->ghoul2[0], probe->skin, probe->skin );
+	CG_DebugPrimeProbeSurfaces( probe );
 
 	probe->valid = qtrue;
 	++s_sof2DebugNpcProbeCount;
@@ -868,6 +898,15 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 	static int s_entityTokenEntityIndex = -1;
 	static qboolean s_entityTokenAwaitClassname = qfalse;
 	static qboolean s_entityTokenAwaitModel = qfalse;
+	static qboolean s_entityTokenAwaitTargetname = qfalse;
+	static qboolean s_entityTokenAwaitTarget = qfalse;
+	static qboolean s_entityTokenAwaitScriptTargetname = qfalse;
+	static qboolean s_entityTokenAwaitSpawnscript = qfalse;
+	static qboolean s_entityTokenAwaitUsescript = qfalse;
+	static qboolean s_entityTokenAwaitCount = qfalse;
+	static qboolean s_entityTokenAwaitWait = qfalse;
+	static qboolean s_entityTokenAwaitDelay = qfalse;
+	static char s_entityTokenClassname[128];
 
 	if ( !cl_entityParsePoint ) {
 		cl_entityParsePoint = CM_EntityString();
@@ -875,6 +914,15 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 		s_entityTokenEntityIndex = -1;
 		s_entityTokenAwaitClassname = qfalse;
 		s_entityTokenAwaitModel = qfalse;
+		s_entityTokenAwaitTargetname = qfalse;
+		s_entityTokenAwaitTarget = qfalse;
+		s_entityTokenAwaitScriptTargetname = qfalse;
+		s_entityTokenAwaitSpawnscript = qfalse;
+		s_entityTokenAwaitUsescript = qfalse;
+		s_entityTokenAwaitCount = qfalse;
+		s_entityTokenAwaitWait = qfalse;
+		s_entityTokenAwaitDelay = qfalse;
+		s_entityTokenClassname[0] = '\0';
 	}
 	const char *s = COM_Parse( &cl_entityParsePoint );
 	Q_strncpyz( buffer, s, bufferSize );
@@ -883,26 +931,100 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 		++s_entityTokenEntityIndex;
 		s_entityTokenAwaitClassname = qfalse;
 		s_entityTokenAwaitModel = qfalse;
-		if ( s_entityTokenLogCount < 48 ) {
+		s_entityTokenAwaitTargetname = qfalse;
+		s_entityTokenAwaitTarget = qfalse;
+		s_entityTokenAwaitScriptTargetname = qfalse;
+		s_entityTokenAwaitSpawnscript = qfalse;
+		s_entityTokenAwaitUsescript = qfalse;
+		s_entityTokenAwaitCount = qfalse;
+		s_entityTokenAwaitWait = qfalse;
+		s_entityTokenAwaitDelay = qfalse;
+		s_entityTokenClassname[0] = '\0';
+		if ( s_entityTokenLogCount < 96 ) {
 			Com_Printf( "[ENTITYSTR] begin #%d\n", s_entityTokenEntityIndex );
 			++s_entityTokenLogCount;
 		}
 	} else if ( s_entityTokenAwaitClassname ) {
-		if ( s_entityTokenLogCount < 48 ) {
+		Q_strncpyz( s_entityTokenClassname, s, sizeof( s_entityTokenClassname ) );
+		if ( s_entityTokenLogCount < 96 ) {
 			Com_Printf( "[ENTITYSTR] #%d classname='%s'\n", s_entityTokenEntityIndex, s );
 			++s_entityTokenLogCount;
 		}
 		s_entityTokenAwaitClassname = qfalse;
 	} else if ( s_entityTokenAwaitModel ) {
-		if ( s_entityTokenLogCount < 48 ) {
+		if ( s_entityTokenLogCount < 96 ) {
 			Com_Printf( "[ENTITYSTR] #%d model='%s'\n", s_entityTokenEntityIndex, s );
 			++s_entityTokenLogCount;
 		}
 		s_entityTokenAwaitModel = qfalse;
+	} else if ( s_entityTokenAwaitTargetname ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d targetname='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitTargetname = qfalse;
+	} else if ( s_entityTokenAwaitTarget ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d target='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitTarget = qfalse;
+	} else if ( s_entityTokenAwaitScriptTargetname ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d script_targetname='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitScriptTargetname = qfalse;
+	} else if ( s_entityTokenAwaitSpawnscript ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d spawnscript='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitSpawnscript = qfalse;
+	} else if ( s_entityTokenAwaitUsescript ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d usescript='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitUsescript = qfalse;
+	} else if ( s_entityTokenAwaitCount ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d count='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitCount = qfalse;
+	} else if ( s_entityTokenAwaitWait ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d wait='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitWait = qfalse;
+	} else if ( s_entityTokenAwaitDelay ) {
+		if ( s_entityTokenLogCount < 96 ) {
+			Com_Printf( "[ENTITYSTR] #%d delay='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitDelay = qfalse;
 	} else if ( !Q_stricmp( s, "classname" ) ) {
 		s_entityTokenAwaitClassname = qtrue;
 	} else if ( !Q_stricmp( s, "model" ) ) {
 		s_entityTokenAwaitModel = qtrue;
+	} else if ( !Q_stricmp( s, "targetname" ) ) {
+		s_entityTokenAwaitTargetname = qtrue;
+	} else if ( !Q_stricmp( s, "target" ) ) {
+		s_entityTokenAwaitTarget = qtrue;
+	} else if ( !Q_stricmp( s, "script_targetname" ) ) {
+		s_entityTokenAwaitScriptTargetname = qtrue;
+	} else if ( !Q_stricmp( s, "spawnscript" ) ) {
+		s_entityTokenAwaitSpawnscript = qtrue;
+	} else if ( !Q_stricmp( s, "usescript" ) ) {
+		s_entityTokenAwaitUsescript = qtrue;
+	} else if ( !Q_stricmp( s, "count" ) ) {
+		s_entityTokenAwaitCount = qtrue;
+	} else if ( !Q_stricmp( s, "wait" ) ) {
+		s_entityTokenAwaitWait = qtrue;
+	} else if ( !Q_stricmp( s, "delay" ) ) {
+		s_entityTokenAwaitDelay = qtrue;
 	}
 
 	if ( !cl_entityParsePoint && !s[0] ) {

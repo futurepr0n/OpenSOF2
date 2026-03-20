@@ -2388,6 +2388,23 @@ void RenderSurfaces(CRenderSurface &RS)
 		offFlags = surfOverride->offFlags;
 	}
 
+	if ( RS.currentModel->name &&
+		 !Q_stricmp( RS.currentModel->name, "models/characters/snow/snow.glm" ) )
+	{
+		static int snowSurfaceLogCount = 0;
+		if ( snowSurfaceLogCount < 64 )
+		{
+			ri.Printf( PRINT_ALL,
+				"[SOF2 snow] surf[%d]='%s' offFlags=0x%X shaderIndex=%d override=%d\n",
+				snowSurfaceLogCount,
+				surfInfo->name,
+				offFlags,
+				surfInfo->shaderIndex,
+				surfOverride ? 1 : 0 );
+			snowSurfaceLogCount++;
+		}
+	}
+
 	// if this surface is not off, add it to the shader render list
 	if (!offFlags)
 	{
