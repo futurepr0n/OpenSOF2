@@ -2319,6 +2319,37 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 
 		ent->client->ps.batteryCharge = 2500;
 
+		// Trace the player bbox down to the actual floor to prevent spawning embedded
+		// in geometry.  Without this, spawn points that lack the DROPTOFLOOR flag (spawnflags&2)
+		// place the player at entity_Z + 9, leaving the bbox bottom 15 units inside the floor.
+		// PM_GroundTrace then hits allsolid/startsolid, uses PM_AirMove instead of PM_WalkMove,
+		// and forward velocity is clipped — making W-key forward movement non-functional.
+		// Guard: DROPTOFLOOR spawn points are already traced correctly by SelectSpawnPoint.
+		if ( spawnPoint && !(spawnPoint->spawnflags & 2) )
+		{
+			trace_t floorTr;
+			vec3_t  floorStart, floorEnd;
+
+			VectorCopy( spawn_origin, floorStart );
+			floorStart[2] += 18.0f;   // start above to escape any embedded position
+			VectorCopy( spawn_origin, floorEnd );
+			floorEnd[2]   -= 256.0f;  // search 256 units down for the floor
+
+			gi.trace( &floorTr, floorStart, playerMins, playerMaxs, floorEnd,
+			          ENTITYNUM_NONE, MASK_PLAYERSOLID, (EG2_Collision)0, 0 );
+
+			Com_Printf( "[SPAWN] Floor trace: startsolid=%d allsolid=%d fraction=%.3f "
+			            "originZ %.1f -> %.1f\n",
+			            floorTr.startsolid, floorTr.allsolid, floorTr.fraction,
+			            spawn_origin[2], floorTr.endpos[2] );
+
+			if ( !floorTr.startsolid && !floorTr.allsolid && floorTr.fraction < 1.0f )
+			{
+				spawn_origin[2]  = floorTr.endpos[2];
+				spawn_origin[2] += 1.0f;  // 1-unit clearance against fp precision at contact
+			}
+		}
+
 		VectorCopy( spawn_origin, client->ps.origin );
 		VectorCopy( spawn_origin, ent->currentOrigin );
 
