@@ -1489,7 +1489,6 @@ qboolean	SV_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t
 	const float	*origin, *angles;
 	clipHandle_t	ch;
 	trace_t			trace;
-	static int s_entityContactCallLogCount = 0;
 
 	// check for exact collision
 	if ( !SV_SOF2_IsBrushModelEntity( gEnt ) ) {
@@ -1512,25 +1511,6 @@ qboolean	SV_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t
 	ch = SV_ClipHandleForEntity( gEnt );
 	CM_TransformedBoxTrace ( &trace, vec3_origin, vec3_origin, mins, maxs,
 		ch, -1, origin, angles );
-
-	if ( s_entityContactCallLogCount < 96 ) {
-		Com_Printf(
-			"[CONTACT70] #%d num=%d type=%d model=%d('%s') solid=0x%x contents=0x%x linked=%d bmodel=%d startsolid=%d reason=%d latched=%d origin=(%.1f,%.1f,%.1f)\n",
-			s_entityContactCallLogCount + 1,
-			SV_SOF2_EntitySlot( gEnt ),
-			SOF2_ENT_ETYPE( gEnt ),
-			SOF2_ENT_MODELINDEX( gEnt ),
-			SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( gEnt ) ),
-			SOF2_ENT_SOLID( gEnt ),
-			SOF2_ENT_CONTENTS( gEnt ),
-			SOF2_ENT_LINKED( gEnt ),
-			(int)SV_SOF2_IsBrushModelEntity( gEnt ),
-			(int)trace.startsolid,
-			sv_trace_log_reason,
-			(int)sv_trace_use_latched,
-			origin[0], origin[1], origin[2] );
-		++s_entityContactCallLogCount;
-	}
 
 	if ( SV_ShouldLogTouchDebug() ) {
 		static int s_useContactLogCount = 0;

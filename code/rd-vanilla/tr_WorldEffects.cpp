@@ -1633,16 +1633,6 @@ void RB_RenderWorldEffects(void)
 				underCeiling = true;
 			}
 			s_weatherViewIndoors = underCeiling;
-
-			// Diagnostic: print once per second so qconsole.log shows detection result
-			static int s_lastPrintTime = -9999;
-			if ( curTime - s_lastPrintTime > 1000 || curTime < s_lastPrintTime ) {
-				s_lastPrintTime = curTime;
-				ri.Printf( PRINT_ALL, "[WeatherIndoor] vieworg=(%.0f,%.0f,%.0f) indoors=%d svTrace=%s\n",
-				           backEnd.refdef.vieworg[0], backEnd.refdef.vieworg[1], backEnd.refdef.vieworg[2],
-				           (int)s_weatherViewIndoors,
-				           ri.SV_Trace ? "OK" : "NULL" );
-			}
 		}
 
 		if ( s_weatherViewIndoors ) {

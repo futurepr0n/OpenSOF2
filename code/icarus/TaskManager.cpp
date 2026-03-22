@@ -730,8 +730,6 @@ int	CTaskManager::Go( CIcarus* icarus )
 	//If there are tasks to complete, do so
 	if ( m_tasks.empty() == false )
 	{
-		icarus->GetGame()->DebugPrint( (IGameInterface::e_DebugPrintLevel)0, "[TM::Go] ownerID=%d tasks=%d\n", m_ownerID, (int)m_tasks.size() );
-
 		//Get the next task
 		task = PopTask( CSequence::POP_BACK );
 
