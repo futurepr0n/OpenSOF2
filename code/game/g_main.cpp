@@ -635,7 +635,7 @@ void G_InitCvars( void ) {
 	g_corpseRemovalTime = gi.cvar ( "g_corpseRemovalTime", "10", CVAR_ARCHIVE );//number of seconds bodies stick around for, at least... 0 = never go away
 	g_synchSplitAnims = gi.cvar ( "g_synchSplitAnims", "1", 0 );
 #ifndef FINAL_BUILD
-	g_AnimWarning = gi.cvar ( "g_AnimWarning", "1", 0 );
+	g_AnimWarning = gi.cvar ( "g_AnimWarning", "0", 0 );  // default off: SOF2 assets lack JK2 anim file sets
 #endif
 	g_noFootSlide = gi.cvar ( "g_noFootSlide", "1", 0 );
 	g_noFootSlideRunScale = gi.cvar ( "g_noFootSlideRunScale", "150.0", 0 );

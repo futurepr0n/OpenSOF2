@@ -45,7 +45,10 @@ intptr_t	VM_Call( int callnum, ... )
 
 		return cgvm.entryPoint( callnum,  args[0], args[1], args[2], args[3], args[4],  args[5],  args[6], args[7] );
 	}
-	return -1;
+	// No entry point — SOF2 uses GetCGameAPI, not vmMain dispatch.
+	// Return 0 (false) so callers skip camera-position lookups and fall back to
+	// the player-origin path, avoiding 0xCC-filled buffers from uninitialized memory.
+	return 0;
 }
 
 // The syscall mechanism relies on stack manipulation to get it's args.

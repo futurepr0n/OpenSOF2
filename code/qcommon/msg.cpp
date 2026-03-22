@@ -999,8 +999,8 @@ static const netField_t	playerStateFields[] =
 { PSF(groundEntityNum), GENTITYNUM_BITS },	// entry 19: offset 0x05C
 { PSF(legsTimer), 8 },				// entry 20: offset 0x060
 { PSF(torsoTimer), 12 },			// entry 21: offset 0x068
-{ PSF(legsAnim), 8 },				// entry 22: offset 0x064
-{ PSF(torsoAnim), 8 },				// entry 23: offset 0x06C
+{ PSF(legsAnim), 16 },				// entry 22: offset 0x064 (SOF2 anims go >255, need 16 bits)
+{ PSF(torsoAnim), 16 },				// entry 23: offset 0x06C (SOF2 anims go >255, need 16 bits)
 { PSF(movementDir), 4 },			// entry 24: offset 0x070
 { PSF(eFlags), 24 },				// entry 25: offset 0x074 (24 bits, not 16!)
 { PSF(eventSequence), 16 },			// entry 26: offset 0x078

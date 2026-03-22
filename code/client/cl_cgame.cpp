@@ -115,9 +115,19 @@ static void CL_CM_LoadMapWrapper( const char *mapname, int clientLoad, int *chec
 	CM_LoadMap( mapname, (qboolean)(clientLoad != 0), checksum, qfalse );
 }
 
-// slot 96: CL_GetEntityBaseline(entityNum, state*) — wraps CL_GetDefaultState
-static void CL_GetEntityBaseline_SOF2( int entityNum, entityState_t *state ) {
-	CL_GetDefaultState( entityNum, state );
+// slot 96: native SOF2 cgame uses this as an "is this entity an emplaced weapon?" check.
+// CG_BuildSpawnpointList calls it for every entity index 0-1023 and registers it in
+// cg_emplacedWeaponList if the return value (AL) is non-zero.  Our old void wrapper
+// inadvertently leaked CL_GetDefaultState's qboolean return in EAX, causing hundreds of
+// map entities to be falsely registered as emplaced weapons.  After ~25 seconds, once
+// enough centity lerpOrigins were populated, the emplaced-weapon loop in
+// CG_BuildEntityLists pushed cg_visEntitiesCount past the 256-slot cg_visEntities[]
+// array, causing CG_PointContents to dereference cg_visEntitiesCount (=0x106) as a
+// centity_t pointer → access violation at 0x3002DF0C.
+// FIX: OpenJK has no emplaced weapons.  Always return qfalse so cg_numEmplacedWeapons
+// stays 0 and the overflow never happens.
+static qboolean CL_GetEntityBaseline_SOF2( int /*entityNum*/, void * /*state*/ ) {
+	return qfalse;
 }
 
 // slot 102: CL_SetUserCmdValue(userCmdValue, sensitivityScale) — 2 args (no pitch/yaw override)
@@ -1898,8 +1908,14 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		}
 	}
 
+	// Only replay cached entities into a scene if no good scene has been submitted yet
+	// this frame. The native cgame often calls ClearScene+RenderScene twice per frame
+	// (once for the world, once for first-person weapons at a different FOV). If a valid
+	// first pass was already submitted we should NOT inject world entities into the
+	// second (weapon) pass — that would render geometry at the wrong FOV.
 	if ( cls.state == CA_ACTIVE &&
 		!( localRefdef->rdflags & RDF_NOWORLDMODEL ) &&
+		s_sceneSubmitsThisFrame == 0 &&
 		s_cgFrameRefEntityCount == 0 &&
 		s_cgLastRefEntityCount > 0 ) {
 		static int replayLogCount = 0;
@@ -3249,8 +3265,11 @@ qboolean CL_InitSOF2CGame( void ) {
 	import.CL_GetCurrentSnapshotNumber = CL_GetCurrentSnapshotNumber_wrapper;
 	// [ 95] CL_GetSnapshot
 	import.CL_GetSnapshot             = CL_GetSnapshot_wrapper;
-	// [ 96] CL_GetEntityBaseline
-	import.CL_GetEntityBaseline       = CL_GetEntityBaseline_SOF2;
+	// [ 96] Slot 96 is NOT CL_GetEntityBaseline in native SOF2 — it is a
+	// custom "is this entity an emplaced weapon?" query used by CG_BuildSpawnpointList.
+	// We stub it to return qfalse (cast needed: struct declares void return but
+	// native cgame checks AL, so we must control EAX via qboolean return).
+	import.CL_GetEntityBaseline       = reinterpret_cast<void (*)(int, entityState_t *)>((void *)CL_GetEntityBaseline_SOF2);
 	// [ 97] CL_GetServerCommand — int wrapper (engine fn returns qboolean)
 	import.CL_GetServerCommand        = CL_GetServerCommand_int;
 	// [ 98] CL_GetCurrentCmdNumber
@@ -3943,11 +3962,31 @@ static void CL_SOF2_SanitizeSnapshotPlayerState( int snapshotNumber, playerState
 	if ( stripCameraEvents ) {
 		CL_SOF2_StripRetailCameraEvent( "ps.external", snapshotNumber, ps->clientNum, -1, &ps->externalEvent, &ps->externalEventParm );
 	}
+	// Explicitly suppress glass events (0x0b–0x0e) from playerState just as we do for
+	// entity events. The native cgame converts ps->events[] to entity events internally,
+	// bypassing our entity-level filter. Glass events 0x0b–0x0e in OpenJK are JK2 fall/
+	// jump events that collide with SOF2's glass system; allowing them crashes CG_SmashGlass
+	// because the CCGlass physics interface pointer is never initialized in OpenJK mode.
+	{
+		unsigned int psRawExt = CL_SOF2_RawEvent( ps->externalEvent );
+		if ( psRawExt >= 0x0b && psRawExt <= 0x0e ) {
+			ps->externalEvent = 0;
+			ps->externalEventParm = 0;
+		}
+	}
 	for ( i = 0; i < MAX_PS_EVENTS; ++i ) {
 		CL_SOF2_SanitizeEventField( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
 		CL_SOF2_SanitizeRetailSoundEventParm( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
 		if ( stripCameraEvents ) {
 			CL_SOF2_StripRetailCameraEvent( "ps.event", snapshotNumber, ps->clientNum, i, &ps->events[i], &ps->eventParms[i] );
+		}
+		// Glass event suppression for playerState events (mirrors entity-level filter).
+		{
+			unsigned int psRawEv = CL_SOF2_RawEvent( ps->events[i] );
+			if ( psRawEv >= 0x0b && psRawEv <= 0x0e ) {
+				ps->events[i] = 0;
+				ps->eventParms[i] = 0;
+			}
 		}
 	}
 }
@@ -3977,7 +4016,13 @@ static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, en
 	// event encoded here will bypass the ent->event sanitization below and crash.
 	if ( ent->eType >= ET_EVENTS && ent->eType <= ( ET_EVENTS + EV_NUM_ENTITY_EVENTS ) ) {
 		unsigned int etypeEvent = (unsigned int)( ent->eType - ET_EVENTS );
-		if ( !CL_SOF2_IsKnownRetailEvent( etypeEvent ) ) {
+		// Glass events (0x0b–0x0e) encoded via eType must be cleared here, since the
+		// ent->event filter below never fires for eType-encoded events. These IDs
+		// collide with OpenJK's EV_FALL_MEDIUM/FAR/JUMP/ROLL and cause a null-ptr crash
+		// in CG_SmashGlass (CCGlass+0x10 is never initialized in OpenJK mode).
+		if ( etypeEvent >= 0x0b && etypeEvent <= 0x0e ) {
+			ent->eType = ET_GENERAL;
+		} else if ( !CL_SOF2_IsKnownRetailEvent( etypeEvent ) ) {
 			Com_DPrintf(
 				"[SNAP note] preserving unknown eType-event snap=%d idx=%d num=%d eType=%d etypeEv=%u\n",
 				snapshotNumber,
@@ -3999,6 +4044,19 @@ static void CL_SOF2_SanitizeSnapshotEntity( int snapshotNumber, int entIndex, en
 		CL_SOF2_StripRetailCameraEvent( "entity.event", snapshotNumber, ent ? ent->number : -1, entIndex, ent ? &ent->event : NULL, ent ? &ent->eventParm : NULL );
 	}
 	rawEvent = CL_SOF2_RawEvent( ent->event );
+
+	// Native SOF2 glass events 0x0b–0x0e (EV_SHOT_GLASS, EV_NPC_SHOT_GLASS,
+	// EV_SMASH_GLASS, EV_EXPLODE_GLASS) call into the CGlass physics system
+	// which requires an engine-provided interface pointer at CCGlass+0x10.
+	// In OpenJK mode this pointer is never initialized (NULL), causing a null
+	// vtable dereference crash inside CG_SmashGlass/CG_ShotGlass/CG_ExplodeGlass.
+	// These event IDs collide with OpenJK's EV_FALL_MEDIUM/FAR/JUMP/ROLL but
+	// the native cgame cannot handle those correctly anyway; clear them to avoid
+	// the crash.
+	if ( rawEvent >= 0x0b && rawEvent <= 0x0e ) {
+		ent->event = 0;
+		rawEvent = 0;
+	}
 
 	if ( rawEvent == 0 ) {
 		return;

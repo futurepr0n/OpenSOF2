@@ -1782,8 +1782,8 @@ void G_SetG2PlayerModel( gentity_t * const ent, const char *modelName, const cha
 		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, va("models/players/%s/model.glm", modelName), G_ModelIndex( va("models/players/%s/model.glm", modelName) ), NULL_HANDLE, NULL_HANDLE, 0, 0 );
 	}
 	if (ent->playerModel == -1)
-	{//no model available — warn but don't crash, player will be invisible
-		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: no fallback model available, continuing without model\n" );
+	{//no JK2 models available in SOF2 data — player will be invisible, but don't crash
+		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: no player model available (SOF2 has no JK2 models), continuing without model\n" );
 		return;
 	}
 
