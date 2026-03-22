@@ -780,8 +780,8 @@ static void copy_retail_gclient_to_current(
 
 	for (int i = 0; i < MAX_SABERS; ++i)
 	{
-		src.ps.saber[i].sg_export(
-			dst.ps.saber[i]);
+		// SOF2 port: sabers don't exist; direct struct copy suffices
+		::memcpy(&dst.ps.saber[i], &src.ps.saber[i], sizeof(saberInfo_t));
 	}
 
 	::memcpy(

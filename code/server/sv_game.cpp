@@ -647,6 +647,97 @@ static int sv_trace_log_reason = 0; // 1=movement, 2=use
 static qboolean sv_trace_use_latched = qfalse;
 static qboolean sv_sof2SuppressUseTriggers = qfalse;
 static int sv_sof2SuppressUseTriggersUntil = 0;
+static qboolean sv_sof2MoveTriggerFilterActive = qfalse;
+static int sv_sof2MoveTriggerFilterClient = -1;
+static byte sv_sof2MoveTriggerLatched[MAX_CLIENTS][MAX_GENTITIES];
+static int sv_sof2MoveTriggerReturnedAt[MAX_CLIENTS][MAX_GENTITIES];
+static qboolean sv_sof2UseTriggerFilterActive = qfalse;
+static int sv_sof2UseTriggerFilterClient = -1;
+static byte sv_sof2UseTriggerLatched[MAX_CLIENTS][MAX_GENTITIES];
+
+void SV_SOF2CompatBeginMoveTriggerFilter( int clientNum ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		sv_sof2MoveTriggerFilterActive = qfalse;
+		sv_sof2MoveTriggerFilterClient = -1;
+		return;
+	}
+
+	sv_sof2MoveTriggerFilterActive = qtrue;
+	sv_sof2MoveTriggerFilterClient = clientNum;
+}
+
+void SV_SOF2CompatEndMoveTriggerFilter( void ) {
+	sv_sof2MoveTriggerFilterActive = qfalse;
+	sv_sof2MoveTriggerFilterClient = -1;
+}
+
+void SV_SOF2CompatSetMoveTriggerLatched( int clientNum, int entNum, qboolean latched ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return;
+	}
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+		return;
+	}
+
+	sv_sof2MoveTriggerLatched[clientNum][entNum] = latched ? 1 : 0;
+}
+
+qboolean SV_SOF2CompatIsMoveTriggerLatched( int clientNum, int entNum ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return qfalse;
+	}
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+		return qfalse;
+	}
+
+	return sv_sof2MoveTriggerLatched[clientNum][entNum] ? qtrue : qfalse;
+}
+
+void SV_SOF2CompatBeginUseTriggerFilter( int clientNum ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		sv_sof2UseTriggerFilterActive = qfalse;
+		sv_sof2UseTriggerFilterClient = -1;
+		return;
+	}
+
+	sv_sof2UseTriggerFilterActive = qtrue;
+	sv_sof2UseTriggerFilterClient = clientNum;
+}
+
+void SV_SOF2CompatEndUseTriggerFilter( void ) {
+	sv_sof2UseTriggerFilterActive = qfalse;
+	sv_sof2UseTriggerFilterClient = -1;
+}
+
+void SV_SOF2CompatSetUseTriggerLatched( int clientNum, int entNum, qboolean latched ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return;
+	}
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+		return;
+	}
+
+	sv_sof2UseTriggerLatched[clientNum][entNum] = latched ? 1 : 0;
+}
+
+qboolean SV_SOF2CompatIsUseTriggerLatched( int clientNum, int entNum ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return qfalse;
+	}
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+		return qfalse;
+	}
+
+	return sv_sof2UseTriggerLatched[clientNum][entNum] ? qtrue : qfalse;
+}
+
+void SV_SOF2CompatClearUseTriggerLatches( int clientNum ) {
+	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
+		return;
+	}
+
+	memset( sv_sof2UseTriggerLatched[clientNum], 0, sizeof( sv_sof2UseTriggerLatched[clientNum] ) );
+}
 
 void SV_SOF2SuppressUseTriggers( qboolean suppress ) {
 	if ( suppress ) {
@@ -679,8 +770,12 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 	gentity_t *ptrBuf[MAX_GENTITIES];
 	int outCount = 0;
 	static int s_areaEntitiesCallLogCount = 0;
+	static int s_moveLatchSuppressLogCount = 0;
 	int suppressedBrushModelCount = 0;
 	int suppressedNonItemCount = 0;
+	int suppressedLatchedTriggerCount = 0;
+	int suppressedRepeatTriggerCount = 0;
+	int suppressedUseLatchedCount = 0;
 	const qboolean suppressUseTriggers =
 		( sv_sof2SuppressUseTriggers || ( sv_sof2SuppressUseTriggersUntil > sv.time ) ) ? qtrue : qfalse;
 	if ( maxcount > MAX_GENTITIES ) maxcount = MAX_GENTITIES;
@@ -695,6 +790,78 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 	// returned list directly into g_entityLookupTable with no validation.
 	for ( int i = 0; i < count; i++ ) {
 		if ( ptrBuf[i] ) {
+			const int entNum = SV_FindEntityNumByPointer( ptrBuf[i] );
+			const qboolean isTrigger = ( SOF2_ENT_CONTENTS( ptrBuf[i] ) & CONTENTS_TRIGGER ) ? qtrue : qfalse;
+
+			if ( sv_sof2UseTriggerFilterActive &&
+				sv_sof2UseTriggerFilterClient >= 0 &&
+				sv_sof2UseTriggerFilterClient < MAX_CLIENTS &&
+				entNum >= 0 &&
+				entNum < MAX_GENTITIES &&
+				isTrigger &&
+				sv_trace_log_reason == 2 &&
+				SV_SOF2CompatIsUseTriggerLatched( sv_sof2UseTriggerFilterClient, entNum ) ) {
+				++suppressedUseLatchedCount;
+				if ( s_moveLatchSuppressLogCount < 48 ) {
+					Com_Printf(
+						"[USE compat] suppress held trigger client=%d ent=%d model=%d('%s')\n",
+						sv_sof2UseTriggerFilterClient,
+						entNum,
+						SOF2_ENT_MODELINDEX( ptrBuf[i] ),
+						SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ptrBuf[i] ) ) );
+					++s_moveLatchSuppressLogCount;
+				}
+				continue;
+			}
+
+			if ( sv_sof2MoveTriggerFilterActive &&
+				sv_sof2MoveTriggerFilterClient >= 0 &&
+				sv_sof2MoveTriggerFilterClient < MAX_CLIENTS &&
+				entNum >= 0 &&
+				entNum < MAX_GENTITIES &&
+				isTrigger &&
+				sv_trace_log_reason == 1 &&
+				sv_sof2MoveTriggerReturnedAt[sv_sof2MoveTriggerFilterClient][entNum] == sv.time ) {
+				++suppressedRepeatTriggerCount;
+				if ( s_moveLatchSuppressLogCount < 48 ) {
+					Com_Printf(
+						"[MOVE compat] suppress duplicate trigger client=%d ent=%d model=%d('%s') time=%d\n",
+						sv_sof2MoveTriggerFilterClient,
+						entNum,
+						SOF2_ENT_MODELINDEX( ptrBuf[i] ),
+						SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ptrBuf[i] ) ),
+						sv.time );
+					++s_moveLatchSuppressLogCount;
+				}
+				continue;
+			}
+
+			// Suppress movement-latched triggers for ALL callers (including retail G_TouchTriggers).
+			// Use the active filter client if set; otherwise default to client 0 (SP always).
+			// This prevents entity re-firing every frame while the player stays in the trigger.
+			{
+				const int latchCheckClient = ( sv_sof2MoveTriggerFilterActive &&
+					sv_sof2MoveTriggerFilterClient >= 0 &&
+					sv_sof2MoveTriggerFilterClient < MAX_CLIENTS )
+					? sv_sof2MoveTriggerFilterClient
+					: 0;
+				if ( isTrigger &&
+					entNum >= 0 &&
+					entNum < MAX_GENTITIES &&
+					SV_SOF2CompatIsMoveTriggerLatched( latchCheckClient, entNum ) ) {
+					++suppressedLatchedTriggerCount;
+					if ( s_moveLatchSuppressLogCount < 48 ) {
+						Com_Printf(
+							"[MOVE compat] suppress latched trigger client=%d ent=%d model=%d('%s')\n",
+							latchCheckClient,
+							entNum,
+							SOF2_ENT_MODELINDEX( ptrBuf[i] ),
+							SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ptrBuf[i] ) ) );
+						++s_moveLatchSuppressLogCount;
+					}
+					continue;
+				}
+			}
 			if ( suppressUseTriggers &&
 				( SOF2_ENT_CONTENTS( ptrBuf[i] ) & CONTENTS_TRIGGER ) ) {
 				continue;
@@ -710,8 +877,46 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 				++suppressedBrushModelCount;
 				continue;
 			}
-			const int entNum = SV_FindEntityNumByPointer( ptrBuf[i] );
 			if ( entNum >= 0 && entNum < MAX_GENTITIES ) {
+				if ( sv_sof2MoveTriggerFilterActive &&
+					sv_sof2MoveTriggerFilterClient >= 0 &&
+					sv_sof2MoveTriggerFilterClient < MAX_CLIENTS &&
+					sv_trace_log_reason == 1 &&
+					isTrigger ) {
+					sv_sof2MoveTriggerReturnedAt[sv_sof2MoveTriggerFilterClient][entNum] = sv.time;
+					SV_SOF2CompatSetMoveTriggerLatched( sv_sof2MoveTriggerFilterClient, entNum, qtrue );
+					if ( s_moveLatchSuppressLogCount < 48 ) {
+						Com_Printf(
+							"[MOVE compat] latch retail trigger client=%d ent=%d model=%d('%s')\n",
+							sv_sof2MoveTriggerFilterClient,
+							entNum,
+							SOF2_ENT_MODELINDEX( ptrBuf[i] ),
+							SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ptrBuf[i] ) ) );
+							++s_moveLatchSuppressLogCount;
+						}
+					}
+				if ( sv_sof2UseTriggerFilterActive &&
+					sv_sof2UseTriggerFilterClient >= 0 &&
+					sv_sof2UseTriggerFilterClient < MAX_CLIENTS &&
+					sv_trace_log_reason == 2 &&
+					isTrigger ) {
+					SV_SOF2CompatSetUseTriggerLatched( sv_sof2UseTriggerFilterClient, entNum, qtrue );
+					if ( s_moveLatchSuppressLogCount < 48 ) {
+						Com_Printf(
+							"[USE compat] latch held trigger client=%d ent=%d model=%d('%s')\n",
+							sv_sof2UseTriggerFilterClient,
+							entNum,
+							SOF2_ENT_MODELINDEX( ptrBuf[i] ),
+							SV_SOF2_ModelConfigString( SOF2_ENT_MODELINDEX( ptrBuf[i] ) ) );
+						++s_moveLatchSuppressLogCount;
+					}
+				}
+				// Latch any trigger entity the moment we return it to any caller
+				// (including retail G_TouchTriggers). One-shot-per-overlap at wrapper
+				// level. MOVE compat spatial sweep clears latch when player leaves bounds.
+				if ( isTrigger ) {
+					SV_SOF2CompatSetMoveTriggerLatched( 0, entNum, qtrue );
+				}
 				entityList[outCount++] = entNum;
 				SOF2_ENT_NUMBER( ptrBuf[i] ) = entNum;
 				SOF2_ENT_SERVERINDEX( ptrBuf[i] ) = entNum;
@@ -736,7 +941,7 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 		}
 
 		Com_Printf(
-			"[AREA69] #%d mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) raw=%d out=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d reason=%d latched=%d\n",
+			"[AREA69] #%d mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) raw=%d out=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d suppressedLatched=%d suppressedRepeat=%d suppressedUseLatched=%d reason=%d latched=%d\n",
 			s_areaEntitiesCallLogCount + 1,
 			mins[0], mins[1], mins[2],
 			maxs[0], maxs[1], maxs[2],
@@ -746,6 +951,9 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 			itemCount,
 			suppressedNonItemCount,
 			suppressedBrushModelCount,
+			suppressedLatchedTriggerCount,
+			suppressedRepeatTriggerCount,
+			suppressedUseLatchedCount,
 			sv_trace_log_reason,
 			(int)sv_trace_use_latched );
 		++s_areaEntitiesCallLogCount;
@@ -772,7 +980,7 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 
 		if ( s_useAreaSummaryLogCount < 24 ) {
 			Com_Printf(
-				"[TOUCH %s] EntitiesInBox mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) count=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d\n",
+				"[TOUCH %s] EntitiesInBox mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) count=%d triggers=%d items=%d suppressedNonItem=%d suppressedBrush=%d suppressedLatched=%d suppressedRepeat=%d suppressedUseLatched=%d\n",
 				( sv_trace_log_reason == 2 ) ? "use" : "move",
 				mins[0], mins[1], mins[2],
 				maxs[0], maxs[1], maxs[2],
@@ -780,7 +988,10 @@ static int SV_SOF2_AreaEntities( const vec3_t mins, const vec3_t maxs, int *enti
 				triggerCount,
 				itemCount,
 				suppressedNonItemCount,
-				suppressedBrushModelCount );
+				suppressedBrushModelCount,
+				suppressedLatchedTriggerCount,
+				suppressedRepeatTriggerCount,
+				suppressedUseLatchedCount );
 			++s_useAreaSummaryLogCount;
 		}
 
@@ -850,11 +1061,12 @@ int	SV_NumForGentity( gentity_t *ent ) {
 // Unlike Q3A/JKA (contiguous struct array with stride), SOF2 uses a POINTER TABLE:
 //   sv_GEntities[entityNum] is a 4-byte pointer to a CEntity* (or NULL for empty slots).
 // The engine accesses entities via pointer dereference, NOT stride-based arithmetic.
-static void *sv_GEntities    = NULL;   // CEntitySystem serverSlots[1024] pointer table
-static int   sv_GEntitySize  = 0;      // 0x560 = sizeof(CEntity), stored but NOT used for array access
-static int   sv_numGEntities = 0;      // MAX_GENTITIES (1024)
-static void *sv_GameClients  = NULL;   // game client array (stride-based, unlike entities)
-static int   sv_GameClientSize = 0;    // sizeof(gclient_t) = 0x24C
+static void *sv_GEntities    = NULL;   // entity data: pointer table (SOF2) or contiguous array (OpenJK)
+static int   sv_GEntitySize  = 0;      // sizeof(entity) — used for stride access in array mode
+static int   sv_numGEntities = 0;      // number of entity slots
+static qboolean sv_GEntitiesIsArray = qfalse; // qtrue = OpenJK contiguous array; qfalse = SOF2 pointer table
+static void *sv_GameClients  = NULL;   // game client array (stride-based)
+static int   sv_GameClientSize = 0;    // sizeof(gclient_t)
 static byte  sv_sof2BrushModel[MAX_GENTITIES];
 static int SV_SOF2_EntitySlot( const gentity_t *gEnt ) {
 	int entNum;
@@ -913,13 +1125,23 @@ qboolean SV_SOF2_IsBrushModelEntity( const gentity_t *gEnt ) {
 }
 
 static int SV_FindEntityNumByPointer( gentity_t *gEnt ) {
-	int limit;
-
 	if ( !gEnt || !sv_GEntities ) {
 		return -1;
 	}
 
-	limit = sv_numGEntities;
+	if ( sv_GEntitiesIsArray && sv_GEntitySize > 0 ) {
+		// Contiguous array: compute index by pointer arithmetic
+		ptrdiff_t diff = (byte *)gEnt - (byte *)sv_GEntities;
+		if ( diff >= 0 && (diff % sv_GEntitySize) == 0 ) {
+			int idx = (int)(diff / sv_GEntitySize);
+			if ( idx >= 0 && idx < MAX_GENTITIES ) {
+				return idx;
+			}
+		}
+		return -1;
+	}
+
+	int limit = sv_numGEntities;
 	if ( limit <= 0 || limit > MAX_GENTITIES ) {
 		limit = MAX_GENTITIES;
 	}
@@ -938,7 +1160,13 @@ gentity_t	*SV_GentityNum( int num ) {
 	if ( num < 0 || num >= MAX_GENTITIES || !sv_GEntities ) {
 		return NULL;
 	}
-	// SOF2: pointer table access — each slot is a 4-byte CEntity* pointer
+	if ( sv_GEntitiesIsArray ) {
+		// OpenJK: contiguous struct array — stride-based access
+		ent = (gentity_t *)((byte *)sv_GEntities + (size_t)num * sv_GEntitySize);
+		// Don't write SOF2 offsets into OpenJK entity fields (would corrupt eType/eFlags)
+		return ent;
+	}
+	// SOF2 native: pointer table — each slot is a 4-byte CEntity* pointer
 	ent = ((gentity_t **)sv_GEntities)[num];
 	if ( ent ) {
 		SOF2_ENT_NUMBER( ent ) = num;
@@ -954,13 +1182,18 @@ svEntity_t	*SV_SvEntityForGentity( gentity_t *gEnt ) {
 		return NULL;
 	}
 
-	entNum = SOF2_ENT_NUMBER( gEnt );
-	if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
-		serverIndex = SOF2_ENT_SERVERINDEX( gEnt );
-		if ( serverIndex >= 0 && serverIndex < MAX_GENTITIES ) {
-			entNum = serverIndex;
-		} else {
-			entNum = SV_FindEntityNumByPointer( gEnt );
+	if ( sv_GEntitiesIsArray && sv_GEntities && sv_GEntitySize > 0 ) {
+		// OpenJK contiguous array: compute entity number by pointer arithmetic
+		entNum = SV_FindEntityNumByPointer( gEnt );
+	} else {
+		entNum = SOF2_ENT_NUMBER( gEnt );
+		if ( entNum < 0 || entNum >= MAX_GENTITIES ) {
+			serverIndex = SOF2_ENT_SERVERINDEX( gEnt );
+			if ( serverIndex >= 0 && serverIndex < MAX_GENTITIES ) {
+				entNum = serverIndex;
+			} else {
+				entNum = SV_FindEntityNumByPointer( gEnt );
+			}
 		}
 	}
 
@@ -1408,6 +1641,12 @@ void SV_ShutdownGameProgs (qboolean shutdownCin) {
 	Sys_UnloadDll( gameLibrary );
 
 	ge = NULL;
+	sv_GEntities        = NULL;
+	sv_GEntitiesIsArray = qfalse;
+	sv_GEntitySize      = 0;
+	sv_numGEntities     = 0;
+	sv_GameClients      = NULL;
+	sv_GameClientSize   = 0;
 }
 
 // this is a compile-helper function since Z_Malloc can now become a macro with __LINE__ etc
@@ -2044,6 +2283,22 @@ static void SV_Traced_LocateGameData( void *ents, int numEnts, int entSize, void
 	fprintf(stderr, "[GI] gi_SV_LocateGameData called (#%d) ents=%p numEnts=%d entSize=0x%x clients=%p clientSize=0x%x\n",
 		gi_call_count, ents, numEnts, entSize, clients, clientSize);
 	SV_LocateGameData_SOF2( ents, numEnts, entSize, clients, clientSize );
+}
+
+// LocateGameData for OpenJK game DLL: contiguous array mode, also receives client array.
+// Called from game DLL's InitGame before G_SpawnEntitiesFromString so SV_LinkEntity works.
+static void SV_LocateGameData_OpenJK( gentity_t *gEnts, int numGEntities, int sizeofGEntity_t,
+                                       void *clients, int sizeofGClient ) {
+	sv_GEntities        = (void *)gEnts;
+	sv_GEntitySize      = sizeofGEntity_t;
+	sv_numGEntities     = numGEntities > 0 ? numGEntities : MAX_GENTITIES;
+	sv_GEntitiesIsArray = qtrue;
+	sv_GameClients      = clients;
+	sv_GameClientSize   = sizeofGClient;
+	memset( sv_sof2BrushModel, 0, sizeof( sv_sof2BrushModel ) );
+	Com_Printf( "[DBG] SV_LocateGameData_OpenJK: ents=%p num=%d size=%d clients=%p clientSize=%d\n",
+	            (void *)sv_GEntities, sv_numGEntities, sv_GEntitySize,
+	            sv_GameClients, sv_GameClientSize );
 }
 
 // gi[55]: SV_GameDropClient (already defined above in the file)
@@ -3111,6 +3366,11 @@ void SV_GetGEntityTable( void ***outTable, int *outCount ) {
 	if ( outCount ) *outCount = sv_numGEntities;
 }
 
+qboolean SV_IsEntityArrayMode( int *outEntitySize ) {
+	if ( outEntitySize ) *outEntitySize = sv_GEntitySize;
+	return sv_GEntitiesIsArray;
+}
+
 // Accessible from cl_cgame.cpp — cgame DLL needs the same CWraithStub
 void *SV_GetWraithStubPtr( void ) {
 	if ( !g_wraithStub ) {
@@ -3200,6 +3460,11 @@ static void SV_ShutdownTerrain_Stub( void ) {}
 // gi[104-112]: RMG minimap drawing stubs
 static void SV_RMG_MinimapStub( void ) {}
 static void SV_RMG_MinimapStub2( void ) {}
+
+// OpenJK game_import_t EntityContact wrapper: drops the extra worldIndex param
+static qboolean SV_JK_EntityContact( const vec3_t mins, const vec3_t maxs, const gentity_t *ent ) {
+	return SV_EntityContact( mins, maxs, ent, 0 );
+}
 
 /*
 ===============
@@ -3344,6 +3609,349 @@ void SV_InitGameProgs (void) {
 	gi[110] = (void *)SV_RMG_MinimapStub;               // RMG_DrawMinimapPlayerMarker
 	gi[111] = (void *)SV_RMG_MinimapStub2;              // RMG_RenderMinimap
 	gi[112] = (void *)SV_RMG_MinimapStub2;              // RMG_SaveMinimap
+
+	// -----------------------------------------------------------------------
+	// Alternate load path: OpenJK jagamex86.dll (enabled by sof2_use_openjk_game).
+	// Uses OpenJK's native trigger/ROFF/breakable systems via the struct-based
+	// game_import_t interface instead of the SOF2 flat gi[] array.
+	// -----------------------------------------------------------------------
+	static cvar_t *sof2_use_openjk_game = Cvar_Get( "sof2_use_openjk_game", "0", CVAR_ARCHIVE );
+	if ( sof2_use_openjk_game->integer ) {
+		// OpenJK game_import_t — struct-based, matches code/game/g_public.h layout.
+		// Defined locally to avoid conflict with codeJK2/game/g_public.h's game_import_t.
+		struct jk_game_import_t {
+			void	(*Printf)( const char *fmt, ... );
+			void	(*WriteCam)( const char *text );
+			void	(*FlushCamFile)();
+			NORETURN_PTR void	(*Error)( int, const char *fmt, ... );
+			int		(*Milliseconds)( void );
+			cvar_t	*(*cvar)( const char *var_name, const char *value, int flags );
+			void	(*cvar_set)( const char *var_name, const char *value );
+			int		(*Cvar_VariableIntegerValue)( const char *var_name );
+			void	(*Cvar_VariableStringBuffer)( const char *var_name, char *buffer, int bufsize );
+			int		(*argc)( void );
+			char	*(*argv)( int n );
+			int		(*FS_FOpenFile)( const char *qpath, fileHandle_t *file, fsMode_t mode );
+			int		(*FS_Read)( void *buffer, int len, fileHandle_t f );
+			int		(*FS_Write)( const void *buffer, int len, fileHandle_t f );
+			void	(*FS_FCloseFile)( fileHandle_t f );
+			long	(*FS_ReadFile)( const char *name, void **buf );
+			void	(*FS_FreeFile)( void *buf );
+			int		(*FS_GetFileList)( const char *path, const char *extension, char *listbuf, int bufsize );
+			ojk::ISavedGame* saved_game;
+			void	(*SendConsoleCommand)( const char *text );
+			void	(*DropClient)( int clientNum, const char *reason );
+			void	(*SendServerCommand)( int clientNum, const char *fmt, ... );
+			void	(*SetConfigstring)( int num, const char *string );
+			void	(*GetConfigstring)( int num, char *buffer, int bufferSize );
+			void	(*GetUserinfo)( int num, char *buffer, int bufferSize );
+			void	(*SetUserinfo)( int num, const char *buffer );
+			void	(*GetServerinfo)( char *buffer, int bufferSize );
+			void	(*SetBrushModel)( gentity_t *ent, const char *name );
+			void	(*trace)( trace_t *results, const vec3_t start, const vec3_t mins, const vec3_t maxs, const vec3_t end,
+					const int passEntityNum, const int contentmask, const EG2_Collision eG2TraceType, const int useLod );
+			int		(*pointcontents)( const vec3_t point, int passEntityNum );
+			int		(*totalMapContents)();
+			qboolean	(*inPVS)( const vec3_t p1, const vec3_t p2 );
+			qboolean	(*inPVSIgnorePortals)( const vec3_t p1, const vec3_t p2 );
+			void		(*AdjustAreaPortalState)( gentity_t *ent, qboolean open );
+			qboolean	(*AreasConnected)( int area1, int area2 );
+			void	(*linkentity)( gentity_t *ent );
+			void	(*unlinkentity)( gentity_t *ent );
+			int		(*EntitiesInBox)( const vec3_t mins, const vec3_t maxs, gentity_t **list, int maxcount );
+			qboolean	(*EntityContact)( const vec3_t mins, const vec3_t maxs, const gentity_t *ent );
+			int		*VoiceVolume;
+			void		*(*Malloc)( int iSize, memtag_t eTag, qboolean bZeroIt );
+			int			(*Free)( void *buf );
+			qboolean	(*bIsFromZone)( const void *buf, memtag_t eTag );
+			// Ghoul2 API
+			qhandle_t	(*G2API_PrecacheGhoul2Model)(const char *fileName);
+			int			(*G2API_InitGhoul2Model)(CGhoul2Info_v &ghoul2, const char *fileName, int modelIndex, qhandle_t customSkin, qhandle_t customShader, int modelFlags, int lodBias);
+			qboolean	(*G2API_SetSkin)(CGhoul2Info *ghlInfo, qhandle_t customSkin, qhandle_t renderSkin);
+			qboolean	(*G2API_SetBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int startFrame, const int endFrame, const int flags, const float animSpeed, const int currentTime, const float setFrame, const int blendTime);
+			qboolean	(*G2API_SetBoneAngles)(CGhoul2Info *ghlInfo, const char *boneName, const vec3_t angles, const int flags, const Eorientations up, const Eorientations right, const Eorientations forward, qhandle_t *modelList, int blendTime, int blendStart);
+			qboolean	(*G2API_SetBoneAnglesIndex)(CGhoul2Info *ghlInfo, const int index, const vec3_t angles, const int flags, const Eorientations yaw, const Eorientations pitch, const Eorientations roll, qhandle_t *modelList, int blendTime, int currentTime);
+			qboolean	(*G2API_SetBoneAnglesMatrix)(CGhoul2Info *ghlInfo, const char *boneName, const mdxaBone_t &matrix, const int flags, qhandle_t *modelList, int blendTime, int currentTime);
+			void		(*G2API_CopyGhoul2Instance)(CGhoul2Info_v &ghoul2From, CGhoul2Info_v &ghoul2To, int modelIndex);
+			qboolean	(*G2API_SetBoneAnimIndex)(CGhoul2Info *ghlInfo, const int index, const int startFrame, const int endFrame, const int flags, const float animSpeed, const int currentTime, const float setFrame, const int blendTime);
+			qboolean	(*G2API_SetLodBias)(CGhoul2Info *ghlInfo, int lodBias);
+			qboolean	(*G2API_SetShader)(CGhoul2Info *ghlInfo, qhandle_t customShader);
+			qboolean	(*G2API_RemoveGhoul2Model)(CGhoul2Info_v &ghlInfo, const int modelIndex);
+			qboolean	(*G2API_SetSurfaceOnOff)(CGhoul2Info *ghlInfo, const char *surfaceName, const int flags);
+			qboolean	(*G2API_SetRootSurface)(CGhoul2Info_v &ghlInfo, const int modelIndex, const char *surfaceName);
+			qboolean	(*G2API_RemoveSurface)(CGhoul2Info *ghlInfo, const int index);
+			int			(*G2API_AddSurface)(CGhoul2Info *ghlInfo, int surfaceNumber, int polyNumber, float BarycentricI, float BarycentricJ, int lod);
+			qboolean	(*G2API_GetBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int currentTime, float *currentFrame, int *startFrame, int *endFrame, int *flags, float *animSpeed, int *modelList);
+			qboolean	(*G2API_GetBoneAnimIndex)(CGhoul2Info *ghlInfo, const int iBoneIndex, const int currentTime, float *currentFrame, int *startFrame, int *endFrame, int *flags, float *animSpeed, int *modelList);
+			qboolean	(*G2API_GetAnimRange)(CGhoul2Info *ghlInfo, const char *boneName, int *startFrame, int *endFrame);
+			qboolean	(*G2API_GetAnimRangeIndex)(CGhoul2Info *ghlInfo, const int boneIndex, int *startFrame, int *endFrame);
+			qboolean	(*G2API_PauseBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName, const int currentTime);
+			qboolean	(*G2API_PauseBoneAnimIndex)(CGhoul2Info *ghlInfo, const int boneIndex, const int currentTime);
+			qboolean	(*G2API_IsPaused)(CGhoul2Info *ghlInfo, const char *boneName);
+			qboolean	(*G2API_StopBoneAnim)(CGhoul2Info *ghlInfo, const char *boneName);
+			qboolean	(*G2API_StopBoneAngles)(CGhoul2Info *ghlInfo, const char *boneName);
+			qboolean	(*G2API_RemoveBone)(CGhoul2Info *ghlInfo, const char *boneName);
+			qboolean	(*G2API_RemoveBolt)(CGhoul2Info *ghlInfo, const int index);
+			int			(*G2API_AddBolt)(CGhoul2Info *ghlInfo, const char *boneName);
+			int			(*G2API_AddBoltSurfNum)(CGhoul2Info *ghlInfo, const int surfIndex);
+			qboolean	(*G2API_AttachG2Model)(CGhoul2Info *ghlInfo, CGhoul2Info *ghlInfoTo, int toBoltIndex, int toModel);
+			qboolean	(*G2API_DetachG2Model)(CGhoul2Info *ghlInfo);
+			qboolean	(*G2API_AttachEnt)(int *boltInfo, CGhoul2Info *ghlInfoTo, int toBoltIndex, int entNum, int toModelNum);
+			void		(*G2API_DetachEnt)(int *boltInfo);
+			qboolean	(*G2API_GetBoltMatrix)(CGhoul2Info_v &ghoul2, const int modelIndex, const int boltIndex, mdxaBone_t *matrix, const vec3_t angles, const vec3_t position, const int frameNum, qhandle_t *modelList, const vec3_t scale);
+			void		(*G2API_ListSurfaces)(CGhoul2Info *ghlInfo);
+			void		(*G2API_ListBones)(CGhoul2Info *ghlInfo, int frame);
+			qboolean	(*G2API_HaveWeGhoul2Models)(CGhoul2Info_v &ghoul2);
+			qboolean	(*G2API_SetGhoul2ModelFlags)(CGhoul2Info *ghlInfo, const int flags);
+			int			(*G2API_GetGhoul2ModelFlags)(CGhoul2Info *ghlInfo);
+			qboolean	(*G2API_GetAnimFileName)(CGhoul2Info *ghlInfo, char **filename);
+			void		(*G2API_CollisionDetect)(CCollisionRecord *collRecMap, CGhoul2Info_v &ghoul2, const vec3_t angles, const vec3_t position, int frameNumber, int entNum, vec3_t rayStart, vec3_t rayEnd, vec3_t scale, CMiniHeap *G2VertSpace, EG2_Collision eG2TraceType, int useLod, float fRadius);
+			void		(*G2API_GiveMeVectorFromMatrix)(mdxaBone_t &boltMatrix, Eorientations flags, vec3_t &vec);
+			void		(*G2API_CleanGhoul2Models)(CGhoul2Info_v &ghoul2);
+			IGhoul2InfoArray &(*TheGhoul2InfoArray)();
+			int			(*G2API_GetParentSurface)(CGhoul2Info *ghlInfo, const int index);
+			int			(*G2API_GetSurfaceIndex)(CGhoul2Info *ghlInfo, const char *surfaceName);
+			char		*(*G2API_GetSurfaceName)(CGhoul2Info *ghlInfo, int surfNumber);
+			char		*(*G2API_GetGLAName)(CGhoul2Info *ghlInfo);
+			qboolean	(*G2API_SetNewOrigin)(CGhoul2Info *ghlInfo, const int boltIndex);
+			int			(*G2API_GetBoneIndex)(CGhoul2Info *ghlInfo, const char *boneName, qboolean bAddIfNotFound);
+			qboolean	(*G2API_StopBoneAnglesIndex)(CGhoul2Info *ghlInfo, const int index);
+			qboolean	(*G2API_StopBoneAnimIndex)(CGhoul2Info *ghlInfo, const int index);
+			qboolean	(*G2API_SetBoneAnglesMatrixIndex)(CGhoul2Info *ghlInfo, const int index, const mdxaBone_t &matrix, const int flags, qhandle_t *modelList, int blendTime, int currentTime);
+			qboolean	(*G2API_SetAnimIndex)(CGhoul2Info *ghlInfo, const int index);
+			int			(*G2API_GetAnimIndex)(CGhoul2Info *ghlInfo);
+			void		(*G2API_SaveGhoul2Models)(CGhoul2Info_v &ghoul2);
+			void		(*G2API_LoadGhoul2Models)(CGhoul2Info_v &ghoul2, char *buffer);
+			void		(*G2API_LoadSaveCodeDestructGhoul2Info)(CGhoul2Info_v &ghoul2);
+			char		*(*G2API_GetAnimFileNameIndex)(qhandle_t modelIndex);
+			char		*(*G2API_GetAnimFileInternalNameIndex)(qhandle_t modelIndex);
+			int			(*G2API_GetSurfaceRenderStatus)(CGhoul2Info *ghlInfo, const char *surfaceName);
+			void		(*G2API_SetRagDoll)(CGhoul2Info_v &ghoul2, CRagDollParams *parms);
+			void		(*G2API_AnimateG2Models)(CGhoul2Info_v &ghoul2, int AcurrentTime, CRagDollUpdateParams *params);
+			qboolean	(*G2API_RagPCJConstraint)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t min, vec3_t max);
+			qboolean	(*G2API_RagPCJGradientSpeed)(CGhoul2Info_v &ghoul2, const char *boneName, const float speed);
+			qboolean	(*G2API_RagEffectorGoal)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t pos);
+			qboolean	(*G2API_GetRagBonePos)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t pos, vec3_t entAngles, vec3_t entPos, vec3_t entScale);
+			qboolean	(*G2API_RagEffectorKick)(CGhoul2Info_v &ghoul2, const char *boneName, vec3_t velocity);
+			qboolean	(*G2API_RagForceSolve)(CGhoul2Info_v &ghoul2, qboolean force);
+			qboolean	(*G2API_SetBoneIKState)(CGhoul2Info_v &ghoul2, int time, const char *boneName, int ikState, sharedSetBoneIKStateParams_t *params);
+			qboolean	(*G2API_IKMove)(CGhoul2Info_v &ghoul2, int time, sharedIKMoveParams_t *params);
+			void		(*G2API_AddSkinGore)(CGhoul2Info_v &ghoul2, SSkinGoreData &gore);
+			void		(*G2API_ClearSkinGore)(CGhoul2Info_v &ghoul2);
+			void		(*RMG_Init)(int terrainID);
+			int			(*CM_RegisterTerrain)(const char *info);
+			const char	*(*SetActiveSubBSP)(int index);
+			int			(*RE_RegisterSkin)(const char *name);
+			int			(*RE_GetAnimationCFG)(const char *psCFGFilename, char *psDest, int iDestSize);
+			bool		(*WE_GetWindVector)(vec3_t windVector, vec3_t atpoint);
+			bool		(*WE_GetWindGusting)(vec3_t atpoint);
+			bool		(*WE_IsOutside)(vec3_t pos);
+			float		(*WE_IsOutsideCausingPain)(vec3_t pos);
+			float		(*WE_GetChanceOfSaberFizz)(void);
+			bool		(*WE_IsShaking)(vec3_t pos);
+			void		(*WE_AddWeatherZone)(vec3_t mins, vec3_t maxs);
+			bool		(*WE_SetTempGlobalFogColor)(vec3_t color);
+			void	(*LocateGameData)( gentity_t *gEnts, int numGEntities, int sizeofGEntity_t,
+			                          void *clients, int sizeofGClient );
+		};
+
+		jk_game_import_t jkImport;
+		memset( &jkImport, 0, sizeof(jkImport) );
+
+		jkImport.Printf                          = Com_Printf;
+		jkImport.WriteCam                        = Com_WriteCam;
+		jkImport.FlushCamFile                    = Com_FlushCamFile;
+		jkImport.Error                           = Com_Error;
+		jkImport.Milliseconds                    = Sys_Milliseconds2;
+		jkImport.cvar                            = Cvar_Get;
+		jkImport.cvar_set                        = Cvar_Set;
+		jkImport.Cvar_VariableIntegerValue       = Cvar_VariableIntegerValue;
+		jkImport.Cvar_VariableStringBuffer       = Cvar_VariableStringBuffer;
+		jkImport.argc                            = Cmd_Argc;
+		jkImport.argv                            = Cmd_Argv;
+		jkImport.FS_FOpenFile                    = FS_FOpenFileByMode;
+		jkImport.FS_Read                         = FS_Read;
+		jkImport.FS_Write                        = FS_Write;
+		jkImport.FS_FCloseFile                   = FS_FCloseFile;
+		jkImport.FS_ReadFile                     = FS_ReadFile;
+		jkImport.FS_FreeFile                     = FS_FreeFile;
+		jkImport.FS_GetFileList                  = FS_GetFileList;
+		jkImport.saved_game                      = &ojk::SavedGame::get_instance();
+		jkImport.SendConsoleCommand              = Cbuf_AddText;
+		jkImport.DropClient                      = SV_GameDropClient;
+		jkImport.SendServerCommand               = SV_GameSendServerCommand;
+		jkImport.SetConfigstring                 = SV_SetConfigstring;
+		jkImport.GetConfigstring                 = SV_GetConfigstring;
+		jkImport.GetUserinfo                     = SV_GetUserinfo;
+		jkImport.SetUserinfo                     = SV_SetUserinfo;
+		jkImport.GetServerinfo                   = SV_GetServerinfo;
+		jkImport.SetBrushModel                   = SV_SetBrushModel;
+		jkImport.trace                           = SV_Trace;
+		jkImport.pointcontents                   = SV_PointContents;
+		jkImport.totalMapContents                = CM_TotalMapContents;
+		jkImport.inPVS                           = SV_inPVS;
+		jkImport.inPVSIgnorePortals              = SV_inPVSIgnorePortals;
+		jkImport.AdjustAreaPortalState           = SV_AdjustAreaPortalState;
+		jkImport.AreasConnected                  = CM_AreasConnected;
+		jkImport.linkentity                      = SV_LinkEntity;
+		jkImport.unlinkentity                    = SV_UnlinkEntity;
+		jkImport.LocateGameData                  = SV_LocateGameData_OpenJK;
+		jkImport.EntitiesInBox                   = SV_AreaEntities;
+		jkImport.EntityContact                   = SV_JK_EntityContact;
+		jkImport.VoiceVolume                     = s_entityWavVol;
+		jkImport.Malloc                          = G_ZMalloc_Helper;
+		jkImport.Free                            = Z_Free;
+		jkImport.bIsFromZone                     = Z_IsFromZone;
+		jkImport.G2API_AddBolt                   = SV_G2API_AddBolt;
+		jkImport.G2API_AddBoltSurfNum            = SV_G2API_AddBoltSurfNum;
+		jkImport.G2API_AddSurface                = SV_G2API_AddSurface;
+		jkImport.G2API_AnimateG2Models           = SV_G2API_AnimateG2Models;
+		jkImport.G2API_AttachEnt                 = SV_G2API_AttachEnt;
+		jkImport.G2API_AttachG2Model             = SV_G2API_AttachG2Model;
+		jkImport.G2API_CleanGhoul2Models         = SV_G2API_CleanGhoul2Models;
+		jkImport.G2API_CollisionDetect           = SV_G2API_CollisionDetect;
+		jkImport.G2API_CopyGhoul2Instance        = SV_G2API_CopyGhoul2Instance;
+		jkImport.G2API_DetachEnt                 = SV_G2API_DetachEnt;
+		jkImport.G2API_DetachG2Model             = SV_G2API_DetachG2Model;
+		jkImport.G2API_GetAnimFileName           = SV_G2API_GetAnimFileName;
+		jkImport.G2API_GetAnimFileNameIndex      = SV_G2API_GetAnimFileNameIndex;
+		jkImport.G2API_GetAnimFileInternalNameIndex = SV_G2API_GetAnimFileInternalNameIndex;
+		jkImport.G2API_GetAnimIndex              = SV_G2API_GetAnimIndex;
+		jkImport.G2API_GetAnimRange              = SV_G2API_GetAnimRange;
+		jkImport.G2API_GetAnimRangeIndex         = SV_G2API_GetAnimRangeIndex;
+		jkImport.G2API_GetBoneAnim               = SV_G2API_GetBoneAnim;
+		jkImport.G2API_GetBoneAnimIndex          = SV_G2API_GetBoneAnimIndex;
+		jkImport.G2API_GetBoneIndex              = SV_G2API_GetBoneIndex;
+		jkImport.G2API_GetBoltMatrix             = SV_G2API_GetBoltMatrix;
+		jkImport.G2API_GetGhoul2ModelFlags       = SV_G2API_GetGhoul2ModelFlags;
+		jkImport.G2API_GetGLAName                = SV_G2API_GetGLAName;
+		jkImport.G2API_GetParentSurface          = SV_G2API_GetParentSurface;
+		jkImport.G2API_GetRagBonePos             = SV_G2API_GetRagBonePos;
+		jkImport.G2API_GetSurfaceIndex           = SV_G2API_GetSurfaceIndex;
+		jkImport.G2API_GetSurfaceName            = SV_G2API_GetSurfaceName;
+		jkImport.G2API_GetSurfaceRenderStatus    = SV_G2API_GetSurfaceRenderStatus;
+		jkImport.G2API_GiveMeVectorFromMatrix    = SV_G2API_GiveMeVectorFromMatrix;
+		jkImport.G2API_HaveWeGhoul2Models        = SV_G2API_HaveWeGhoul2Models;
+		jkImport.G2API_IKMove                    = SV_G2API_IKMove;
+		jkImport.G2API_InitGhoul2Model           = SV_G2API_InitGhoul2Model;
+		jkImport.G2API_IsPaused                  = SV_G2API_IsPaused;
+		jkImport.G2API_ListBones                 = SV_G2API_ListBones;
+		jkImport.G2API_ListSurfaces              = SV_G2API_ListSurfaces;
+		jkImport.G2API_LoadGhoul2Models          = SV_G2API_LoadGhoul2Models;
+		jkImport.G2API_LoadSaveCodeDestructGhoul2Info = SV_G2API_LoadSaveCodeDestructGhoul2Info;
+		jkImport.G2API_PauseBoneAnim             = SV_G2API_PauseBoneAnim;
+		jkImport.G2API_PauseBoneAnimIndex        = SV_G2API_PauseBoneAnimIndex;
+		jkImport.G2API_PrecacheGhoul2Model       = SV_G2API_PrecacheGhoul2Model;
+		jkImport.G2API_RagEffectorGoal           = SV_G2API_RagEffectorGoal;
+		jkImport.G2API_RagEffectorKick           = SV_G2API_RagEffectorKick;
+		jkImport.G2API_RagForceSolve             = SV_G2API_RagForceSolve;
+		jkImport.G2API_RagPCJConstraint          = SV_G2API_RagPCJConstraint;
+		jkImport.G2API_RagPCJGradientSpeed       = SV_G2API_RagPCJGradientSpeed;
+		jkImport.G2API_RemoveBolt                = SV_G2API_RemoveBolt;
+		jkImport.G2API_RemoveBone                = SV_G2API_RemoveBone;
+		jkImport.G2API_RemoveGhoul2Model         = SV_G2API_RemoveGhoul2Model;
+		jkImport.G2API_RemoveSurface             = SV_G2API_RemoveSurface;
+		jkImport.G2API_SaveGhoul2Models          = SV_G2API_SaveGhoul2Models;
+		jkImport.G2API_SetAnimIndex              = SV_G2API_SetAnimIndex;
+		jkImport.G2API_SetBoneAnim               = SV_G2API_SetBoneAnim;
+		jkImport.G2API_SetBoneAngles             = SV_G2API_SetBoneAngles;
+		jkImport.G2API_SetBoneAnglesIndex        = SV_G2API_SetBoneAnglesIndex;
+		jkImport.G2API_SetBoneAnglesMatrix       = SV_G2API_SetBoneAnglesMatrix;
+		jkImport.G2API_SetBoneAnglesMatrixIndex  = SV_G2API_SetBoneAnglesMatrixIndex;
+		jkImport.G2API_SetBoneAnimIndex          = SV_G2API_SetBoneAnimIndex;
+		jkImport.G2API_SetBoneIKState            = SV_G2API_SetBoneIKState;
+		jkImport.G2API_SetGhoul2ModelFlags       = SV_G2API_SetGhoul2ModelFlags;
+		jkImport.G2API_SetLodBias                = SV_G2API_SetLodBias;
+		jkImport.G2API_SetNewOrigin              = SV_G2API_SetNewOrigin;
+		jkImport.G2API_SetRagDoll                = SV_G2API_SetRagDoll;
+		jkImport.G2API_SetRootSurface            = SV_G2API_SetRootSurface;
+		jkImport.G2API_SetShader                 = SV_G2API_SetShader;
+		jkImport.G2API_SetSkin                   = SV_G2API_SetSkin;
+		jkImport.G2API_SetSurfaceOnOff           = SV_G2API_SetSurfaceOnOff;
+		jkImport.G2API_StopBoneAngles            = SV_G2API_StopBoneAngles;
+		jkImport.G2API_StopBoneAnglesIndex       = SV_G2API_StopBoneAnglesIndex;
+		jkImport.G2API_StopBoneAnim              = SV_G2API_StopBoneAnim;
+		jkImport.G2API_StopBoneAnimIndex         = SV_G2API_StopBoneAnimIndex;
+		jkImport.G2API_AddSkinGore               = SV_G2API_AddSkinGore;
+		jkImport.G2API_ClearSkinGore             = SV_G2API_ClearSkinGore;
+		jkImport.TheGhoul2InfoArray              = SV_TheGhoul2InfoArray;
+		jkImport.RMG_Init                        = NULL;  // no RMG in OpenSOF2
+		jkImport.CM_RegisterTerrain              = NULL;  // stubbed
+		jkImport.SetActiveSubBSP                 = SV_SetActiveSubBSP;
+		jkImport.RE_RegisterSkin                 = SV_RE_RegisterSkin;
+		jkImport.RE_GetAnimationCFG              = SV_RE_GetAnimationCFG;
+		jkImport.WE_GetWindVector                = SV_WE_GetWindVector;
+		jkImport.WE_GetWindGusting               = SV_WE_GetWindGusting;
+		jkImport.WE_IsOutside                    = SV_WE_IsOutside;
+		jkImport.WE_IsOutsideCausingPain         = SV_WE_IsOutsideCausingPain;
+		jkImport.WE_GetChanceOfSaberFizz         = SV_WE_GetChanceOfSaberFizz;
+		jkImport.WE_IsShaking                    = SV_WE_IsShaking;
+		jkImport.WE_AddWeatherZone               = SV_WE_AddWeatherZone;
+		jkImport.WE_SetTempGlobalFogColor        = SV_WE_SetTempGlobalFogColor;
+
+		// OpenJK GetGameAPI takes a single void* (game_import_t*), not (int, void*)
+		typedef void *JKGetGameAPIProc( void * );
+		JKGetGameAPIProc *jkGetGameAPI = NULL;
+		void *jkLib = Sys_LoadSPGameDll( "jagame", (GetGameAPIProc **)&jkGetGameAPI );
+		if ( jkLib && jkGetGameAPI ) {
+			// The OpenJK game_export_t has apiversion + gentity fields; we can't use
+			// our SOF2 ge pointer directly. For now, store the raw return value and
+			// set ge to a best-effort cast — the caller must not call SOF2-only slots.
+			void *jkGE = jkGetGameAPI( &jkImport );
+			if ( jkGE ) {
+				gameLibrary = jkLib;
+				ge = (game_export_t *)jkGE;
+				Com_Printf( "Loaded OpenJK game DLL (jagamex86.dll)\n" );
+				sv.entityParsePoint = CM_EntityString();
+				COM_BeginParseSession();
+				// game_export_t (code/game/g_public.h SOF2 layout):
+				//   offset  0: void (*Init)(mapname, spawntarget, checkSum, entities, ...)
+				//   offset  4: void (*Shutdown)(restart)
+				//   ...
+				//   SP_GAME extension: offset 26*4=104: num_entities, 108: gentities*, 112: gentitySize, 116: apiversion
+				// Init is at offset 0 (first field), NOT after an apiversion int.
+				typedef void JKInitProc( const char *, const char *, int, const char *,
+				                         int, int, int, int, qboolean );
+				// Read apiversion from SP_GAME extension at offset 116
+				int *apiPtr = (int *)( (byte *)jkGE + 26 * 4 + 3 * 4 );
+				Com_Printf( "jagamex86.dll GAME_API_VERSION: %d\n", *apiPtr );
+				// Init is slot 0 — first pointer in the struct
+				JKInitProc *jkInit = *(JKInitProc **)jkGE;
+				const char *entityString = CM_EntityString();
+				jkInit( sv_mapname->string, NULL, 0, entityString,
+				        sv.time, Com_Milliseconds(), sv.time, (int)eSavedGameJustLoaded, qfalse );
+				for ( int ci = 0; ci < 1; ci++ ) {
+					svs.clients[ci].gentity = NULL;
+				}
+				// Verify sv_GEntities was set via LocateGameData callback during InitGame.
+				if ( !sv_GEntities ) {
+					// Fallback: read from jkGE struct (ge->gentities at offset 108, ge->gentitySize at 112)
+					gentity_t *jkGentities = *(gentity_t **)( (byte *)jkGE + 27 * 4 );
+					int        jkEntSize   = *(int *)       ( (byte *)jkGE + 28 * 4 );
+					if ( jkGentities && jkEntSize > 0 ) {
+						sv_GEntities        = jkGentities;
+						sv_GEntitySize      = jkEntSize;
+						sv_numGEntities     = MAX_GENTITIES;
+						sv_GEntitiesIsArray = qtrue;
+						memset( sv_sof2BrushModel, 0, sizeof( sv_sof2BrushModel ) );
+						Com_Printf( "^3[SV] sv_GEntities set via fallback after jkInit (LocateGameData not called?)\n" );
+					} else {
+						Com_Printf( "^1[SV] FATAL: could not establish entity array (ents=%p size=%d)\n",
+						            (void *)jkGentities, jkEntSize );
+					}
+				} else {
+					Com_Printf( "[DBG] sv_GEntities=%p size=%d confirmed after jkInit\n",
+					            (void *)sv_GEntities, sv_GEntitySize );
+				}
+				fprintf(stderr, "[DBG] SV_InitGameProgs: OpenJK game DLL initialized\n");
+				fflush(stderr);
+				return;
+			}
+			Sys_UnloadDll( jkLib );
+		}
+		Com_Printf( "WARNING: sof2_use_openjk_game=1 but jagamex86.dll not found or failed, falling back to retail\n" );
+	}
+	// -----------------------------------------------------------------------
 
 	// SOF2 SP game DLL name
 	const char *gamename = "game";  // Sys_LoadSPGameDll appends ARCH_STRING("x86") + DLL_EXT → "gamex86.dll"

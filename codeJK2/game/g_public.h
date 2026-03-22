@@ -332,14 +332,15 @@ typedef struct {
 	void    (*Shutdown)(int restart);                            // +0x04 [1]  G_ShutdownGame
 	char   *(*ClientConnect)(int clientNum, int firstTime,       // +0x08 [2]  ClientConnect
 				int isBot);
-	void    (*ClientBegin)(int clientNum);                       // +0x0c [3]  ClientBegin
+	void    (*ClientBegin)(int clientNum, usercmd_t *cmd,        // +0x0c [3]  ClientBegin
+				SavedGameJustLoaded_e eSavedGameJustLoaded);
 	void    (*ClientDisconnect)(int clientNum);                  // +0x10 [4]  ClientDisconnect
 	                                                             //            NOTE: slot[4]=Disconnect in SOF2 v8
 	                                                             //            (was ClientUserinfoChanged in JK2 v10)
 	void    (*ClientCommand)(int clientNum);                     // +0x14 [5]  ClientCommand (dev dispatch)
 	                                                             //            NOTE: slot[5]=Command in SOF2 v8
 	                                                             //            (was ClientDisconnect in JK2 v10)
-	void    (*ClientThink)(int clientNum);                       // +0x18 [6]  ClientThink
+	void    (*ClientThink)(int clientNum, usercmd_t *ucmd);      // +0x18 [6]  ClientThink
 	void    (*RunFrame)(int levelTime);                          // +0x1c [7]  G_RunFrame
 	int     (*ConsoleCommand)(void);                             // +0x20 [8]  G_ConsoleCommand
 

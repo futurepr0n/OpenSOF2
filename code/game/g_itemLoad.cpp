@@ -694,7 +694,12 @@ void IT_LoadItemParms (void)
 {
 	char *buffer;
 
-	gi.FS_ReadFile("ext_data/items.dat",(void **) &buffer);
+	long len = gi.FS_ReadFile("ext_data/items.dat",(void **) &buffer);
+
+	if ( len == -1 || !buffer ) {
+		gi.Printf( S_COLOR_YELLOW "WARNING: ext_data/items.dat not found - skipping item params\n" );
+		return;
+	}
 
 	IT_ParseParms(buffer);
 

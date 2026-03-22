@@ -5187,6 +5187,20 @@ static void PM_GroundTrace( void ) {
 	pm->trace (&trace, pm->ps->origin, pm->mins, pm->maxs, point, pm->ps->clientNum, pm->tracemask, (EG2_Collision)0, 0);
 	pml.groundTrace = trace;
 
+	// [DBG] Ground trace diagnostic for player 0
+	{
+		static int s_gtDbgCount = 0;
+		if ( pm->ps->clientNum == 0 && s_gtDbgCount < 15 ) {
+			Com_Printf("[GT DBG] org=(%.1f,%.1f,%.1f) mask=0x%x mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) frac=%.3f allsolid=%d entNum=%d\n",
+				pm->ps->origin[0], pm->ps->origin[1], pm->ps->origin[2],
+				pm->tracemask,
+				pm->mins[0], pm->mins[1], pm->mins[2],
+				pm->maxs[0], pm->maxs[1], pm->maxs[2],
+				trace.fraction, (int)trace.allsolid, trace.entityNum );
+			s_gtDbgCount++;
+		}
+	}
+
 	// do something corrective if the trace starts in a solid...
 	if ( trace.allsolid ) {
 		PM_CorrectAllSolid();

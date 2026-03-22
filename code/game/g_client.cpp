@@ -1782,8 +1782,9 @@ void G_SetG2PlayerModel( gentity_t * const ent, const char *modelName, const cha
 		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, va("models/players/%s/model.glm", modelName), G_ModelIndex( va("models/players/%s/model.glm", modelName) ), NULL_HANDLE, NULL_HANDLE, 0, 0 );
 	}
 	if (ent->playerModel == -1)
-	{//very bad thing here!
-		Com_Error(ERR_DROP, "Cannot fall back to default model %s!", modelName);
+	{//no model available — warn but don't crash, player will be invisible
+		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: no fallback model available, continuing without model\n" );
+		return;
 	}
 
 	gi.G2API_SetSkin( &ent->ghoul2[ent->playerModel], G_SkinIndex( skinName ), skin );//this is going to set the surfs on/off matching the skin file
@@ -2320,6 +2321,10 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 
 		VectorCopy( spawn_origin, client->ps.origin );
 		VectorCopy( spawn_origin, ent->currentOrigin );
+		gi.Printf("[SPAWN DBG] spawn_origin=(%.1f,%.1f,%.1f) playerMins=(%.1f,%.1f,%.1f) playerMaxs=(%.1f,%.1f,%.1f)\n",
+			spawn_origin[0], spawn_origin[1], spawn_origin[2],
+			playerMins[0], playerMins[1], playerMins[2],
+			playerMaxs[0], playerMaxs[1], playerMaxs[2] );
 
 		// the respawned flag will be cleared after the attack and jump keys come up
 		client->ps.pm_flags |= PMF_RESPAWNED;
@@ -2389,6 +2394,10 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 		ucmd.weapon = client->ps.weapon;	// client think calls Pmove which sets the client->ps.weapon to ucmd.weapon, so ...
 		ent->client->ps.groundEntityNum = ENTITYNUM_NONE;
 		ClientThink( ent-g_entities, &ucmd );
+		gi.Printf("[SPAWN DBG] after ClientThink: origin=(%.1f,%.1f,%.1f) vel=(%.1f,%.1f,%.1f) gnd=%d\n",
+			client->ps.origin[0], client->ps.origin[1], client->ps.origin[2],
+			client->ps.velocity[0], client->ps.velocity[1], client->ps.velocity[2],
+			client->ps.groundEntityNum );
 
 		// run the presend to set anything else
 		ClientEndFrame( ent );

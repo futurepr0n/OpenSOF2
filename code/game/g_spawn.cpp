@@ -326,6 +326,7 @@ field_t fields[] = {
 	{"ffdeathscript", FOFS(behaviorSet[BSET_FFDEATH]), F_LSTRING},//name of script to run
 	{"mindtrickscript", FOFS(behaviorSet[BSET_MINDTRICK]), F_LSTRING},//name of script to run
 	{"script_targetname", FOFS(script_targetname), F_LSTRING},//scripts look for this when "affecting"
+	{"ICARUSname", FOFS(script_targetname), F_LSTRING},//SOF2 alias for script_targetname
 	//For NPCs
 	//{"playerTeam", FOFS(playerTeam), F_INT},
 	//{"enemyTeam", FOFS(enemyTeam), F_INT},
@@ -415,6 +416,7 @@ void SP_trigger_location( gentity_t *ent );
 void SP_trigger_visible( gentity_t *self );
 void SP_trigger_space(gentity_t *self);
 void SP_trigger_shipboundary(gentity_t *self);
+void SP_trigger_toolbox(gentity_t *ent);
 
 void SP_target_give (gentity_t *ent);
 void SP_target_delay (gentity_t *ent);
@@ -653,6 +655,7 @@ spawn_t	spawns[] = {
 	{"trigger_visible", SP_trigger_visible},
 	{"trigger_space", SP_trigger_space},
 	{"trigger_shipboundary", SP_trigger_shipboundary},
+	{"trigger_toolbox", SP_trigger_toolbox},
 
 	{"target_give", SP_target_give},
 	{"target_delay", SP_target_delay},
@@ -835,6 +838,21 @@ spawn_t	spawns[] = {
 	{"NPC_Colombian_Rebel", SP_NPC_Reborn },
 	{"NPC_Colombian_EmplacedGunner", SP_NPC_ShadowTrooper },
 	{"NPC_Manuel_Vergara_RMG", SP_NPC_Desann },
+
+	// SOF2 entity classname aliases — map SOF2 entity types to nearest OpenJK equivalents
+	{"func_breakable_brush",            SP_func_breakable},
+	{"script_runner",                   SP_target_scriptrunner},
+	{"door_rotating",                   SP_func_rotating},
+	{"trigger_body_check",              SP_trigger_multiple},
+	{"NPC_Czech_Lookout",               SP_NPC_Stormtrooper},
+	{"NPC_Czech_Rain_Commando",         SP_NPC_StormtrooperOfficer},
+	{"NPC_Czech_Rain_Demolitionist",    SP_NPC_Stormtrooper},
+	{"NPC_Czech_Rain_Soldier",          SP_NPC_Stormtrooper},
+	{"NPC_Czech_Rain_Soldier_Elite",    SP_NPC_StormtrooperOfficer},
+	{"NPC_Czech_Rain_Soldier_Grenades", SP_NPC_Stormtrooper},
+	{"NPC_Czech_Soldier",               SP_NPC_Stormtrooper},
+	{"NPC_Mullins_Young",               SP_NPC_Kyle},
+
 //	{"info_NPCnav", SP_waypoint},
 
 	{"waypoint", SP_waypoint},
@@ -1481,6 +1499,10 @@ void SP_worldspawn( void ) {
 		G_Error( "SP_worldspawn: The first entity isn't 'worldspawn'" );
 	}
 
+	// SOF2 SP cgamex86.dll checks CS_GAME_VERSION (index 20 = 0x14) == "base-1"
+	// The retail SOF2 gamex86.dll sets this in SP_worldspawn; we must do the same.
+	gi.SetConfigstring( 20, "base-1" );
+
 	// make some data visible to connecting client
 	G_SpawnString( "music", "", &s );
 	gi.SetConfigstring( CS_MUSIC, s );
@@ -1630,6 +1652,7 @@ void G_SubBSPSpawnEntitiesFromString(const char *entityString, vec3_t posOffset,
 
 void G_SpawnEntitiesFromString( const char *entityString ) {
 	const char		*entities;
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: enter, entityString=%p\n",(void*)entityString); fflush(stderr);
 
 	entities = entityString;
 
@@ -1641,25 +1664,38 @@ void G_SpawnEntitiesFromString( const char *entityString ) {
 	// the worldspawn is not an actual entity, but it still
 	// has a "spawn" function to perform any global setup
 	// needed by a level (setting configstrings or cvars, etc)
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: calling G_ParseSpawnVars(worldspawn)\n"); fflush(stderr);
 	if ( !G_ParseSpawnVars( &entities ) ) {
 		G_Error( "SpawnEntities: no entities" );
 	}
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: calling SP_worldspawn\n"); fflush(stderr);
 
 	SP_worldspawn();
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: SP_worldspawn done, entering entity loop\n"); fflush(stderr);
 
 	// parse ents
+	int spawnCount = 0;
 	while( G_ParseSpawnVars( &entities ) )
 	{
+		// Print every entity's classname so we know which one crashes
+		char *clName = NULL;
+		G_SpawnString( "classname", "<none>", &clName );
+		fprintf(stderr,"[JK] entity[%d]: %s\n", spawnCount, clName ? clName : "NULL"); fflush(stderr);
 		G_SpawnGEntityFromSpawnVars();
+		spawnCount++;
 	}
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: entity loop done, %d entities spawned\n", spawnCount); fflush(stderr);
 
 	//Search the entities for precache information
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: calling G_ParsePrecaches\n"); fflush(stderr);
 	G_ParsePrecaches();
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: G_ParsePrecaches done\n"); fflush(stderr);
 
 
 	if( g_entities[ENTITYNUM_WORLD].behaviorSet[BSET_SPAWN] && g_entities[ENTITYNUM_WORLD].behaviorSet[BSET_SPAWN][0] )
 	{//World has a spawn script, but we don't want the world in ICARUS and running scripts,
 		//so make a scriptrunner and start it going.
+		fprintf(stderr,"[JK] G_SpawnEntitiesFromString: worldspawn has BSET_SPAWN script, spawning runner\n"); fflush(stderr);
 		gentity_t *script_runner = G_Spawn();
 		if ( script_runner )
 		{
@@ -1674,6 +1710,7 @@ void G_SpawnEntitiesFromString( const char *entityString ) {
 			}
 		}
 	}
+	fprintf(stderr,"[JK] G_SpawnEntitiesFromString: done, spawning=false\n"); fflush(stderr);
 
 	//gi.Printf(S_COLOR_YELLOW"Total waypoints: %d\n", num_waypoints);
 	//Automatically run routegen

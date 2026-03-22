@@ -650,15 +650,9 @@ void PlayerStateToEntityState( playerState_t *ps, entityState_t *s )
 	s->saberActive = ps->SaberActive();//WHY is this on the entityState_t, too???
 	s->saberInFlight = ps->saberInFlight;
 
-	// NOTE: Although we store this stuff locally on a vehicle, who's to say we
-	// can't bring back these variables and fill them at the appropriate time? -Aurelio
-	// We need to bring these in from the vehicle NPC.
-	if ( g_entities[ps->clientNum].client && g_entities[ps->clientNum].client->NPC_class == CLASS_VEHICLE && g_entities[ps->clientNum].NPC )
-	{
-		Vehicle_t *pVeh = g_entities[ps->clientNum].m_pVehicle;
-		s->vehicleArmor = pVeh->m_iArmor;
-		VectorCopy( pVeh->m_vOrientation, s->vehicleAngles );
-	}
+	// SOF2 has no vehicles; skip vehicle armor/angle copy
+	s->vehicleArmor = 0;
+	VectorClear( s->vehicleAngles );
 
 	s->weapon = ps->weapon;
 	s->groundEntityNum = ps->groundEntityNum;

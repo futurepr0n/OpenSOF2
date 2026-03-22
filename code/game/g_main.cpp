@@ -777,6 +777,12 @@ void InitGame(  const char *mapname, const char *spawntarget, int checkSum, cons
 	// range are NEVER anything but clients
 	globals.num_entities = MAX_CLIENTS;
 
+	// Notify the engine where entity/client data lives so SV_LinkEntity works during spawn.
+	if ( gi.LocateGameData ) {
+		gi.LocateGameData( g_entities, MAX_GENTITIES, sizeof(g_entities[0]),
+		                   level.clients, sizeof(level.clients[0]) );
+	}
+
 	//Load sabers.cfg data
 	WP_SaberLoadParms();
 	//Set up NPC init data
@@ -788,24 +794,31 @@ void InitGame(  const char *mapname, const char *spawntarget, int checkSum, cons
 	Pilot_Reset();
 
 	IT_LoadItemParms ();
+	fprintf(stderr,"[JK] G_InitGame: IT_LoadItemParms done\n"); fflush(stderr);
 
 	ClearRegisteredItems();
+	fprintf(stderr,"[JK] G_InitGame: ClearRegisteredItems done\n"); fflush(stderr);
 
 	// clear out old nav info, attempt to load from file
 	NAV::LoadFromFile(level.mapname, giMapChecksum);
+	fprintf(stderr,"[JK] G_InitGame: NAV::LoadFromFile done\n"); fflush(stderr);
 
 	// parse the key/value pairs and spawn gentities
 	G_SpawnEntitiesFromString( entities );
+	fprintf(stderr,"[JK] G_InitGame: G_SpawnEntitiesFromString done\n"); fflush(stderr);
 
 	// general initialization
 	G_FindTeams();
+	fprintf(stderr,"[JK] G_InitGame: G_FindTeams done\n"); fflush(stderr);
 
 //	SaveRegisteredItems();
 
 	gi.Printf ("-----------------------------------\n");
 
 	Rail_Initialize();
+	fprintf(stderr,"[JK] G_InitGame: Rail_Initialize done\n"); fflush(stderr);
 	Troop_Initialize();
+	fprintf(stderr,"[JK] G_InitGame: Troop_Initialize done\n"); fflush(stderr);
 
 
 	player = &g_entities[0];
@@ -888,22 +901,22 @@ extern "C" Q_EXPORT game_export_t* QDECL GetGameAPI( game_import_t *import ) {
 	gi = *import;
 
 	globals.apiversion = GAME_API_VERSION;
-	globals.Init = InitGame;
-	globals.Shutdown = ShutdownGame;
-
-	globals.WriteLevel = WriteLevel;
-	globals.ReadLevel = ReadLevel;
+	// SOF2 game_export_t has different function pointer signatures than JK2.
+	// Use reinterpret_cast to silence type mismatches; GetGameApi (SOF2 API)
+	// sets these correctly at runtime, so these assignments are effectively dead.
+	globals.Init           = reinterpret_cast<decltype(globals.Init)>      (InitGame);
+	globals.Shutdown       = reinterpret_cast<decltype(globals.Shutdown)>   (ShutdownGame);
+	globals.WriteLevel     = reinterpret_cast<decltype(globals.WriteLevel)> (WriteLevel);
+	globals.ReadLevel      = reinterpret_cast<decltype(globals.ReadLevel)>  (ReadLevel);
 	globals.GameAllowedToSaveHere = GameAllowedToSaveHere;
-
-	globals.ClientThink = ClientThink;
-	globals.ClientConnect = ClientConnect;
+	globals.ClientThink    = reinterpret_cast<decltype(globals.ClientThink)>(ClientThink);
+	globals.ClientConnect  = ClientConnect;
 	globals.ClientUserinfoChanged = ClientUserinfoChanged;
 	globals.ClientDisconnect = ClientDisconnect;
-	globals.ClientBegin = ClientBegin;
-	globals.ClientCommand = ClientCommand;
-
-	globals.RunFrame = G_RunFrame;
-	globals.ConnectNavs = G_ConnectNavs;
+	globals.ClientBegin    = reinterpret_cast<decltype(globals.ClientBegin)>(ClientBegin);
+	globals.ClientCommand  = ClientCommand;
+	globals.RunFrame       = G_RunFrame;
+	globals.ConnectNavs    = reinterpret_cast<decltype(globals.ConnectNavs)>(G_ConnectNavs);
 
 	globals.ConsoleCommand = ConsoleCommand;
 	//globals.PrintEntClassname = PrintEntClassname;
@@ -1327,6 +1340,29 @@ class CGameRagDollUpdateParams : public CRagDollUpdateParams
 		VectorAdd(effectorTotal, effectorPosDif, effectorTotal);
 
 		hasEffectorData = qtrue;
+
+		// If the ragdoll effector struck a func_breakable entity with sufficient
+		// velocity, apply physics impact damage to trigger its destruction.
+		if ( data.tr.entityNum > 0 && data.tr.entityNum < MAX_GENTITIES )
+		{
+			gentity_t *hit = &g_entities[data.tr.entityNum];
+			if ( hit->inuse && hit->s.eType == ET_MOVER &&
+			     hit->health > 0 && hit->e_DieFunc != dieF_NULL )
+			{
+				float speedSq = DotProduct( velocity, velocity );
+				if ( speedSq > (200.0f * 200.0f) )
+				{
+					int impactDamage = (int)(sqrt( (double)speedSq ) * 0.1f);
+					if ( impactDamage > 0 )
+					{
+						G_Damage( hit, &g_entities[me], &g_entities[me],
+						          NULL, NULL, impactDamage,
+						          DAMAGE_NO_ARMOR, MOD_IMPACT );
+					}
+				}
+			}
+		}
+
 		return;
 	}
 	void RagDollBegin()
@@ -1910,6 +1946,7 @@ void G_RunFrame( int levelTime ) {
 	level.previousTime = level.time;
 	level.time = levelTime;
 
+
 	//ResetTeamCounters();
 	NAV::DecayDangerSenses();
 	Rail_Update();
@@ -2010,6 +2047,11 @@ void G_RunFrame( int levelTime ) {
 				TieFighterThink( ent );
 			}
 			G_RunMover( ent );
+			// Run ICARUS update for mover entities (e.g., func_wall targeted by AFFECT scripts)
+			if ( ent->inuse && ent->NPC == NULL && ent->m_iIcarusID != IIcarusInterface::ICARUS_INVALID && !stop_icarus )
+			{
+				IIcarusInterface::GetIcarus()->Update( ent->m_iIcarusID );
+			}
 			continue;
 		}
 

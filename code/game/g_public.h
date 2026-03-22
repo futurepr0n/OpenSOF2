@@ -382,6 +382,10 @@ Ghoul2 Insert Start
 Ghoul2 Insert End
 */
 
+	// Called by the game DLL during InitGame so the engine can track entity array location.
+	// Must be called before G_SpawnEntitiesFromString so entity linking works during spawn.
+	void	(*LocateGameData)( gentity_t *gEnts, int numGEntities, int sizeofGEntity_t,
+	                          void *clients, int sizeofGClient );
 
 } game_import_t;
 
@@ -401,7 +405,7 @@ typedef struct {
 	// Slot  2: ClientConnect — return NULL to allow, or denial string
 	char		*(*ClientConnect)( int clientNum, qboolean firstTime, SavedGameJustLoaded_e eSavedGameJustLoaded );
 	// Slot  3: ClientBegin
-	void		(*ClientBegin)( int clientNum );
+	void		(*ClientBegin)( int clientNum, usercmd_t *cmd, SavedGameJustLoaded_e eSavedGameJustLoaded );
 	// Slot  4: ClientDisconnect (NOTE: slot[4] in SOF2 v8, not ClientUserinfoChanged like JK2)
 	void		(*ClientDisconnect)( int clientNum );
 	// Slot  5: ClientCommand (NOTE: slot[5] in SOF2 v8, not ClientDisconnect like JK2)
@@ -446,7 +450,18 @@ typedef struct {
 	void		(*InitSquads)( void );
 	// Slot 25: CWpnSysManager_InitGlobalInstance
 	void		(*InitWeaponSystem)( void );
-} game_export_t;  // 26 slots = 0x68 bytes, no apiversion, no gentity fields
+
+#ifdef SP_GAME
+	// JK2 game_export_t compatibility fields — used internally by game code.
+	// These come AFTER the 26 SOF2 export slots and are never read by the engine.
+	int			num_entities;	// current entity count (mirrors level.num_entities)
+	gentity_t	*gentities;		// pointer to entity array
+	int			gentitySize;	// sizeof(gentity_t) — set by G_InitGame
+	int			apiversion;		// GAME_API_VERSION — set by G_InitGame
+	// JK2 game_export_t has ClientUserinfoChanged; SOF2 does not (no name changes in SP)
+	void		(*ClientUserinfoChanged)( int clientNum );
+#endif
+} game_export_t;  // 26 slots = 0x68 bytes (+ SP_GAME extras not seen by engine)
 
 game_export_t *GetGameApi (game_import_t *import);
 

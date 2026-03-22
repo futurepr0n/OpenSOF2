@@ -5403,9 +5403,29 @@ extern cvar_t	*g_skippingcin;
 
 	VectorCopy( client->ps.origin, oldOrigin );
 
+	// [DBG] Diagnose player-falling-through-world
+	static int dbgPmovePrintCount = 0;
+	if ( client->ps.clientNum == 0 && dbgPmovePrintCount < 10 ) {
+		gi.Printf("[PM DBG] tracemask=0x%x clipmask=0x%x mins=(%.1f,%.1f,%.1f) maxs=(%.1f,%.1f,%.1f) org=(%.1f,%.1f,%.1f) gnd=%d pm_type=%d\n",
+			pm.tracemask, ent->clipmask,
+			ent->mins[0], ent->mins[1], ent->mins[2],
+			ent->maxs[0], ent->maxs[1], ent->maxs[2],
+			client->ps.origin[0], client->ps.origin[1], client->ps.origin[2],
+			client->ps.groundEntityNum, client->ps.pm_type );
+		dbgPmovePrintCount++;
+	}
+
 	// perform a pmove
 	Pmove( &pm );
 	pm.gent = 0;
+
+	// [DBG] Post-Pmove check
+	if ( client->ps.clientNum == 0 && dbgPmovePrintCount <= 10 ) {
+		gi.Printf("[PM DBG] after: org=(%.1f,%.1f,%.1f) gnd=%d vel=(%.1f,%.1f,%.1f)\n",
+			client->ps.origin[0], client->ps.origin[1], client->ps.origin[2],
+			client->ps.groundEntityNum,
+			client->ps.velocity[0], client->ps.velocity[1], client->ps.velocity[2] );
+	}
 
 	ProcessGenericCmd(ent, pm.cmd.generic_cmd);
 

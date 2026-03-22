@@ -1642,9 +1642,146 @@ typedef struct playerState_s {
 	int			loopSound;			// 0x154 (16 bits in field table)
 
 	unsigned char boneData[128];	// 0x158 (G2 bone angles, VERIFIED)
-} playerState_t;					// Total: 0x1D8 = 472 bytes
+	// --- End of SOF2 network-protocol fields (472 bytes = 0x1D8) ---
 
+#ifdef SP_GAME
+	// JK2 extension fields — game DLL only, NOT in SOF2 network protocol.
+	// These fields let JK2 game code compile; they are never transmitted.
+	int         powerups[MAX_POWERUPS];         // powerup expiry times
+	int         ammo[MAX_AMMO];                 // ammo counts per type
+	int         inventory[MAX_INVENTORY];        // inventory item counts
+	char        security_key_message[MAX_SECURITY_KEYS][MAX_SECURITY_KEY_MESSSAGE];
+	int         weaponChargeTime;
+	int         leanofs;                        // JK2 lean offset alias
+	int         friction;
+	float       legsYaw;
+	int         batteryCharge;
+	int         viewEntity;
+	int         forcePowersActive;
+	int         forcePowersKnown;
+	int         saberStylesKnown;
+	short       saberMove;
+	short       saberMoveNext;
+	short       saberBounceMove;
+	short       saberBlocking;
+	short       saberBlocked;
+	short       leanStopDebounceTime;
+	int         saberEntityNum;
+	float       saberEntityDist;
+	int         saberThrowTime;
+	int         saberEntityState;
+	int         saberDamageDebounceTime;
+	int         saberHitWallSoundDebounceTime;
+	int         saberEventFlags;
+	int         saberBlockingTime;
+	int         saberAnimLevel;
+	int         saberAttackChainCount;
+	int         saberLockTime;
+	int         saberLockEnemy;
+	qboolean    saberInFlight;
+	qboolean    dualSabers;
+	int         forcePowerLevel[NUM_FORCE_POWERS];
+	float       forceJumpZStart;
+	float       jumpZStart;
+	float       forceJumpCharge;
+	int         forceGripEntityNum;
+	vec3_t      forceGripOrg;
+	int         forceHealCount;
+	int         forcePower;
+	int         forcePowerMax;
+	int         forcePowerRegenDebounceTime;
+	int         forcePowerRegenRate;
+	int         forcePowerRegenAmount;
+	int         forcePowerDuration[NUM_FORCE_POWERS];
+	int         forcePowerDebounce[NUM_FORCE_POWERS];
+	int         forceRageRecoveryTime;
+	int         forceAllowDeactivateTime;
+	int         forceRageDrainTime;
+	int         forceDrainEntNum;
+	float       forceDrainTime;
+	int         forcePowersForced;
+	int         pullAttackEntNum;
+	int         pullAttackTime;
+	int         lastKickedEntNum;
+	int         forceDrainEntityNum;
+	vec3_t      forceDrainOrg;
+	int         taunting;
+	vec3_t      moveDir;
+	float       waterheight;
+	waterHeightLevel_t waterHeightLevel;
+	qboolean    ikStatus;
+	int         heldClient;
+	int         heldByClient;
+	int         heldByBolt;
+	int         heldByBone;
+	int         vehTurnaroundIndex;
+	int         vehTurnaroundTime;
+	int         brokenLimbs;
+	int         electrifyTime;
+	int         useTime;
+	int         lastShotTime;
+	int         ping;
+	int         lastOnGround;
+	int         lastStationary;
+	int         weaponShotCount;
+	vec3_t      serverViewOrg;
+	int         legsAnimTimer;
+	int         torsoAnimTimer;
+	saberInfo_t saber[MAX_SABERS];
+
+	// Methods from JK2 playerState_t (non-const: saberInfo_t methods are non-const)
+	qboolean SaberStaff() {
+		return (qboolean)(saber[0].type == SABER_STAFF || (dualSabers && saber[1].type == SABER_STAFF));
+	}
+	qboolean SaberActive() {
+		return (qboolean)(saber[0].Active() || (dualSabers && saber[1].Active()));
+	}
+	void SaberActivate() {
+		saber[0].Activate();
+		if (dualSabers) saber[1].Activate();
+	}
+	void SaberDeactivate() {
+		saber[0].Deactivate();
+		saber[1].Deactivate();
+	}
+	float SaberLength(int /*saberNum*/ = 0, int /*bladeNum*/ = 0) {
+		if (dualSabers && saber[1].Length() > saber[0].Length())
+			return saber[1].Length();
+		return saber[0].Length();
+	}
+	float SaberLengthMax(int /*saberNum*/ = 0) {
+		if (dualSabers && saber[1].LengthMax() > saber[0].LengthMax())
+			return saber[1].LengthMax();
+		return saber[0].LengthMax();
+	}
+	void SetSaberLength(float length) {
+		saber[0].SetLength(length);
+		if (dualSabers) saber[1].SetLength(length);
+	}
+	int SaberDisarmBonus(int /*bladeNum*/) { return 0; }
+	int SaberParryBonus() { return 0; }
+	void SaberBladeActivate(int iSaber, int iBlade, qboolean bActive = qtrue) {
+		if (iSaber < 0 || (iSaber > 0 && !dualSabers)) return;
+		saber[iSaber].BladeActivate(iBlade, bActive);
+	}
+	void SaberActivateTrail(float d) {
+		saber[0].ActivateTrail(d);
+		if (dualSabers) saber[1].ActivateTrail(d);
+	}
+	void SaberDeactivateTrail(float d) {
+		saber[0].DeactivateTrail(d);
+		if (dualSabers) saber[1].DeactivateTrail(d);
+	}
+	// Stub serialization — JK2 savegame code serializes playerState_t
+	// Our SOF2 playerState_t has a different layout; stubs prevent compile errors.
+	void sg_export(ojk::SavedGameHelper& /*saved_game*/) const {}
+	void sg_import(ojk::SavedGameHelper& /*saved_game*/) {}
+#endif // SP_GAME
+} playerState_t;
+
+#ifndef SP_GAME
 static_assert(sizeof(playerState_t) == 472, "playerState_t must be exactly 472 bytes to match SOF2 binary");
+#endif
 
 // Old JKA PlayerStateBase fields removed — SOF2 uses flat struct above.
 // JK2/JKA fields (sabers, force powers, vehicles, etc.) are not part of SOF2's playerState.
@@ -1842,9 +1979,35 @@ typedef struct entityState_s {
 	int		skinIndex;		// 0xEC
 	unsigned char	animationData[12];	// 0xF0  compact Ghoul2 animation hint (12 bytes)
 	int		xorKey;			// 0xFC  XOR obfuscation key for delta compression
-} entityState_t;			// Total: 0x100 = 256 bytes
+	// --- End of SOF2 network-protocol fields (256 bytes = 0x100) ---
 
+#ifdef SP_GAME
+	// JK2 extension fields — game DLL only, NOT in SOF2 entityState network protocol.
+	// WARNING: adding these fields shifts entityShared_t::r in gentity_t.
+	// The server uses raw-byte SOF2_ENT_* macros (not struct offsets), so
+	// s fields still work; r fields are accessed via g_public.h's minimal struct.
+	vec3_t	modelScale;		// JK2: NPC per-axis scale factor
+	float	radius;			// JK2: entity collision/ghoul2 radius
+	int		m_iVehicleNum;	// JK2: vehicle entity number (always 0 in SOF2)
+	int		modelindex3;	// JK2: third model index
+	int		legsAnimTimer;	// JK2: legs anim remaining time
+	int		torsoAnimTimer;	// JK2: torso anim remaining time
+	int		boltInfo;		// JK2: bolt attachment info
+	float	scale;			// JK2: uniform scale factor
+	qboolean saberActive;	// JK2_MODE: saber is active
+	qboolean saberInFlight;	// JK2: saber is thrown and in-flight (on entityState)
+	qboolean isPortalEnt;	// JK2: entity is a portal (broadcast to all clients)
+	int		vehicleArmor;	// JK2: vehicle armor (never active in SOF2)
+	vec3_t	vehicleAngles;	// JK2: vehicle orientation angles
+	// Stub serialization methods required by ojk_saved_game_helper.h templates
+	void sg_export(ojk::SavedGameHelper& /*saved_game*/) const {}
+	void sg_import(ojk::SavedGameHelper& /*saved_game*/) {}
+#endif // SP_GAME
+} entityState_t;
+
+#ifndef SP_GAME
 static_assert(sizeof(entityState_t) == 256, "entityState_t must be exactly 256 bytes for SOF2 compatibility");
+#endif
 
 
 typedef enum {

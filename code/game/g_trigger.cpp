@@ -1324,18 +1324,6 @@ void space_touch( gentity_t *self, gentity_t *other, trace_t *trace )
 		return;
 	}
 
-	if (other->s.m_iVehicleNum
-		&& other->s.m_iVehicleNum <= MAX_CLIENTS )
-	{//a player client inside a vehicle
-		gentity_t *veh = &g_entities[other->s.m_iVehicleNum];
-
-		if (veh->inuse && veh->client && veh->m_pVehicle &&
-			veh->m_pVehicle->m_pVehicleInfo->hideRider)
-		{ //if they are "inside" a vehicle, then let that protect them from THE HORRORS OF SPACE.
-			return;
-		}
-	}
-
 	if (!G_PointInBounds(other->client->ps.origin, self->absmin, self->absmax))
 	{ //his origin must be inside the trigger
 		return;
@@ -1367,30 +1355,8 @@ void SP_trigger_space(gentity_t *self)
 
 void shipboundary_touch( gentity_t *self, gentity_t *other, trace_t *trace )
 {
-	gentity_t *ent;
-
-	if (!other || !other->inuse || !other->client ||
-		other->s.number < MAX_CLIENTS ||
-		!other->m_pVehicle)
-	{ //only let vehicles touch
-		return;
-	}
-
-	ent = G_Find (NULL, FOFS(targetname), self->target);
-	if (!ent || !ent->inuse)
-	{ //this is bad
-		G_Error("trigger_shipboundary has invalid target '%s'\n", self->target);
-		return;
-	}
-
-	if (!other->s.m_iVehicleNum || other->m_pVehicle->m_iRemovedSurfaces)
-	{ //if a vehicle touches a boundary without a pilot in it or with parts missing, just blow the thing up
-		G_Damage(other, other, other, NULL, other->client->ps.origin, 99999, DAMAGE_NO_PROTECTION, MOD_SUICIDE);
-		return;
-	}
-
-	other->client->ps.vehTurnaroundIndex = ent->s.number;
-	other->client->ps.vehTurnaroundTime = level.time + self->count;
+	// SOF2 has no vehicles - this trigger type is never active
+	(void)self; (void)other; (void)trace;
 }
 
 /*QUAKED trigger_shipboundary (.5 .5 .5) ?
@@ -1621,17 +1587,6 @@ void trigger_visible_check_player_visibility( gentity_t *self )
 		return;
 	}
 
-	// Added 01/20/03 by AReis
-	// If this trigger can only be used if the players force sight is on...
-	if ( self->spawnflags & TRIGGERVISIBLE_FORCESIGHT )
-	{
-		// If their force sight is not on, leave...
-		if ( !( player->client->ps.forcePowersActive & (1 << FP_SEE) ) )
-		{
-			return;
-		}
-	}
-
 	//1: see if player is within 512*512 range
 	VectorSubtract( self->currentOrigin, player->client->renderInfo.eyePoint, dir );
 	dist = VectorNormalize( dir );
@@ -1702,4 +1657,18 @@ void SP_trigger_visible( gentity_t *self )
 
 	self->e_ThinkFunc = thinkF_trigger_visible_check_player_visibility;
 	self->nextthink = level.time + FRAMETIME*2;
+}
+
+/*QUAKED trigger_toolbox (.5 .5 .1) ?
+SOF2 lockpick trigger. In retail SOF2 fires when player uses a lockpick tool on it.
+In OpenSOF2 behaves like trigger_once (fires once when player enters it).
+"target" - what to fire when triggered.
+*/
+void SP_trigger_toolbox( gentity_t *ent )
+{
+	ent->wait = -1;	// fire once
+	ent->e_TouchFunc = touchF_Touch_Multi;
+	ent->e_UseFunc   = useF_Use_Multi;
+	InitTrigger( ent );
+	gi.linkentity( ent );
 }

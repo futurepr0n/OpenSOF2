@@ -28,6 +28,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 // SOF2: entity pointer table accessor declared in sv_game.cpp
 extern void SV_GetGEntityTable( void ***outTable, int *outCount );
+extern qboolean SV_IsEntityArrayMode( int *outEntitySize );
 
 /*
 =============================================================================
@@ -698,13 +699,20 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		if ( dumpServerId != sv.serverId ) {
 			dumpServerId = sv.serverId;
 			void **tbl = NULL; int numEnts = 0;
+			int entityStride = 0;
+			qboolean arrayMode = SV_IsEntityArrayMode( &entityStride );
 			SV_GetGEntityTable( &tbl, &numEnts );
 			FILE *df = fopen( "entity_dump.txt", "w" );
 			if ( df ) {
 				if ( tbl && numEnts > 0 ) {
-					fprintf( df, "=== entity dump serverId=%d numEnts=%d ===\n", sv.serverId, numEnts );
+					fprintf( df, "=== entity dump serverId=%d numEnts=%d arrayMode=%d stride=%d ===\n", sv.serverId, numEnts, (int)arrayMode, entityStride );
 					for ( int ei = 0; ei < numEnts; ++ei ) {
-						void *ep = tbl[ei];
+						void *ep;
+						if ( arrayMode && entityStride > 0 ) {
+							ep = (void *)((byte *)tbl + (size_t)ei * entityStride);
+						} else {
+							ep = tbl[ei];
+						}
 						if ( !ep ) continue;
 						const byte linked = *(const byte *)((const byte *)ep + 0x108);
 						if ( !linked ) continue;  // skip unlinked

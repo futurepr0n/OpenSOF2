@@ -665,9 +665,21 @@ static void Svcmd_RunScript_f(void)
 		if ( cmd3 && cmd3[0] )
 		{
 			gentity_t *found = NULL;
-			if ( (found = G_Find(NULL, FOFS(targetname), cmd2 ) ) != NULL )
+			gentity_t *icarus_found = NULL;
+			// Iterate all entities with this targetname; prefer one with a valid ICARUS ID
+			while ( (found = G_Find(found, FOFS(targetname), cmd2 ) ) != NULL )
 			{
-				Quake3Game()->RunScript( found, cmd3 );
+				if ( found->m_iIcarusID != IIcarusInterface::ICARUS_INVALID )
+				{
+					icarus_found = found;
+					break;
+				}
+				if ( !icarus_found ) icarus_found = found; // fallback: first match
+			}
+			if ( icarus_found )
+			{
+				gi.Printf( "runscript: running %s on ent %d (%s)\n", cmd3, icarus_found->s.number, icarus_found->classname );
+				Quake3Game()->RunScript( icarus_found, cmd3 );
 			}
 			else
 			{

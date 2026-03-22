@@ -831,7 +831,17 @@ void SP_target_scriptrunner( gentity_t *self )
 {
 	if (!self->behaviorSet[BSET_USE])
 	{
-		gi.Printf(S_COLOR_RED "SP_target_scriptrunner %s has no USESCRIPT\n", self->targetname );
+		// SOF2 maps use "script" key; JK2 uses "usescript" -> behaviorSet[BSET_USE]
+		char *sof2Script = NULL;
+		G_SpawnString( "script", NULL, &sof2Script );
+		if ( sof2Script && sof2Script[0] )
+		{
+			self->behaviorSet[BSET_USE] = G_NewString( sof2Script );
+		}
+		else
+		{
+			gi.Printf(S_COLOR_RED "SP_target_scriptrunner %s has no USESCRIPT\n", self->targetname );
+		}
 	}
 	if ( self->spawnflags & 128 )
 	{

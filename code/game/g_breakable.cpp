@@ -1169,14 +1169,15 @@ void SP_misc_model_breakable( gentity_t *ent )
 	// Chris F. requested default for misc_model_breakable to be NONE...so don't arbitrarily change this.
 	G_SpawnInt( "material", "8", (int*)&ent->material );
 	G_SpawnFloat( "radius", "1", &ent->radius ); // used to scale chunk code if desired by a designer
-	qboolean bHasScale = G_SpawnVector("modelscale_vec", "0 0 0", ent->s.modelScale);
+	vec3_t localScale = {0.0f, 0.0f, 0.0f};
+	qboolean bHasScale = G_SpawnVector("modelscale_vec", "0 0 0", localScale);
 	if (!bHasScale)
 	{
 		float temp;
 		G_SpawnFloat( "modelscale", "0", &temp);
 		if (temp != 0.0f)
 		{
-			ent->s.modelScale[ 0 ] = ent->s.modelScale[ 1 ] = ent->s.modelScale[ 2 ] = temp;
+			localScale[ 0 ] = localScale[ 1 ] = localScale[ 2 ] = temp;
 			bHasScale = qtrue;
 		}
 	}
@@ -1230,17 +1231,17 @@ void SP_misc_model_breakable( gentity_t *ent )
 	if (bHasScale)
 	{
 		//scale the x axis of the bbox up.
-		ent->maxs[0] *= ent->s.modelScale[0];//*scaleFactor;
-		ent->mins[0] *= ent->s.modelScale[0];//*scaleFactor;
+		ent->maxs[0] *= localScale[0];//*scaleFactor;
+		ent->mins[0] *= localScale[0];//*scaleFactor;
 
 		//scale the y axis of the bbox up.
-		ent->maxs[1] *= ent->s.modelScale[1];//*scaleFactor;
-		ent->mins[1] *= ent->s.modelScale[1];//*scaleFactor;
+		ent->maxs[1] *= localScale[1];//*scaleFactor;
+		ent->mins[1] *= localScale[1];//*scaleFactor;
 
 		//scale the z axis of the bbox up and adjust origin accordingly
-		ent->maxs[2] *= ent->s.modelScale[2];
+		ent->maxs[2] *= localScale[2];
 		float oldMins2 = ent->mins[2];
-		ent->mins[2] *= ent->s.modelScale[2];
+		ent->mins[2] *= localScale[2];
 		ent->s.origin[2] += (oldMins2-ent->mins[2]);
 	}
 

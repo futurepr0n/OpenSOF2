@@ -584,7 +584,7 @@ void *Sys_LoadSPGameDll( const char *name, GetGameAPIProc **GetGameAPI )
 {
 	void	*libHandle = NULL;
 	char	filename[MAX_OSPATH];
-	const qboolean isSOF2SPDll = ( !Q_stricmp( name, "cgame" ) || !Q_stricmp( name, "game" ) || !Q_stricmp( name, "Menus" ) ) ? qtrue : qfalse;
+	const qboolean isSOF2SPDll = ( !Q_stricmp( name, "cgame" ) || !Q_stricmp( name, "game" ) || !Q_stricmp( name, "Menus" ) || !Q_stricmp( name, "jagame" ) ) ? qtrue : qfalse;
 
 	// GetGameAPI may be NULL when the caller wants to load a SOF2-style DLL
 	// that uses a different entry point (e.g. GetUIAPI, GetCGameAPI).

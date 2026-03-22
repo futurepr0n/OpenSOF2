@@ -901,6 +901,7 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 	static qboolean s_entityTokenAwaitTargetname = qfalse;
 	static qboolean s_entityTokenAwaitTarget = qfalse;
 	static qboolean s_entityTokenAwaitScriptTargetname = qfalse;
+	static qboolean s_entityTokenAwaitScript = qfalse;
 	static qboolean s_entityTokenAwaitSpawnscript = qfalse;
 	static qboolean s_entityTokenAwaitUsescript = qfalse;
 	static qboolean s_entityTokenAwaitCount = qfalse;
@@ -917,6 +918,7 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 		s_entityTokenAwaitTargetname = qfalse;
 		s_entityTokenAwaitTarget = qfalse;
 		s_entityTokenAwaitScriptTargetname = qfalse;
+		s_entityTokenAwaitScript = qfalse;
 		s_entityTokenAwaitSpawnscript = qfalse;
 		s_entityTokenAwaitUsescript = qfalse;
 		s_entityTokenAwaitCount = qfalse;
@@ -934,6 +936,7 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 		s_entityTokenAwaitTargetname = qfalse;
 		s_entityTokenAwaitTarget = qfalse;
 		s_entityTokenAwaitScriptTargetname = qfalse;
+		s_entityTokenAwaitScript = qfalse;
 		s_entityTokenAwaitSpawnscript = qfalse;
 		s_entityTokenAwaitUsescript = qfalse;
 		s_entityTokenAwaitCount = qfalse;
@@ -975,6 +978,12 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 			++s_entityTokenLogCount;
 		}
 		s_entityTokenAwaitScriptTargetname = qfalse;
+	} else if ( s_entityTokenAwaitScript ) {
+		if ( s_entityTokenLogCount < 128 ) {
+			Com_Printf( "[ENTITYSTR] #%d script='%s'\n", s_entityTokenEntityIndex, s );
+			++s_entityTokenLogCount;
+		}
+		s_entityTokenAwaitScript = qfalse;
 	} else if ( s_entityTokenAwaitSpawnscript ) {
 		if ( s_entityTokenLogCount < 96 ) {
 			Com_Printf( "[ENTITYSTR] #%d spawnscript='%s'\n", s_entityTokenEntityIndex, s );
@@ -1015,6 +1024,8 @@ static qboolean CG_GetEntityToken( char *buffer, int bufferSize ) {
 		s_entityTokenAwaitTarget = qtrue;
 	} else if ( !Q_stricmp( s, "script_targetname" ) ) {
 		s_entityTokenAwaitScriptTargetname = qtrue;
+	} else if ( !Q_stricmp( s, "script" ) ) {
+		s_entityTokenAwaitScript = qtrue;
 	} else if ( !Q_stricmp( s, "spawnscript" ) ) {
 		s_entityTokenAwaitSpawnscript = qtrue;
 	} else if ( !Q_stricmp( s, "usescript" ) ) {

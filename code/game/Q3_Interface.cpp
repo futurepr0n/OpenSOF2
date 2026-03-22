@@ -619,6 +619,15 @@ void Q3_TaskIDComplete( gentity_t *ent, taskID_t taskType )
 		return;
 	}
 
+	// Diagnostic: log every MOVE_NAV/ANGLE_FACE completion so we can see if ROFF/ROFF are finishing
+	if ( taskType == TID_MOVE_NAV || taskType == TID_ANGLE_FACE ) {
+		gi.Printf( "[ICARUS] TaskIDComplete ent=%d taskType=%d(%s) time=%d pending=%d\n",
+			ent->s.number, taskType,
+			taskType == TID_MOVE_NAV ? "MOVE_NAV" : "ANGLE_FACE",
+			level.time,
+			Q3_TaskIDPending( ent, taskType ) );
+	}
+
 	if ( ent->m_iIcarusID != IIcarusInterface::ICARUS_INVALID /*ent->taskManager*/ && Q3_TaskIDPending( ent, taskType ) )
 	{//Complete it
 		IIcarusInterface::GetIcarus()->Completed( ent->m_iIcarusID, ent->taskID[taskType] );
@@ -7602,6 +7611,9 @@ void CQuake3GameInterface::AssociateEntity( gentity_t *pEntity )
 	strncpy( (char *) temp, pEntity->script_targetname, 1023 );
 	temp[ 1023 ] = 0;
 
+	gi.Printf( "[ICARUS] AssociateEntity: ent=%d (%s) script_targetname='%s'\n",
+		pEntity->s.number, pEntity->classname, pEntity->script_targetname );
+
 	m_EntityList[ Q_strupr( (char *) temp ) ] = pEntity->s.number;
 }
 
@@ -7774,6 +7786,7 @@ void CQuake3GameInterface::RunScript( const gentity_t *pEntity, const char *strS
 	{
 		// If could not be loaded, leave!
 		case SCRIPT_COULDNOTREGISTER:
+			gi.Printf( "[ICARUS] RunScript FAILED: script not found: %s (ent=%d)\n", strScriptName, pEntity->s.number );
 			DebugPrint( WL_WARNING, "RunScript: Script was not found and could not be loaded!!! %s\n", strScriptName);
 			return;
 
@@ -7782,8 +7795,14 @@ void CQuake3GameInterface::RunScript( const gentity_t *pEntity, const char *strS
 		case SCRIPT_ALREADYREGISTERED:
 			assert( pBuf );
 			assert( iLength );
-			if ( IIcarusInterface::GetIcarus()->Run( pEntity->m_iIcarusID, pBuf, iLength ) != IIcarusInterface::ICARUS_INVALID )
-				DebugPrint( WL_VERBOSE, "%d Script %s executed by %s %s\n", level.time, (char *) strScriptName, pEntity->classname, pEntity->targetname );
+			{
+				int runRet = IIcarusInterface::GetIcarus()->Run( pEntity->m_iIcarusID, pBuf, iLength );
+				gi.Printf( "[ICARUS] RunScript: %s on ent=%d (%s / %s) icarusID=%d runRet=%d time=%d\n",
+					strScriptName, pEntity->s.number, pEntity->classname, pEntity->targetname,
+					pEntity->m_iIcarusID, runRet, level.time );
+					if ( runRet != IIcarusInterface::ICARUS_INVALID )
+					DebugPrint( WL_VERBOSE, "%d Script %s executed by %s %s\n", level.time, (char *) strScriptName, pEntity->classname, pEntity->targetname );
+			}
 			return;
 	}
 }
@@ -9761,6 +9780,8 @@ void	CQuake3GameInterface::Play( int taskID, int entID, const char *type, const 
 {
 	gentity_t *ent = &g_entities[entID];
 
+	gi.Printf( "[ICARUS] Play: taskID=%d entID=%d type='%s' name='%s'\n", taskID, entID, type, name );
+
 	if ( !Q_stricmp( type, "PLAY_ROFF" ) )
 	{
 		// Try to load the requested ROFF
@@ -11236,10 +11257,14 @@ int		CQuake3GameInterface::GetByName( const char *name )
 	ei = m_EntityList.find( Q_strupr( (char *) temp ) );
 
 	if ( ei == m_EntityList.end() )
+	{
+		gi.Printf( "[ICARUS] GetByName: '%s' NOT FOUND in entity list\n", name );
 		return -1;
+	}
 
 	ent = &g_entities[(*ei).second];
 
+	gi.Printf( "[ICARUS] GetByName: '%s' -> ent=%d (%s)\n", name, ent->s.number, ent->classname );
 	return ent->s.number;
 
 	// this now returns the ent instead of the sequencer -- dmv 06/27/01

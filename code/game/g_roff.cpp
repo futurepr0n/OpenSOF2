@@ -652,7 +652,18 @@ int G_LoadRoff( const char *fileName )
 	}
 
 	// The actual path
-	sprintf( file, "%s/%s.rof", Q3_SCRIPT_DIR, fileName );
+	// SOF2 IBI files store full paths like "scripts/pra2/table_push.rof"
+	// JK2 IBI files store bare names like "pra2/table_push" -- add prefix/extension if needed
+	if ( Q_stricmpn( fileName, Q3_SCRIPT_DIR, strlen( Q3_SCRIPT_DIR ) ) == 0 )
+	{
+		// Already has "scripts/" prefix; just use as-is (strip extra .rof suffix if present)
+		COM_StripExtension( fileName, file, sizeof( file ) );
+		Q_strcat( file, sizeof( file ), ".rof" );
+	}
+	else
+	{
+		sprintf( file, "%s/%s.rof", Q3_SCRIPT_DIR, fileName );
+	}
 
 	// See if I'm already precached
 	for ( i = 0; i < num_roffs; i++ )

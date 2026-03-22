@@ -32,53 +32,78 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define SERVER_H
 
 // =============================================================================
-// SOF2 CEntity field accessors
-// SOF2's game entities are C++ CEntity objects with layout:
-//   0x000: vtable pointer       (4 bytes)
-//   0x004: entity index         (4 bytes)
-//   0x008: entityState_t        (256 bytes = 0x100)
-//   0x108: shared fields        (linked, svFlags, bmodel, mins, maxs, etc.)
-// SOF2 has DUAL BSP support: two sets of linked/mins/maxs/absmin/absmax
-// for primary BSP (worldIndex=0) and sub-BSP (worldIndex=1).
-// Offsets verified from original SoF2.exe SV_LinkEntityInWorld @ 0x1001a0f0.
+// OpenJK game-DLL entity field accessors (raw byte-offset macros).
+//
+// These macros access the OpenJK jagamex86 game DLL entity (gentity_t) layout.
+// The game DLL is compiled with SP_GAME defined, which adds 68 bytes of JK2
+// extension fields to entityState_t (total entityState_t = 324 bytes = 0x144).
+// There is NO 8-byte native SOF2 header before entityState_t in the game DLL
+// struct, and NO dual-BSP (mins1/maxs1/absmin1/absmax1) copies.
+//
+// Game DLL gentity_t layout (SP_GAME + GAME_INCLUDE):
+//   0x000: entityState_t s      (324 bytes, incl. SP_GAME extension to 0x143)
+//   0x144: gclient_t *client
+//   0x148: qboolean inuse
+//   0x14C: qboolean linked
+//   0x150: int svFlags
+//   0x154: qboolean bmodel
+//   0x158: vec3_t mins
+//   0x164: vec3_t maxs
+//   0x170: int contents
+//   0x174: vec3_t absmin
+//   0x180: vec3_t absmax
+//   0x18C: vec3_t currentOrigin
+//   0x198: vec3_t currentAngles
+//   0x1A4: gentity_t *owner
 // =============================================================================
-#define SOF2_ENT_SERVERINDEX(e) (*(int *)((byte *)(e) + 0x004))
-#define SOF2_ENT_NUMBER(e)      (*(int *)((byte *)(e) + 0x008))
-#define SOF2_ENT_ETYPE(e)       (*(int *)((byte *)(e) + 0x00C))
-#define SOF2_ENT_EFLAGS(e)      (*(int *)((byte *)(e) + 0x010))
-#define SOF2_ENT_SOLID(e)       (*(int *)((byte *)(e) + 0x0B8))  // s.solid at entityState_t+0xB0
-#define SOF2_ENT_MODELINDEX(e)  (*(int *)((byte *)(e) + 0x0A8))  // s.modelindex at entityState_t+0xA0
-#define SOF2_ENT_MODELSCALE(e)  ((vec3_t *)((byte *)(e) + 0x008)) // TODO: find real offset for modelScale
-#define SOF2_ENT_LINKED(e)      (*(byte *)((byte *)(e) + 0x108))  // byte[2]: linked[0]/linked[1] for dual BSP
-#define SOF2_ENT_LINKED1(e)     (*(byte *)((byte *)(e) + 0x109))  // linked flag for sub-BSP (worldIndex=1)
-#define SOF2_ENT_SVFLAGS(e)     (*(int *)((byte *)(e) + 0x114))
-#define SOF2_ENT_BMODEL(e)      (*(byte *)((byte *)(e) + 0x11C))  // char/byte in original binary
-#define SOF2_ENT_MINS(e)        ((float *)((byte *)(e) + 0x120))  // primary BSP mins[3]
-#define SOF2_ENT_MINS1(e)       ((float *)((byte *)(e) + 0x12C))  // sub-BSP mins[3]
-#define SOF2_ENT_MAXS(e)        ((float *)((byte *)(e) + 0x138))  // primary BSP maxs[3]
-#define SOF2_ENT_MAXS1(e)       ((float *)((byte *)(e) + 0x144))  // sub-BSP maxs[3]
-#define SOF2_ENT_CONTENTS(e)    (*(int *)((byte *)(e) + 0x150))
-#define SOF2_ENT_ABSMIN(e)      ((float *)((byte *)(e) + 0x154))  // primary BSP (engine-computed)
-#define SOF2_ENT_ABSMIN1(e)     ((float *)((byte *)(e) + 0x160))  // sub-BSP (engine-computed)
-#define SOF2_ENT_ABSMAX(e)      ((float *)((byte *)(e) + 0x16C))  // primary BSP (engine-computed)
-#define SOF2_ENT_ABSMAX1(e)     ((float *)((byte *)(e) + 0x178))  // sub-BSP (engine-computed)
-#define SOF2_ENT_CURORIGIN(e)   ((float *)((byte *)(e) + 0x184))
-#define SOF2_ENT_CURANGLES(e)   ((float *)((byte *)(e) + 0x190))
-#define SOF2_ENT_OWNER(e)       (*(gentity_t **)((byte *)(e) + 0x19C))
-// entityState_t sub-fields (offset = SOF2_ENT_S_OFFSET + field offset within entityState_t)
-#define SOF2_ENT_S_ORIGIN(e)   ((float *)((byte *)(e) + 0x008 + 0x5C))  // entityState_t.origin[3]
-#define SOF2_ENT_S_ORIGIN2(e)  ((float *)((byte *)(e) + 0x008 + 0x68))  // entityState_t.origin2[3]
-#define SOF2_ENT_S_ANGLES(e)   ((float *)((byte *)(e) + 0x008 + 0x74))  // entityState_t.angles[3]
-#define SOF2_ENT_S_CLIENTNUM(e) (*(int *)((byte *)(e) + 0x008 + 0xA8))  // entityState_t.clientNum
-// Pointer to start of entityState_t within CEntity (for memcpy-based copies)
-#define SOF2_ENT_S_PTR(e)      ((void *)((byte *)(e) + SOF2_ENT_S_OFFSET))
-// Size of SOF2 entityState_t (for baseline copies etc.)
+// entityState_t fields (entityState_t starts at offset 0):
+#define SOF2_ENT_SERVERINDEX(e) (*(int *)((byte *)(e) + 0x000))   // s.number (entity index)
+#define SOF2_ENT_NUMBER(e)      (*(int *)((byte *)(e) + 0x000))   // s.number
+#define SOF2_ENT_ETYPE(e)       (*(int *)((byte *)(e) + 0x004))   // s.eType
+#define SOF2_ENT_EFLAGS(e)      (*(int *)((byte *)(e) + 0x008))   // s.eFlags
+#define SOF2_ENT_SOLID(e)       (*(int *)((byte *)(e) + 0x0B0))   // s.solid
+#define SOF2_ENT_MODELINDEX(e)  (*(int *)((byte *)(e) + 0x0A0))   // s.modelindex
+#define SOF2_ENT_MODELSCALE(e)  ((vec3_t *)((byte *)(e) + 0x100)) // s.modelScale (SP_GAME extension)
+// Shared entity fields (after entityState_t at 0x144):
+#define SOF2_ENT_LINKED(e)      (*(byte *)((byte *)(e) + 0x14C))  // linked (qboolean, read low byte)
+#define SOF2_ENT_LINKED1(e)     SOF2_ENT_LINKED(e)                // no dual BSP — alias to primary
+#define SOF2_ENT_SVFLAGS(e)     (*(int *)((byte *)(e) + 0x150))
+#define SOF2_ENT_BMODEL(e)      (*(byte *)((byte *)(e) + 0x154))  // bmodel (qboolean, read low byte)
+#define SOF2_ENT_MINS(e)        ((float *)((byte *)(e) + 0x158))  // mins[3]
+#define SOF2_ENT_MINS1(e)       SOF2_ENT_MINS(e)                  // no dual BSP — alias to primary
+#define SOF2_ENT_MAXS(e)        ((float *)((byte *)(e) + 0x164))  // maxs[3]
+#define SOF2_ENT_MAXS1(e)       SOF2_ENT_MAXS(e)                  // no dual BSP — alias to primary
+#define SOF2_ENT_CONTENTS(e)    (*(int *)((byte *)(e) + 0x170))
+#define SOF2_ENT_ABSMIN(e)      ((float *)((byte *)(e) + 0x174))  // absmin[3] (engine-computed)
+#define SOF2_ENT_ABSMIN1(e)     SOF2_ENT_ABSMIN(e)                // no dual BSP — alias to primary
+#define SOF2_ENT_ABSMAX(e)      ((float *)((byte *)(e) + 0x180))  // absmax[3] (engine-computed)
+#define SOF2_ENT_ABSMAX1(e)     SOF2_ENT_ABSMAX(e)                // no dual BSP — alias to primary
+#define SOF2_ENT_CURORIGIN(e)   ((float *)((byte *)(e) + 0x18C))  // currentOrigin[3]
+#define SOF2_ENT_CURANGLES(e)   ((float *)((byte *)(e) + 0x198))  // currentAngles[3]
+#define SOF2_ENT_OWNER(e)       (*(gentity_t **)((byte *)(e) + 0x1A4))
+// entityState_t sub-fields (entityState_t at offset 0):
+#define SOF2_ENT_S_ORIGIN(e)    ((float *)((byte *)(e) + 0x05C))  // s.origin[3]
+#define SOF2_ENT_S_ORIGIN2(e)   ((float *)((byte *)(e) + 0x068))  // s.origin2[3]
+#define SOF2_ENT_S_ANGLES(e)    ((float *)((byte *)(e) + 0x074))  // s.angles[3]
+#define SOF2_ENT_S_CLIENTNUM(e) (*(int *)((byte *)(e) + 0x0A8))   // s.clientNum
+// Pointer to start of entityState_t (at offset 0 in game DLL entity):
+#define SOF2_ENT_S_PTR(e)       ((void *)(e))
+// Size of entityState_t for network protocol (256 bytes, SP_GAME fields not transmitted):
 #define SOF2_ENTITYSTATE_SIZE   256
-// Offset of entityState_t within CEntity
-#define SOF2_ENT_S_OFFSET       8
+// Offset of entityState_t within gentity_t (0 in game DLL, was 8 in native SOF2 CEntity):
+#define SOF2_ENT_S_OFFSET       0
 // =============================================================================
 
 qboolean SV_SOF2_IsBrushModelEntity( const gentity_t *gEnt );
+void SV_SOF2CompatBeginMoveTriggerFilter( int clientNum );
+void SV_SOF2CompatEndMoveTriggerFilter( void );
+void SV_SOF2CompatSetMoveTriggerLatched( int clientNum, int entNum, qboolean latched );
+qboolean SV_SOF2CompatIsMoveTriggerLatched( int clientNum, int entNum );
+void SV_SOF2CompatBeginUseTriggerFilter( int clientNum );
+void SV_SOF2CompatEndUseTriggerFilter( void );
+void SV_SOF2CompatSetUseTriggerLatched( int clientNum, int entNum, qboolean latched );
+qboolean SV_SOF2CompatIsUseTriggerLatched( int clientNum, int entNum );
+void SV_SOF2CompatClearUseTriggerLatches( int clientNum );
 
 //=============================================================================
 

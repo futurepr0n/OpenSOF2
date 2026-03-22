@@ -25,6 +25,8 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "../server/exe_headers.h"
 
+extern qboolean SV_IsEntityArrayMode( int *outEntitySize );
+
 #include "server.h"
 #include <windows.h>
 #include <stdint.h>
@@ -272,7 +274,6 @@ static int SV_SOF2CompatEntityNumFromPointer( gentity_t *ent ) {
 }
 
 static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerEnt ) {
-	static byte s_touchCompatLatched[MAX_CLIENTS][MAX_GENTITIES];
 	static int s_touchCompatLogCount = 0;
 	gentity_t *nearby[64];
 	byte touchedThisFrame[MAX_GENTITIES];
@@ -284,6 +285,14 @@ static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerE
 		return;
 	}
 
+	// OpenJK array mode: entities are plain C structs (gentity_t), not native SOF2 C++ CEntity
+	// objects. The vtable dereference below (*(void***)hit) would read s.number as a pointer,
+	// causing a near-zero AV. G_TouchTriggersLerped in the game DLL already handles trigger
+	// touch processing via its own EntityContact loop, so skip this entirely.
+	if ( SV_IsEntityArrayMode( NULL ) ) {
+		return;
+	}
+
 	ps = SV_GameClientNum( clientNum );
 	if ( !ps ) {
 		return;
@@ -291,12 +300,14 @@ static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerE
 
 	memset( touchedThisFrame, 0, sizeof( touchedThisFrame ) );
 
-	mins[0] = ps->origin[0] - 15.0f;
-	mins[1] = ps->origin[1] - 15.0f;
-	mins[2] = ps->origin[2] - 46.0f;
-	maxs[0] = ps->origin[0] + 15.0f;
-	maxs[1] = ps->origin[1] + 15.0f;
-	maxs[2] = ps->origin[2] + 48.0f;
+	// Match Q3A G_TouchTriggers range {40,40,52} so we cover the same volume
+	// that retail uses, ensuring the spatial latch sweep is accurate.
+	mins[0] = ps->origin[0] - 40.0f;
+	mins[1] = ps->origin[1] - 40.0f;
+	mins[2] = ps->origin[2] - 52.0f;
+	maxs[0] = ps->origin[0] + 40.0f;
+	maxs[1] = ps->origin[1] + 40.0f;
+	maxs[2] = ps->origin[2] + 52.0f;
 
 	count = SV_AreaEntities( mins, maxs, nearby, ARRAY_LEN( nearby ) );
 	for ( int i = 0; i < count; ++i ) {
@@ -317,7 +328,7 @@ static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerE
 		}
 
 		touchedThisFrame[entNum] = 1;
-		if ( s_touchCompatLatched[clientNum][entNum] ) {
+		if ( SV_SOF2CompatIsMoveTriggerLatched( clientNum, entNum ) ) {
 			continue;
 		}
 
@@ -340,7 +351,7 @@ static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerE
 
 		__try {
 			( (sof2_touch_method_t)vtable[0x6c / sizeof( void * )] )( hit, playerEnt, playerEnt );
-			s_touchCompatLatched[clientNum][entNum] = 1;
+			SV_SOF2CompatSetMoveTriggerLatched( clientNum, entNum, qtrue );
 		} __except( EXCEPTION_EXECUTE_HANDLER ) {
 			static int s_touchCompatCrashLogCount = 0;
 			if ( s_touchCompatCrashLogCount < 8 ) {
@@ -352,7 +363,7 @@ static void SV_SOF2CompatDispatchMoveTriggers( int clientNum, gentity_t *playerE
 
 	for ( int entNum = 0; entNum < MAX_GENTITIES; ++entNum ) {
 		if ( !touchedThisFrame[entNum] ) {
-			s_touchCompatLatched[clientNum][entNum] = 0;
+			SV_SOF2CompatSetMoveTriggerLatched( clientNum, entNum, qfalse );
 		}
 	}
 }
@@ -382,12 +393,14 @@ static void SV_SOF2CompatDispatchUse( int clientNum, gentity_t *playerEnt, userc
 		return;
 	}
 
-	mins[0] = ps->origin[0] - 15.0f;
-	mins[1] = ps->origin[1] - 15.0f;
-	mins[2] = ps->origin[2] - 46.0f;
-	maxs[0] = ps->origin[0] + 15.0f;
-	maxs[1] = ps->origin[1] + 15.0f;
-	maxs[2] = ps->origin[2] + 48.0f;
+	// Match Q3A G_TouchTriggers range {40,40,52} so we cover the same volume
+	// that retail uses, ensuring the spatial latch sweep is accurate.
+	mins[0] = ps->origin[0] - 40.0f;
+	mins[1] = ps->origin[1] - 40.0f;
+	mins[2] = ps->origin[2] - 52.0f;
+	maxs[0] = ps->origin[0] + 40.0f;
+	maxs[1] = ps->origin[1] + 40.0f;
+	maxs[2] = ps->origin[2] + 52.0f;
 
 	count = SV_AreaEntities( mins, maxs, nearby, ARRAY_LEN( nearby ) );
 	if ( s_useCompatAreaLogCount < 32 ) {
@@ -757,8 +770,10 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 	// set up the entity for the client
 	clientNum = client - svs.clients;
 	ent = SV_GentityNum( clientNum );
-	SOF2_ENT_SERVERINDEX(ent) = clientNum;
-	SOF2_ENT_NUMBER(ent) = clientNum;
+	if ( ent ) {
+		SOF2_ENT_SERVERINDEX(ent) = clientNum;
+		SOF2_ENT_NUMBER(ent) = clientNum;
+	}
 	client->gentity = ent;
 	ps = SV_GameClientNum( clientNum );
 	if ( cmd ) {
@@ -782,9 +797,9 @@ void SV_ClientEnterWorld( client_t *client, usercmd_t *cmd, SavedGameJustLoaded_
 		cmd ? cmd->serverTime : -1,
 		cmd ? cmd->buttons : 0 );
 
-	// call the game begin function — SOF2 ClientBegin(clientNum) takes 1 arg only
+	// call the game begin function
 	__try {
-		ge->ClientBegin( client - svs.clients );
+		ge->ClientBegin( client - svs.clients, cmd, eSavedGameJustLoaded );
 		Com_Printf( "SV_ClientEnterWorld: ge->ClientBegin(%d) succeeded, client is ACTIVE\n",
 					(int)(client - svs.clients) );
 		Com_Printf(
@@ -956,8 +971,21 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	}
 
 	if ( cl->state != CS_ACTIVE ) {
+		SV_SOF2CompatEndMoveTriggerFilter();
+		SV_SOF2CompatEndUseTriggerFilter();
 		SV_SOF2SuppressUseTriggers( qfalse );
 		return;		// may have been kicked during the last usercmd
+	}
+	if ( clientNum == 0 && !( cmd->buttons & BUTTON_USE ) && ( cmd->forwardmove || cmd->rightmove || cmd->upmove || cmd->buttons ) ) {
+		SV_SOF2CompatBeginMoveTriggerFilter( clientNum );
+	} else if ( clientNum == 0 ) {
+		SV_SOF2CompatEndMoveTriggerFilter();
+	}
+	if ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) {
+		SV_SOF2CompatBeginUseTriggerFilter( clientNum );
+	} else if ( clientNum == 0 ) {
+		SV_SOF2CompatEndUseTriggerFilter();
+		SV_SOF2CompatClearUseTriggerLatches( clientNum );
 	}
 	SV_SOF2SuppressUseTriggers( ( clientNum == 0 && ( cmd->buttons & BUTTON_USE ) ) ? qtrue : qfalse );
 	if ( sof2VerboseSvLogs && startupThinkLogs < 8 && ent ) {
@@ -1368,7 +1396,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	}
 
 	__try {
-		ge->ClientThink( clientNum );
+		ge->ClientThink( clientNum, cmd );
 	} __except( SV_ClientThinkExceptionFilter( GetExceptionInformation(), clientNum ) ) {
 		static int thinkCrashCount = 0;
 		if ( thinkCrashCount < 3 ) {
@@ -1386,9 +1414,13 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			s_useCompatLatched[clientNum] = qtrue;
 		} else {
 			s_useCompatLatched[clientNum] = qfalse;
-			if ( clientNum == 0 ) {
-				SV_SOF2CompatDispatchMoveTriggers( clientNum, ent );
-			}
+		}
+		// Always run the MOVE compat dispatch even when BUTTON_USE is held.
+		// Latched entities will not fire (latch guard at top of dispatch), but
+		// the spatial sweep at the end clears stale latches so triggers can
+		// fire again once the player leaves their bounds.
+		if ( clientNum == 0 ) {
+			SV_SOF2CompatDispatchMoveTriggers( clientNum, ent );
 		}
 	}
 	SV_SOF2SuppressUseTriggers( qfalse );

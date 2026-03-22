@@ -774,6 +774,7 @@ int CSequencer::ParseAffect( CBlock *block, bstream_t *bstream, CIcarus* icarus 
 	{
 		int sequencerID = game->CreateIcarus(ent);
 		stream_sequencer = icarus->FindSequencer(sequencerID);
+		game->DebugPrint((IGameInterface::e_DebugPrintLevel)0, "[ParseAffect] ent=%d seqID=%d stream_seq=%s\n", ent, sequencerID, stream_sequencer?"OK":"NULL");
 	}
 
 	if (stream_sequencer == NULL)
@@ -1916,6 +1917,7 @@ void CSequencer::CheckAffect( CBlock **command , CIcarus* icarus)
 		{
 			int sequencerID = game->CreateIcarus(ent);
 			sequencer = icarus->FindSequencer(sequencerID);
+			game->DebugPrint((IGameInterface::e_DebugPrintLevel)0, "[CheckAffect] ent=%d seqID=%d sequencer=%s\n", ent, sequencerID, sequencer?"OK":"NULL");
 		}
 		if(memberNum == 0)
 		{	//there was no get, increment manually before next step
@@ -2240,6 +2242,8 @@ int CSequencer::Affect( int id, int type, CIcarus* icarus )
 {
 	IGameInterface* game = icarus->GetGame();
 	CSequence	*sequence = GetSequence( id );
+
+	game->DebugPrint( (IGameInterface::e_DebugPrintLevel)0, "[Seq::Affect] ownerID=%d id=%d type=%d seq=%s\n", m_ownerID, id, type, sequence?"OK":"NULL" );
 
 	if ( sequence == NULL )
 	{

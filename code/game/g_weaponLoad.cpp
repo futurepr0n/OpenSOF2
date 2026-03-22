@@ -1468,7 +1468,8 @@ void WP_LoadWeaponParms (void)
 
 	if (len == -1)
 	{
-		Com_Error(ERR_FATAL,"Cannot find ext_data/weapons.dat!\n");
+		gi.Printf( S_COLOR_YELLOW "WARNING: ext_data/weapons.dat not found - using default weapon stats\n" );
+		return;
 	}
 
 	// initialise the data area
