@@ -1850,6 +1850,15 @@ extern void WP_RemoveSaber( gentity_t *ent, int saberNum );
 void G_ChangePlayerModel( gentity_t *ent, const char *newModel );
 void G_SetSabersFromCVars( gentity_t *ent )
 {
+	// WP_SaberParseParms initialises moveSpeedScale to 1.0f, but it is only
+	// called when a saber config cvar is set.  In SOF2 (no saber data files),
+	// the cvar is empty so the field stays at its zero-initialised default and
+	// ClientAlterSpeed multiplies player speed by 0 every frame, preventing
+	// W-key movement.  Ensure the default here regardless of whether a saber
+	// config is loaded.
+	ent->client->ps.saber[0].moveSpeedScale = 1.0f;
+	ent->client->ps.saber[1].moveSpeedScale = 1.0f;
+
 	if ( g_saber->string
 		&& g_saber->string[0]
 		&& Q_stricmp( "none", g_saber->string )

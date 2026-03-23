@@ -4550,7 +4550,7 @@ void	ClientAlterSpeed(gentity_t *ent, usercmd_t *ucmd, qboolean	controlledByPlay
 	else
 	{//Client sets ucmds and such for speed alterations
 		{
-			client->ps.speed = g_speed->value;//default is 320
+			client->ps.speed = (g_speed->value > 0) ? g_speed->value : 250.0f;//default is 250
 			/*if ( !ent->s.number && ent->painDebounceTime>level.time )
 			{
 				client->ps.speed *= 0.25f;
@@ -5228,8 +5228,6 @@ extern cvar_t	*g_skippingcin;
 	{
 		ClientAlterSpeed(ent, ucmd, controlledByPlayer, 0);
 	}
-
-
 	//FIXME: need to do this before check to avoid walls and cliffs (or just cliffs?)
 	BG_AddPushVecToUcmd( ent, ucmd );
 
