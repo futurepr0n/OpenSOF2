@@ -3158,3 +3158,127 @@ void SP_misc_cubemap( gentity_t *ent )
 {
 	G_FreeEntity( ent );
 }
+
+// ============================================================
+// SOF2-specific static model entities
+// ============================================================
+
+// Spawn a Ghoul2 static model at the entity's origin/angles.
+// Used for CE (ConfusEd custom entity) props that have no model key
+// in the BSP — the model path is hardcoded from the CE definitions.
+static void SOF2_SpawnStaticGlm( gentity_t *ent, const char *modelPath )
+{
+	ent->s.modelindex = G_ModelIndex( modelPath );
+	gi.G2API_InitGhoul2Model( ent->ghoul2, modelPath, ent->s.modelindex,
+	                          NULL_HANDLE, NULL_HANDLE, 0, 0 );
+	ent->s.radius = 150;
+	G_SetOrigin( ent, ent->s.origin );
+	G_SetAngles( ent, ent->s.angles );
+	gi.linkentity( ent );
+}
+
+// model_static — SOF2 entity with "model" key in BSP.
+// Supports both .md3 (modelindex only) and .glm (Ghoul2) models.
+void SP_model_static( gentity_t *ent )
+{
+	if ( !ent->model || !ent->model[0] )
+	{
+		G_FreeEntity( ent );
+		return;
+	}
+
+	ent->s.modelindex = G_ModelIndex( ent->model );
+
+	// Use Ghoul2 for .glm, plain modelindex for .md3
+	int len = strlen( ent->model );
+	if ( len >= 4 && Q_stricmp( ent->model + len - 4, ".glm" ) == 0 )
+	{
+		gi.G2API_InitGhoul2Model( ent->ghoul2, ent->model, ent->s.modelindex,
+		                          NULL_HANDLE, NULL_HANDLE, 0, 0 );
+		ent->s.radius = 100;
+	}
+
+	G_SetOrigin( ent, ent->s.origin );
+	G_SetAngles( ent, ent->s.angles );
+	gi.linkentity( ent );
+}
+
+// CE vehicle / prop entities — model paths from confusEd/vehicles.ent and misc.ent
+void SP_ce_vh_taxi_cab( gentity_t *ent )
+{
+	SOF2_SpawnStaticGlm( ent, "models/objects/common/taxi/taxi.glm" );
+}
+
+void SP_ce_vh_truck_personnel_rotated( gentity_t *ent )
+{
+	SOF2_SpawnStaticGlm( ent, "models/objects/colombia/vehicles/personnel/personnel.glm" );
+}
+
+void SP_ce_misc_trashbag( gentity_t *ent )
+{
+	SOF2_SpawnStaticGlm( ent, "models/objects/common/trashbag/trashbag.glm" );
+}
+
+void SP_ce_misc_trash_can_lid( gentity_t *ent )
+{
+	SOF2_SpawnStaticGlm( ent, "models/objects/common/trashcan/trashcan.glm" );
+}
+
+// ============================================================
+// SOF2 pickup entities
+// Map SOF2-style pickups to the nearest JK2 item equivalents.
+// Items are functional (give health/armor on touch) but invisible
+// because the SOF2 pick_up .md3 models are not registered as G2 models.
+// ============================================================
+
+extern gitem_t *FindItem( const char *className );
+extern void G_SpawnItem( gentity_t *ent, gitem_t *item );
+
+static void SOF2_SpawnPickup( gentity_t *ent, const char *itemClassname )
+{
+	gitem_t *item = FindItem( itemClassname );
+	if ( item )
+	{
+		// SOF2 places pickups right at floor Z.  JK2 item bbox extends 2 units
+		// below origin, so the item starts solid.  Lift 4 units so FinishSpawningItem's
+		// drop-to-floor trace can snap it down cleanly.
+		ent->s.origin[2] += 4.0f;
+		G_SpawnItem( ent, item );
+	}
+	else
+		G_FreeEntity( ent );
+}
+
+void SP_pickup_health_small( gentity_t *ent ) { SOF2_SpawnPickup( ent, "item_medpak" ); }
+void SP_pickup_health_big( gentity_t *ent )   { SOF2_SpawnPickup( ent, "item_medpak" ); }
+void SP_pickup_armor_small( gentity_t *ent )  { SOF2_SpawnPickup( ent, "item_shield_sm" ); }
+void SP_pickup_armor_big( gentity_t *ent )    { SOF2_SpawnPickup( ent, "item_shield_lrg" ); }
+void SP_pickup_ammo( gentity_t *ent )         { SOF2_SpawnPickup( ent, "ammo_blaster" ); }
+
+// ============================================================
+// SOF2 environment / effect / AI entities — stubs
+// ============================================================
+
+// fx_play_effect: forward to JK2's fx_runner (same fxfile/delay fields).
+// SP_fx_runner frees the entity itself if fxFile is not set.
+void SP_fx_play_effect( gentity_t *ent )
+{
+	extern void SP_fx_runner( gentity_t *ent );
+	SP_fx_runner( ent );
+}
+
+// trigger_objective: SOF2 volume that fires targets when a mission objective
+// area is entered.  Forward to trigger_once for basic target-firing support.
+void SP_trigger_objective( gentity_t *ent )
+{
+	extern void SP_trigger_once( gentity_t *ent );
+	SP_trigger_once( ent );
+}
+
+// Remaining SOF2 entities with no JK2 equivalent — silently discard.
+void SP_info_NPCcover( gentity_t *ent )         { G_FreeEntity( ent ); }
+void SP_security_searchlight( gentity_t *ent )  { G_FreeEntity( ent ); }
+void SP_worldeffect_command( gentity_t *ent )   { G_FreeEntity( ent ); }
+void SP_worldeffect_lightning( gentity_t *ent ) { G_FreeEntity( ent ); }
+void SP_emplaced_wpn( gentity_t *ent )          { G_FreeEntity( ent ); }
+void SP_trigger_ladder( gentity_t *ent )        { G_FreeEntity( ent ); }

@@ -454,6 +454,11 @@ void SP_misc_teleporter (gentity_t *self);
 void SP_misc_teleporter_dest (gentity_t *self);
 void SP_misc_model(gentity_t *ent);
 void SP_misc_model_static(gentity_t *ent);
+void SP_model_static(gentity_t *ent);
+void SP_ce_vh_taxi_cab(gentity_t *ent);
+void SP_ce_vh_truck_personnel_rotated(gentity_t *ent);
+void SP_ce_misc_trashbag(gentity_t *ent);
+void SP_ce_misc_trash_can_lid(gentity_t *ent);
 void SP_misc_turret (gentity_t *base);
 void SP_misc_ns_turret (gentity_t *base);
 void SP_laser_arm (gentity_t *base);
@@ -619,6 +624,23 @@ void SP_emplaced_eweb( gentity_t *self );
 void SP_emplaced_gun( gentity_t *self );
 
 void SP_misc_turbobattery( gentity_t *base );
+
+// SOF2 pickup entities
+void SP_pickup_health_small( gentity_t *ent );
+void SP_pickup_health_big( gentity_t *ent );
+void SP_pickup_armor_small( gentity_t *ent );
+void SP_pickup_armor_big( gentity_t *ent );
+void SP_pickup_ammo( gentity_t *ent );
+
+// SOF2 environment / effect / AI entities
+void SP_fx_play_effect( gentity_t *ent );
+void SP_trigger_objective( gentity_t *ent );
+void SP_info_NPCcover( gentity_t *ent );
+void SP_security_searchlight( gentity_t *ent );
+void SP_worldeffect_command( gentity_t *ent );
+void SP_worldeffect_lightning( gentity_t *ent );
+void SP_emplaced_wpn( gentity_t *ent );
+void SP_trigger_ladder( gentity_t *ent );
 
 
 spawn_t	spawns[] = {
@@ -839,6 +861,13 @@ spawn_t	spawns[] = {
 	{"NPC_Colombian_EmplacedGunner", SP_NPC_ShadowTrooper },
 	{"NPC_Manuel_Vergara_RMG", SP_NPC_Desann },
 
+	// SOF2 static model entities
+	{"model_static",                    SP_model_static},
+	{"ce_vh_taxi_cab",                  SP_ce_vh_taxi_cab},
+	{"ce_vh_truck_personnel_rotated",   SP_ce_vh_truck_personnel_rotated},
+	{"ce_misc_trashbag",                SP_ce_misc_trashbag},
+	{"ce_misc_trash_can_lid",           SP_ce_misc_trash_can_lid},
+
 	// SOF2 entity classname aliases — map SOF2 entity types to nearest OpenJK equivalents
 	{"func_breakable_brush",            SP_func_breakable},
 	{"script_runner",                   SP_target_scriptrunner},
@@ -874,6 +903,23 @@ spawn_t	spawns[] = {
 
 	{"emplaced_gun", SP_emplaced_gun},
 	{"emplaced_eweb", SP_emplaced_eweb},
+
+	// SOF2 pickup entities
+	{"pickup_health_small",  SP_pickup_health_small},
+	{"pickup_health_big",    SP_pickup_health_big},
+	{"pickup_armor_small",   SP_pickup_armor_small},
+	{"pickup_armor_big",     SP_pickup_armor_big},
+	{"pickup_ammo",          SP_pickup_ammo},
+
+	// SOF2 environment / effect / AI entities
+	{"fx_play_effect",        SP_fx_play_effect},
+	{"trigger_objective",     SP_trigger_objective},
+	{"trigger_ladder",        SP_trigger_ladder},
+	{"info_NPCcover",         SP_info_NPCcover},
+	{"security_searchlight",  SP_security_searchlight},
+	{"worldeffect_command",   SP_worldeffect_command},
+	{"worldeffect_lightning", SP_worldeffect_lightning},
+	{"emplaced_wpn",          SP_emplaced_wpn},
 
 	{NULL, NULL}
 };
