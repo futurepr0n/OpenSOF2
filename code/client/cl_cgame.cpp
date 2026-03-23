@@ -116,18 +116,26 @@ static void CL_CM_LoadMapWrapper( const char *mapname, int clientLoad, int *chec
 }
 
 // slot 96: native SOF2 cgame uses this as an "is this entity an emplaced weapon?" check.
-// CG_BuildSpawnpointList calls it for every entity index 0-1023 and registers it in
-// cg_emplacedWeaponList if the return value (AL) is non-zero.  Our old void wrapper
-// inadvertently leaked CL_GetDefaultState's qboolean return in EAX, causing hundreds of
-// map entities to be falsely registered as emplaced weapons.  After ~25 seconds, once
-// enough centity lerpOrigins were populated, the emplaced-weapon loop in
-// CG_BuildEntityLists pushed cg_visEntitiesCount past the 256-slot cg_visEntities[]
-// array, causing CG_PointContents to dereference cg_visEntitiesCount (=0x106) as a
-// centity_t pointer → access violation at 0x3002DF0C.
-// FIX: OpenJK has no emplaced weapons.  Always return qfalse so cg_numEmplacedWeapons
-// stays 0 and the overflow never happens.
-static qboolean CL_GetEntityBaseline_SOF2( int /*entityNum*/, void * /*state*/ ) {
-	return qfalse;
+// CG_BuildSpawnpointList (called from CG_Init) iterates all 1024 entity slots, calls this
+// slot with (entityNum, centity*), and if it returns non-zero: copies currentState→nextState,
+// initialises lerpOrigin from origin, sets centity+0x201=1, and pushes centity* into
+// cg_emplacedWeaponList (incrementing cg_numEmplacedWeapons @ 0x301f5c08).
+//
+// Problem A (old void wrapper): CL_GetDefaultState's qboolean return leaked in EAX, so
+// hundreds of normal map entities were falsely registered as emplaced weapons.  Each frame
+// CG_BuildEntityLists then looped over all of them, overflowing the 256-slot
+// cg_visEntities[] array → cg_visEntitiesCount (=262) read as a centity_t* → AV at
+// 0x3002DF0C after ~25 seconds.
+//
+// Problem B (always-qfalse): CG_BuildSpawnpointList skipped all centity initialisation,
+// leaving lerpOrigins zeroed.  Native cgame code crashed at serverTime~2558ms.
+//
+// FIX: Restore real baseline lookup so centities are correctly initialised.  After
+// CG_Init completes, CL_CGameRendering zeroes cg_numEmplacedWeapons on its first call so
+// the emplaced-weapon loop in CG_BuildEntityLists never fires (OpenJK has no emplaced
+// weapons in the entity list anyway).
+static qboolean CL_GetEntityBaseline_SOF2( int entityNum, entityState_t *state ) {
+	return CL_GetDefaultState( entityNum, state );
 }
 
 // slot 102: CL_SetUserCmdValue(userCmdValue, sensitivityScale) — 2 args (no pitch/yaw override)
@@ -3513,7 +3521,8 @@ qboolean CL_InitSOF2CGame( void ) {
 		slots[146] = (void *)CG_R_SetLightStyle;             // [146] R_SetLightStyle ← verified
 		slots[147] = (void *)re.ModelBounds;                 // [147] R_ModelBounds ← verified CRASH FIX!
 		slots[148] = (void *)CG_RE_DamageSurface;             // [148] RE_DamageSurface ← verified (CG_ClientModel)
-		slots[149] = (void *)CG_NullSlot149;                 // [149] R_DamageSurface (SOF2-specific gore, stub)
+		// [149] R_Font_StrLenPixels — struct assigns CG_R_Font_StrLenPixels; removing the
+		// unverified CG_NullSlot149 override that was causing exit(3) after ~18s of gameplay.
 
 		// --- Entity token, weather, FF slots 150-162 ---
 		// Verified via Ghidra xref analysis of cgamex86.dll.
@@ -5707,6 +5716,24 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 
 	re.G2API_SetTime( cl.serverTime, G2T_CG_TIME );
 	if ( !cge ) return;
+
+	// One-shot: zero out cg_numEmplacedWeapons in the native SOF2 cgame so
+	// CG_BuildEntityLists' emplaced-weapon loop never fires.  CG_BuildSpawnpointList
+	// (called from CG_Init) correctly initialises centity lerpOrigins using the real
+	// baseline data, then populates cg_emplacedWeaponList and sets cg_numEmplacedWeapons.
+	// OpenJK has no emplaced weapons in its entity list, so that loop only overflows
+	// cg_visEntities[].  Zeroing the count here (after CG_Init completes) prevents the
+	// overflow crash at CG_PointContents without sacrificing the centity initialisation.
+	// cg_numEmplacedWeapons @ 0x301f5c08 (native cgamex86.dll data segment).
+	{
+		static bool s_emplacedWeaponsCleared = false;
+		if ( !s_emplacedWeaponsCleared ) {
+			volatile int *pCount = reinterpret_cast<volatile int *>( 0x301f5c08 );
+			Com_Printf( "[CG] Clearing cg_numEmplacedWeapons (was %d) to prevent cg_visEntities overflow\n", *pCount );
+			*pCount = 0;
+			s_emplacedWeaponsCleared = true;
+		}
+	}
 
 	// Footstep sound cleanup: stop ch=6/7 after FOOTSTEP_STOP_MS of no footstep events.
 	// Handles looping WAVs that don't self-terminate when the player halts.
