@@ -48,9 +48,9 @@ extern float DEFAULT_MINS_1;
 extern float DEFAULT_MAXS_0;
 extern float DEFAULT_MAXS_1;
 extern float DEFAULT_PLAYER_RADIUS;
-#define DEFAULT_MINS_2		-24
-#define DEFAULT_MAXS_2		40// was 32, but too short for player
-#define CROUCH_MAXS_2		16
+#define DEFAULT_MINS_2		-45	// SOF2 NPC Base.npc Stand.Min.z; origin at waist level
+#define DEFAULT_MAXS_2		45	// SOF2 NPC Base.npc Stand.Max.z; total height = 90 units
+#define CROUCH_MAXS_2		45	// SOF2 crouch bbox same height as stand (prone is separate)
 
 #define ATST_MINS0			-40
 #define ATST_MINS1			-40
