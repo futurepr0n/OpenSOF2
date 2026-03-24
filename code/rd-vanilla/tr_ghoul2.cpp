@@ -2734,6 +2734,23 @@ static inline bool bInShadowRange(vec3_t location)
 	return (dist < r_shadowRange->value);
 }
 
+// Bind-pose Ghoul2 instances for SOF2 static props (ET_GENERAL GLM entities).
+// The native SOF2 cgame doesn't create Ghoul2 for static props; we cache one per model.
+struct SOF2StaticG2Entry { qhandle_t handle; CGhoul2Info_v *g2; };
+static SOF2StaticG2Entry s_staticG2Cache[64];
+static int s_staticG2Count = 0;
+
+void R_ClearStaticG2Cache( void ) {
+	for ( int i = 0; i < s_staticG2Count; i++ ) {
+		if ( s_staticG2Cache[i].g2 ) {
+			G2API_CleanGhoul2Models( *s_staticG2Cache[i].g2 );
+			delete s_staticG2Cache[i].g2;
+			s_staticG2Cache[i].g2 = nullptr;
+		}
+	}
+	s_staticG2Count = 0;
+}
+
 /*
 ==============
 R_AddGHOULSurfaces
@@ -2760,11 +2777,49 @@ void R_AddGhoulSurfaces( trRefEntity_t *ent ) {
 	}
 
 	// SOF2 static prop entities (e.g. taxi, personnel) reach here via CG_General with
-	// a MOD_MDXM handle but no Ghoul2 instance — cgame never inits one for ET_GENERAL.
-	// Skip gracefully rather than asserting; the model is invisible but won't crash.
+	// a MOD_MDXM handle but no Ghoul2 instance — the SOF2 cgame never creates one for
+	// static ET_GENERAL entities. Create a cached bind-pose G2 instance so they render.
 	if (!ent->e.ghoul2)
 	{
-		return;
+		model_t *mod = R_GetModelByHandle( ent->e.hModel );
+		if ( !mod || !mod->mdxm ) {
+			return;  // not a GLM — can't render without Ghoul2
+		}
+
+		// Look up or create a cached bind-pose G2 instance for this GLM handle.
+		CGhoul2Info_v *staticG2 = nullptr;
+		for ( int i = 0; i < s_staticG2Count; i++ ) {
+			if ( s_staticG2Cache[i].handle == ent->e.hModel ) {
+				staticG2 = s_staticG2Cache[i].g2;
+				break;
+			}
+		}
+		if ( !staticG2 && s_staticG2Count < 64 ) {
+			CGhoul2Info_v *newG2 = new CGhoul2Info_v();
+			int result = G2API_InitGhoul2Model( *newG2, mod->name, 0, 0, 0, 0, 0 );
+			if ( result >= 0 && (int)newG2->size() > 0 ) {
+				s_staticG2Cache[s_staticG2Count].handle = ent->e.hModel;
+				s_staticG2Cache[s_staticG2Count].g2     = newG2;
+				s_staticG2Count++;
+				staticG2 = newG2;
+				Com_Printf( "[R static-G2] created bind-pose G2 for '%s' hModel=%d\n",
+					mod->name, (int)ent->e.hModel );
+			} else {
+				delete newG2;
+				static int s_failCount = 0;
+				if ( s_failCount < 8 ) {
+					Com_Printf( "[R static-G2] init FAILED for '%s' hModel=%d result=%d\n",
+						mod->name, (int)ent->e.hModel, result );
+					s_failCount++;
+				}
+				return;
+			}
+		}
+		if ( !staticG2 ) {
+			return;
+		}
+		ent->e.ghoul2 = staticG2;
+		// Fall through to normal Ghoul2 render path (frame 0 = bind pose)
 	}
 	CGhoul2Info_v	&ghoul2 = *ent->e.ghoul2;
 	if ( ghoul2SurfaceLogCount < 48 ) {

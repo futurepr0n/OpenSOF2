@@ -467,8 +467,6 @@ static void SV_SOF2CompatDispatchUse( int clientNum, gentity_t *playerEnt, userc
 	}
 
 	if ( useSource ) {
-		void **vtable = *(void ***)useSource;
-
 		if ( s_useCompatTouchLogCount < 64 ) {
 			Com_Printf(
 				"[USE compat] touch/use #%d ent=%d model=%d('%s') traceBrush=%d score=%d contents=0x%X solid=0x%X\n",
@@ -482,49 +480,8 @@ static void SV_SOF2CompatDispatchUse( int clientNum, gentity_t *playerEnt, userc
 				(unsigned int)SOF2_ENT_SOLID( useSource ) );
 			++s_useCompatTouchLogCount;
 		}
-
-		if ( vtable && vtable[0x70 / sizeof( void * )] ) {
-			__try {
-				( (sof2_use_method_t)vtable[0x70 / sizeof( void * )] )( useSource, playerEnt, playerEnt );
-				dispatchedTriggerUse = qtrue;
-			} __except( EXCEPTION_EXECUTE_HANDLER ) {
-				static int s_useCompatUseTriggerCrashLogCount = 0;
-				if ( s_useCompatUseTriggerCrashLogCount < 8 ) {
-					Com_Printf( "^1[USE compat] trigger use call crashed for ent=%d\n",
-						SOF2_ENT_NUMBER( useSource ) );
-					++s_useCompatUseTriggerCrashLogCount;
-				}
-			}
-		}
-
-		if ( !dispatchedTriggerUse && vtable && vtable[0x6c / sizeof( void * )] ) {
-			__try {
-				( (sof2_touch_method_t)vtable[0x6c / sizeof( void * )] )( useSource, playerEnt, playerEnt );
-			} __except( EXCEPTION_EXECUTE_HANDLER ) {
-				static int s_useCompatTouchCrashLogCount = 0;
-				if ( s_useCompatTouchCrashLogCount < 8 ) {
-					Com_Printf( "^1[USE compat] trigger touch call crashed for ent=%d\n",
-						SOF2_ENT_NUMBER( useSource ) );
-					++s_useCompatTouchCrashLogCount;
-				}
-			}
-		}
-	}
-
-	if ( traceHit && !dispatchedTriggerUse ) {
-		void **vtable = *(void ***)traceHit;
-		if ( vtable && vtable[0x70 / sizeof( void * )] ) {
-			__try {
-				( (sof2_use_method_t)vtable[0x70 / sizeof( void * )] )( traceHit, useSource ? useSource : playerEnt, playerEnt );
-			} __except( EXCEPTION_EXECUTE_HANDLER ) {
-				static int s_useCompatUseCrashLogCount = 0;
-				if ( s_useCompatUseCrashLogCount < 8 ) {
-					Com_Printf( "^1[USE compat] use call crashed for ent=%d\n",
-						SOF2_ENT_NUMBER( traceHit ) );
-					++s_useCompatUseCrashLogCount;
-				}
-			}
-		}
+		// OpenJK entities are plain C structs, not SOF2 C++ objects — no vtable dispatch.
+		// USE is handled game-side by TryUse() area sweep (g_utils.cpp).
 	}
 }
 

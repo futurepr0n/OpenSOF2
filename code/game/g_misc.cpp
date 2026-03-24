@@ -3241,40 +3241,76 @@ void SP_ce_misc_trash_can_lid( gentity_t *ent )
 extern gitem_t *FindItem( const char *className );
 extern void G_SpawnItem( gentity_t *ent, gitem_t *item );
 
-static void SOF2_SpawnPickup( gentity_t *ent, const char *itemClassname )
+// worldModelOverride: if non-null, use this .md3 path from SOF2's own pk3 data instead of
+// the JK2 item's world_model (which doesn't exist in SOF2's asset directory).
+static void SOF2_SpawnPickup( gentity_t *ent, const char *itemClassname, const char *worldModelOverride )
 {
 	gitem_t *item = FindItem( itemClassname );
-	if ( item )
-	{
-		// SOF2 places pickups right at floor Z.  JK2 item bbox extends 2 units
-		// below origin, so the item starts solid.  Lift 4 units so FinishSpawningItem's
-		// drop-to-floor trace can snap it down cleanly.
-		ent->s.origin[2] += 4.0f;
-		G_SpawnItem( ent, item );
-		// ET_ITEM = 2 in OpenJK but native SOF2 cgame maps case 2 to CG_Missile,
-		// crashing the client.  Mark invisible to client while remaining solid
-		// and functional server-side (Touch_Item / G_TouchTriggers still fire).
-		ent->svFlags |= SVF_NOCLIENT;
-	}
-	else
+	if ( !item ) {
 		G_FreeEntity( ent );
+		return;
+	}
+
+	// SOF2 places pickups right at floor Z.  JK2 item bbox extends 2 units
+	// below origin, so the item starts solid.  Lift 4 units so FinishSpawningItem's
+	// drop-to-floor trace can snap it down cleanly.
+	ent->s.origin[2] += 4.0f;
+	// Clear ITMSF_NOTSOLID (bit 3 = value 8): SOF2 spawnflag 8 means something else
+	// (e.g. "single pickup") but JK2's item system interprets bit 3 as "not solid".
+	// Without this fix, SOF2 pickups with spawnflags=8 are visible but untouchable.
+	ent->spawnflags &= ~8;
+	G_SpawnItem( ent, item );
+
+	// G_SpawnItem defers FinishSpawningItem via nextthink.  Call it now so we
+	// can override the JK2-specific fields (eType=ET_ITEM, modelindex=item_index)
+	// before the entity is ever sent to the native SOF2 cgame.
+	ent->e_ThinkFunc = thinkF_NULL;
+	ent->nextthink   = 0;
+	FinishSpawningItem( ent );
+
+	// FinishSpawningItem set s.eType = ET_ITEM (2) and s.modelindex = item_index.
+	// In the native SOF2 cgame eType=2 is ET_MISSILE → crash.
+	// Override: use ET_GENERAL with a real .md3 from SOF2's own pk3 data, registered
+	// at configstring slot 34+handle (what native SOF2 cgame reads in CG_RegisterGraphics).
+	const char *worldModel = worldModelOverride ? worldModelOverride : item->world_model;
+	if ( worldModel && *worldModel ) {
+		int modelHandle = G_ModelIndex( worldModel );
+		if ( modelHandle > 0 && modelHandle < MAX_MODELS ) {
+			gi.SetConfigstring( 34 + modelHandle, worldModel );
+			ent->s.modelindex = modelHandle;
+			Com_Printf( "[PICKUP] '%s' model='%s' handle=%d cs=%d\n",
+				itemClassname, worldModel, modelHandle, 34 + modelHandle );
+		}
+	}
+	ent->s.eType = ET_GENERAL;
 }
 
-void SP_pickup_health_small( gentity_t *ent ) { SOF2_SpawnPickup( ent, "item_medpak" ); }
-void SP_pickup_health_big( gentity_t *ent )   { SOF2_SpawnPickup( ent, "item_medpak" ); }
-void SP_pickup_armor_small( gentity_t *ent )  { SOF2_SpawnPickup( ent, "item_shield_sm" ); }
-void SP_pickup_armor_big( gentity_t *ent )    { SOF2_SpawnPickup( ent, "item_shield_lrg" ); }
-void SP_pickup_ammo( gentity_t *ent )         { SOF2_SpawnPickup( ent, "ammo_blaster" ); }
+// SOF2 native model paths for visible pickups (files exist in SOF2's models.pk3)
+void SP_pickup_health_small( gentity_t *ent ) { SOF2_SpawnPickup( ent, "item_medpak",    "models/pick_ups/health_smll.md3" ); }
+void SP_pickup_health_big( gentity_t *ent )   { SOF2_SpawnPickup( ent, "item_medpak",    "models/pick_ups/health_lrg.md3"  ); }
+void SP_pickup_armor_small( gentity_t *ent )  { SOF2_SpawnPickup( ent, "item_shield_sm", "models/pick_ups/armor_small.md3" ); }
+void SP_pickup_armor_big( gentity_t *ent )    { SOF2_SpawnPickup( ent, "item_shield_lrg","models/pick_ups/armor_large.md3" ); }
+void SP_pickup_ammo( gentity_t *ent )         { SOF2_SpawnPickup( ent, "ammo_blaster",   "models/pick_ups/ammo_9mm_smll.md3" ); }
 
 // ============================================================
 // SOF2 environment / effect / AI entities — stubs
 // ============================================================
 
-// fx_play_effect: forward to JK2's fx_runner (same fxfile/delay fields).
-// SP_fx_runner frees the entity itself if fxFile is not set.
+// fx_play_effect: SOF2 uses "effect" key; JK2 fx_runner uses "fxFile".
+// Map the key before forwarding so SP_fx_runner can find the effect file.
+// Also map SOF2 spawnflag 1 (STARTOFF) → JK2 spawnflag 1 (STARTOFF).
 void SP_fx_play_effect( gentity_t *ent )
 {
 	extern void SP_fx_runner( gentity_t *ent );
+	if ( !ent->fxFile )
+	{
+		char *effectName = NULL;
+		G_SpawnString( "effect", NULL, &effectName );
+		if ( effectName && effectName[0] )
+		{
+			ent->fxFile = G_NewString( effectName );
+		}
+	}
 	SP_fx_runner( ent );
 }
 

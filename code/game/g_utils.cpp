@@ -1827,13 +1827,37 @@ void TryUse( gentity_t *ent )
 				trace.endpos[1],
 				trace.endpos[2] );
 		}
-		//TODO: Play a failure sound
-		/*
-		if ( ent->s.number == 0 )
-		{//if nothing else, try the force telepathy power
-			ForceTelepathy( ent );
+		// SOF2 compat: trace missed — sweep nearby area for CONTENTS_TRIGGER volumes
+		// (script_runner and similar entities use volume overlap, not line-of-sight).
+		{
+			vec3_t aMin, aMax;
+			const float hRange = 40.0f, vRange = 52.0f;
+			gentity_t *nearby[256];
+			int nearCount, i;
+			aMin[0] = ent->client->ps.origin[0] - hRange;
+			aMin[1] = ent->client->ps.origin[1] - hRange;
+			aMin[2] = ent->client->ps.origin[2] - vRange;
+			aMax[0] = ent->client->ps.origin[0] + hRange;
+			aMax[1] = ent->client->ps.origin[1] + hRange;
+			aMax[2] = ent->client->ps.origin[2] + vRange;
+			nearCount = gi.EntitiesInBox( aMin, aMax, nearby, ARRAY_LEN( nearby ) );
+			for ( i = 0; i < nearCount; ++i )
+			{
+				gentity_t *t = nearby[i];
+				if ( !t || t == ent || t->e_UseFunc == useF_NULL ) continue;
+				if ( !(t->contents & CONTENTS_TRIGGER) ) continue;
+				if ( t->svFlags & SVF_INACTIVE ) continue;
+				if ( ent->s.number == 0 )
+				{
+					Com_Printf( "[USE] area trigger ent=%d class='%s' usefunc=%d\n",
+						t->s.number,
+						t->classname ? t->classname : "<null>",
+						t->e_UseFunc );
+				}
+				GEntity_UseFunc( t, ent, ent );
+				return;
+			}
 		}
-		*/
 		return;
 	}
 
@@ -1872,7 +1896,13 @@ void TryUse( gentity_t *ent )
 				target->classname ? target->classname : "<null>",
 				target->e_UseFunc );
 		}
-		NPC_SetAnim( ent, SETANIM_TORSO, BOTH_BUTTON_HOLD, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD );
+		// SOF2 compat: only play the button-hold anim for player entities that have
+		// a JK2-style animation client.  Door/mover entities (and SOF2 NPCs) do not
+		// have BOTH_BUTTON_HOLD in their animation tables and will crash NPC_SetAnim.
+		if ( ent->client && ent->s.eType == ET_PLAYER )
+		{
+			NPC_SetAnim( ent, SETANIM_TORSO, BOTH_BUTTON_HOLD, SETANIM_FLAG_OVERRIDE|SETANIM_FLAG_HOLD );
+		}
 		/*
 		if ( !VectorLengthSquared( ent->client->ps.velocity ) && !PM_CrouchAnim( ent->client->ps.legsAnim ) )
 		{

@@ -793,6 +793,35 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		// cgamex86.dll's BG_EvaluateTrajectory (switch default).
 		if ( (unsigned)state->pos.trType  > TR_GRAVITY ) state->pos.trType  = TR_STATIONARY;
 		if ( (unsigned)state->apos.trType > TR_GRAVITY ) state->apos.trType = TR_STATIONARY;
+		// SOF2 entity-type translation: JK2 and native SOF2 cgame disagree on the
+		// eType numbering.  JK2: ET_MISSILE=3, ET_MOVER=4.
+		// Native SOF2 CG_AddEntity dispatch: case 3=CG_Mover, case 4=CG_General.
+		// Without remapping:
+		//   ET_MOVER(4) → CG_General, which cannot render BSP inline models → invisible doors
+		//   ET_MISSILE(3) → CG_Mover, wrong path for projectiles
+		// With remapping:
+		//   JK2 ET_MISSILE(3) → SOF2 eType 2 → CG_Missile  (cgs_gameModels[modelindex])
+		//   JK2 ET_MOVER(4)   → SOF2 eType 3 → CG_Mover    (cgs_inlineDrawModel + SOLID_BMODEL)
+		if      ( state->eType == 3 ) state->eType = 2;
+		else if ( state->eType == 4 ) state->eType = 3;
+		// Native SOF2 CG_AddEntity switch has no case for eType=9 (ET_TELEPORT_TRIGGER)
+		// or eType>=15 (G_TempEntity event entities: ET_EVENTS+N, N>=1).
+		// Both hit the default: cgi_Error(0,"Bad entity type: %i") → ERR_DROP client crash.
+		// Event temp entities are created by G_TempEntity for sounds, effects, muzzle flashes,
+		// footsteps, etc. — they carry no visual geometry and can be safely suppressed.
+		// ET_TELEPORT_TRIGGER(9) entities are invisible triggers that don't need rendering.
+		if ( state->eType == 9 || state->eType >= 15 ) {
+			continue;  // discard: would crash native SOF2 cgame
+		}
+		// Log ET_BEAM entities (eType=5) when they appear — they render as blue beams in
+		// native SOF2 cgame (CG_Beam, case 5 in CG_AddEntity).  Bounded at 16 messages.
+		static int s_beamLogCount = 0;
+		if ( state->eType == 5 && s_beamLogCount < 16 ) {
+			Com_Printf( "[SV beam] ent=%d eType=5 model=%d model2=%d origin=(%.0f,%.0f,%.0f)\n",
+				state->number, state->modelindex, state->modelindex2,
+				state->pos.trBase[0], state->pos.trBase[1], state->pos.trBase[2] );
+			++s_beamLogCount;
+		}
 		svs.nextSnapshotEntities++;
 		frame->num_entities++;
 	}
