@@ -977,10 +977,7 @@ void CM_SetupShaderProperties(void);
 /*
 ** RE_BeginRegistration
 */
-extern void R_ClearStaticG2Cache( void );
-
 void RE_BeginRegistration( glconfig_t *glconfigOut ) {
-	R_ClearStaticG2Cache();  // SOF2 static prop G2 cache — invalidate on map reload
 	ri.Hunk_ClearToMark();
 
 	R_Init();
