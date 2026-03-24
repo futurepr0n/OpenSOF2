@@ -3272,6 +3272,11 @@ static void SOF2_SpawnPickup( gentity_t *ent, const char *itemClassname, const c
 	// In the native SOF2 cgame eType=2 is ET_MISSILE → crash.
 	// Override: use ET_GENERAL with a real .md3 from SOF2's own pk3 data, registered
 	// at configstring slot 34+handle (what native SOF2 cgame reads in CG_RegisterGraphics).
+	//
+	// Clear EF_NODRAW: FinishSpawningItem may set it if ITMSF_INVISIBLE spawnflag (bit 5=32)
+	// overlaps with SOF2 map spawnflags, or if other conditions mark the item invisible.
+	// We unconditionally want the pickup visible.
+	ent->s.eFlags &= ~EF_NODRAW;
 	const char *worldModel = worldModelOverride ? worldModelOverride : item->world_model;
 	if ( worldModel && *worldModel ) {
 		int modelHandle = G_ModelIndex( worldModel );

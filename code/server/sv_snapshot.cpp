@@ -615,6 +615,11 @@ currently doesn't.
 For viewing through other player's eyes, clent can be something other than client->gentity
 =============
 */
+// Log first 2 snapshots: header per snapshot + every entity included.
+// Identifies beam source and any crash-inducing eType combinations.
+static int s_snapLogSnaps = 0;      // snapshots fully logged so far
+static int s_snapLogInSnap = 0;     // 1 while logging the current snapshot
+
 static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	vec3_t						org;
 	clientSnapshot_t			*frame;
@@ -782,6 +787,11 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 	// copy the entity states out
 	frame->num_entities = 0;
 	frame->first_entity = svs.nextSnapshotEntities;
+	if ( s_snapLogSnaps < 2 ) {
+		s_snapLogInSnap = 1;
+		Com_Printf( "[SNAP] === snap %d start (%d candidates) ===\n",
+			s_snapLogSnaps, entityNumbers.numSnapshotEntities );
+	}
 	for ( i = 0 ; i < entityNumbers.numSnapshotEntities ; i++ ) {
 		ent = SV_GentityNum(entityNumbers.snapshotEntities[i]);
 		if (!ent) continue;	// SOF2: empty pointer table slot
@@ -793,6 +803,17 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		// cgamex86.dll's BG_EvaluateTrajectory (switch default).
 		if ( (unsigned)state->pos.trType  > TR_GRAVITY ) state->pos.trType  = TR_STATIONARY;
 		if ( (unsigned)state->apos.trType > TR_GRAVITY ) state->apos.trType = TR_STATIONARY;
+		// JK2 added TR_NONLINEAR_STOP=4 between TR_LINEAR_STOP and TR_SINE, shifting
+		// TR_SINE from 4→5 and TR_GRAVITY from 5→6.  SOF2 (Q3A-based) has no
+		// TR_NONLINEAR_STOP; its enum is TR_LINEAR_STOP=3, TR_SINE=4, TR_GRAVITY=5.
+		// Translate JK2 trType values >=4 down by 1 so native SOF2 cgame sees correct type:
+		//   JK2 TR_NONLINEAR_STOP(4) → SOF2 TR_LINEAR_STOP(3)  stops at endpoint, no oscillation
+		//   JK2 TR_SINE(5)           → SOF2 TR_SINE(4)         sinusoidal movers work correctly
+		//   JK2 TR_GRAVITY(6)        → SOF2 TR_GRAVITY(5)      gravity-affected entities work
+		// Without this, TR_NONLINEAR_STOP doors are interpreted as TR_SINE (oscillating),
+		// causing movers and breakable walls to flash between start and end positions.
+		if ( (int)state->pos.trType  >= 4 ) state->pos.trType  = (trType_t)((int)state->pos.trType  - 1);
+		if ( (int)state->apos.trType >= 4 ) state->apos.trType = (trType_t)((int)state->apos.trType - 1);
 		// SOF2 entity-type translation: JK2 and native SOF2 cgame disagree on the
 		// eType numbering.  JK2: ET_MISSILE=3, ET_MOVER=4.
 		// Native SOF2 CG_AddEntity dispatch: case 3=CG_Mover, case 4=CG_General.
@@ -804,6 +825,12 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		//   JK2 ET_MOVER(4)   → SOF2 eType 3 → CG_Mover    (cgs_inlineDrawModel + SOLID_BMODEL)
 		if      ( state->eType == 3 ) state->eType = 2;
 		else if ( state->eType == 4 ) state->eType = 3;
+		// ET_BEAM (eType=5): JK2 target_laser entities.  Native SOF2 CG_Beam renders them
+		// as thick blue lines with wrong material pointing toward world origin.
+		// Suppress from snapshots — entity still functions server-side (trace, damage).
+		if ( state->eType == 5 ) {
+			continue;
+		}
 		// Native SOF2 CG_AddEntity switch has no case for eType=9 (ET_TELEPORT_TRIGGER)
 		// or eType>=15 (G_TempEntity event entities: ET_EVENTS+N, N>=1).
 		// Both hit the default: cgi_Error(0,"Bad entity type: %i") → ERR_DROP client crash.
@@ -813,17 +840,18 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		if ( state->eType == 9 || state->eType >= 15 ) {
 			continue;  // discard: would crash native SOF2 cgame
 		}
-		// Log ET_BEAM entities (eType=5) when they appear — they render as blue beams in
-		// native SOF2 cgame (CG_Beam, case 5 in CG_AddEntity).  Bounded at 16 messages.
-		static int s_beamLogCount = 0;
-		if ( state->eType == 5 && s_beamLogCount < 16 ) {
-			Com_Printf( "[SV beam] ent=%d eType=5 model=%d model2=%d origin=(%.0f,%.0f,%.0f)\n",
-				state->number, state->modelindex, state->modelindex2,
-				state->pos.trBase[0], state->pos.trBase[1], state->pos.trBase[2] );
-			++s_beamLogCount;
+		if ( s_snapLogInSnap ) {
+			Com_Printf( "[SNAP] ent=%d et=%d ef=0x%x mdl=%d solid=0x%x pos.tr=%d apos.tr=%d\n",
+				state->number, state->eType, state->eFlags, state->modelindex, state->solid,
+				(int)state->pos.trType, (int)state->apos.trType );
 		}
 		svs.nextSnapshotEntities++;
 		frame->num_entities++;
+	}
+	if ( s_snapLogInSnap ) {
+		Com_Printf( "[SNAP] --- end snap %d, %d entities ---\n", s_snapLogSnaps, frame->num_entities );
+		s_snapLogInSnap = 0;
+		++s_snapLogSnaps;
 	}
 
 	return frame;
