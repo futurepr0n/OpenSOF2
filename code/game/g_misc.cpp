@@ -3163,14 +3163,21 @@ void SP_misc_cubemap( gentity_t *ent )
 // SOF2-specific static model entities
 // ============================================================
 
-// Spawn a Ghoul2 static model at the entity's origin/angles.
+// Spawn a static model at the entity's origin/angles.
 // Used for CE (ConfusEd custom entity) props that have no model key
 // in the BSP — the model path is hardcoded from the CE definitions.
+//
+// Configstring layout mismatch: OpenJK uses CS_MODELS=10 (model i → slot 10+i),
+// but native SOF2 cgame reads model i from slot 34+i (CG_ConfigString(i + 0x22)).
+// We register at both slots so the native cgame can find the model in cgs.gameModels[i].
 static void SOF2_SpawnStaticGlm( gentity_t *ent, const char *modelPath )
 {
-	ent->s.modelindex = G_ModelIndex( modelPath );
-	gi.G2API_InitGhoul2Model( ent->ghoul2, modelPath, ent->s.modelindex,
-	                          NULL_HANDLE, NULL_HANDLE, 0, 0 );
+	int modelIndex = G_ModelIndex( modelPath );  // stores at CS_MODELS(10) + modelIndex
+	ent->s.modelindex = modelIndex;
+	// Also store at SOF2 cgame's expected slot: CG_ConfigString(modelIndex + 0x22 = 34)
+	gi.SetConfigstring( 34 + modelIndex, modelPath );
+	Com_Printf( "[MODEL] SOF2_SpawnStaticGlm: modelPath='%s' modelindex=%d cs_sof2=%d\n",
+	            modelPath, modelIndex, 34 + modelIndex );
 	ent->s.radius = 150;
 	G_SetOrigin( ent, ent->s.origin );
 	G_SetAngles( ent, ent->s.angles );
@@ -3187,14 +3194,14 @@ void SP_model_static( gentity_t *ent )
 		return;
 	}
 
-	ent->s.modelindex = G_ModelIndex( ent->model );
+	int modelIndex = G_ModelIndex( ent->model );
+	ent->s.modelindex = modelIndex;
 
-	// Use Ghoul2 for .glm, plain modelindex for .md3
+	// Register at SOF2 cgame's configstring slot (34+i) in addition to OpenJK's (10+i)
 	int len = strlen( ent->model );
 	if ( len >= 4 && Q_stricmp( ent->model + len - 4, ".glm" ) == 0 )
 	{
-		gi.G2API_InitGhoul2Model( ent->ghoul2, ent->model, ent->s.modelindex,
-		                          NULL_HANDLE, NULL_HANDLE, 0, 0 );
+		gi.SetConfigstring( 34 + modelIndex, ent->model );
 		ent->s.radius = 100;
 	}
 
@@ -3244,6 +3251,10 @@ static void SOF2_SpawnPickup( gentity_t *ent, const char *itemClassname )
 		// drop-to-floor trace can snap it down cleanly.
 		ent->s.origin[2] += 4.0f;
 		G_SpawnItem( ent, item );
+		// ET_ITEM = 2 in OpenJK but native SOF2 cgame maps case 2 to CG_Missile,
+		// crashing the client.  Mark invisible to client while remaining solid
+		// and functional server-side (Touch_Item / G_TouchTriggers still fire).
+		ent->svFlags |= SVF_NOCLIENT;
 	}
 	else
 		G_FreeEntity( ent );

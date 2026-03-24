@@ -22,6 +22,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "g_local.h"
+#include <crtdbg.h>
 #include "g_functions.h"
 #include "Q3_Interface.h"
 #include "g_nav.h"
@@ -724,6 +725,11 @@ SavedGameJustLoaded_e g_eSavedGameJustLoaded;
 qboolean g_qbLoadTransition = qfalse;
 void InitGame(  const char *mapname, const char *spawntarget, int checkSum, const char *entities, int levelTime, int randomSeed, int globalTime, SavedGameJustLoaded_e eSavedGameJustLoaded, qboolean qbLoadTransition )
 {
+#ifdef _DEBUG
+	// Redirect CRT assert output to stderr so headless crash-hunt can identify the assert
+	_CrtSetReportMode( _CRT_ASSERT, _CRTDBG_MODE_FILE );
+	_CrtSetReportFile( _CRT_ASSERT, _CRTDBG_FILE_STDERR );
+#endif
 	//rww - default this to 0, we will auto-set it to 1 if we run into a terrain ent
 	gi.cvar_set("RMG", "0");
 
@@ -1946,6 +1952,20 @@ void G_RunFrame( int levelTime ) {
 	level.previousTime = level.time;
 	level.time = levelTime;
 
+	// Crash-hunt: print every 50 frames so we can bracket when the crash happens
+	if ( (level.framenum % 50) == 0 ) {
+		gentity_t *p = &g_entities[0];
+		if ( p->client ) {
+			fprintf(stderr, "[FRAME] frame=%d time=%d gnd=%d vel=(%.1f,%.1f,%.1f) speed=%d pmtype=%d\n",
+				level.framenum, level.time,
+				p->client->ps.groundEntityNum,
+				p->client->ps.velocity[0], p->client->ps.velocity[1], p->client->ps.velocity[2],
+				p->client->ps.speed,
+				p->client->ps.pm_type );
+		} else {
+			fprintf(stderr, "[FRAME] frame=%d time=%d (no client)\n", level.framenum, level.time);
+		}
+	}
 
 	//ResetTeamCounters();
 	NAV::DecayDangerSenses();

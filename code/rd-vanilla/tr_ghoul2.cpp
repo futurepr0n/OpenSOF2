@@ -2759,7 +2759,13 @@ void R_AddGhoulSurfaces( trRefEntity_t *ent ) {
 		return;
 	}
 
-	assert (ent->e.ghoul2);	//entity is foo if it has a glm model handle but no ghoul2 pointer!
+	// SOF2 static prop entities (e.g. taxi, personnel) reach here via CG_General with
+	// a MOD_MDXM handle but no Ghoul2 instance — cgame never inits one for ET_GENERAL.
+	// Skip gracefully rather than asserting; the model is invisible but won't crash.
+	if (!ent->e.ghoul2)
+	{
+		return;
+	}
 	CGhoul2Info_v	&ghoul2 = *ent->e.ghoul2;
 	if ( ghoul2SurfaceLogCount < 48 ) {
 		Com_Printf(

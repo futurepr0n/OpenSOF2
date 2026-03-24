@@ -5401,6 +5401,21 @@ extern cvar_t	*g_skippingcin;
 
 	VectorCopy( client->ps.origin, oldOrigin );
 
+	// Movement diagnosis: inject forwardmove on frames 100-110 to test if PM_WalkMove applies velocity
+	if ( ent->s.number == 0 && level.framenum >= 100 && level.framenum <= 110 )
+	{
+		pm.cmd.forwardmove = 64;
+	}
+	// Log forwardmove and ground state every frame it's non-zero (interactive diagnostic)
+	if ( ent->s.number == 0 && (pm.cmd.forwardmove != 0 || (level.framenum >= 100 && level.framenum <= 115)) )
+	{
+		fprintf(stderr, "[MOVE] f=%d fm=%d gnd=%d vel=(%.1f,%.1f,%.1f) speed=%d pm=%d\n",
+			level.framenum, pm.cmd.forwardmove,
+			client->ps.groundEntityNum,
+			client->ps.velocity[0], client->ps.velocity[1], client->ps.velocity[2],
+			client->ps.speed, client->ps.pm_type );
+	}
+
 	// perform a pmove
 	Pmove( &pm );
 	pm.gent = 0;

@@ -9176,6 +9176,8 @@ void PM_SetSaberMove(saberMoveName_t newMove)
 
 	if ( newMove < LS_NONE || newMove >= LS_MOVE_MAX )
 	{
+		fprintf(stderr, "[CRASH] PM_SetSaberMove: invalid newMove=%d (LS_NONE=%d LS_MOVE_MAX=%d)\n",
+			(int)newMove, (int)LS_NONE, (int)LS_MOVE_MAX);
 		assert(0);
 		return;
 	}

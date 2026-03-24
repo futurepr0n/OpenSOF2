@@ -919,7 +919,12 @@ void NPC_BSJump (void)
 
 		z = (sqrt(apexHeight + z) - sqrt(apexHeight));
 
-		assert(z >= 0);
+		if ( z < 0 ) {
+			// destination is more than apexHeight below the NPC — jump math invalid, skip
+			Com_Printf( S_COLOR_YELLOW "[NPC] Jump skipped: z<0 (dest too far below) NPC=%s\n",
+				NPC->targetname ? NPC->targetname : "?" );
+			return;
+		}
 
 //		gi.Printf("apex is %4.2f percent from p1: ", (xy-z)*0.5/xy*100.0f);
 
@@ -929,7 +934,11 @@ void NPC_BSJump (void)
 			xy -= z;
 			xy *= 0.5;
 
-			assert(xy > 0);
+			if ( xy <= 0 ) {
+				Com_Printf( S_COLOR_YELLOW "[NPC] Jump skipped: xy<=0 after z subtraction NPC=%s\n",
+					NPC->targetname ? NPC->targetname : "?" );
+				return;
+			}
 		}
 
 		VectorMA( p1, xy, dir, apex );

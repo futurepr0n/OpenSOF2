@@ -4348,8 +4348,8 @@ qboolean	CL_GetSnapshot( int snapshotNumber, snapshot_t *snapshot ) {
 }
 
 // Retail SOF2 uses a different configstring layout than JKA/OpenJK.
-// For diagnostics here we want the live SOF2 model table, not the JKA slot base.
-#define SOF2_CS_MODELS 32
+// Native SOF2 cgame reads model i from CG_ConfigString(i + 0x22) = slot 34+i.
+#define SOF2_CS_MODELS 34
 static const char *CL_SOF2_ModelNameForBaseline( int modelIndex ) {
 	const int csIndex = SOF2_CS_MODELS + modelIndex;
 

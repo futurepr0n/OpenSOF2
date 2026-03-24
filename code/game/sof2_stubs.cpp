@@ -188,7 +188,7 @@ qboolean WP_ForceThrowable              (gentity_t */*self*/, gentity_t */*ent*/
 qboolean WP_SaberBladeUseSecondBladeStyle(saberInfo_t */*saber*/, int /*bladeNum*/) { return qfalse; }
 qboolean WP_SaberCanTurnOffSomeBlades  (saberInfo_t */*saber*/) { return qfalse; }
 qboolean WP_SaberLose                  (gentity_t */*self*/, vec3_t /*saberDir*/) { return qfalse; }
-qboolean WP_SaberParseParms            (const char */*saberName*/, saberInfo_t *saber, qboolean /*setColors*/) { if (saber) memset(saber, 0, sizeof(*saber)); return qfalse; }
+qboolean WP_SaberParseParms            (const char */*saberName*/, saberInfo_t *saber, qboolean /*setColors*/) { if (saber) { memset(saber, 0, sizeof(*saber)); saber->moveSpeedScale = 1.0f; saber->animSpeedScale = 1.0f; } return qfalse; }
 qboolean WP_SabersCheckLock2           (gentity_t */*attacker*/, gentity_t */*defender*/, sabersLockMode_t /*lockMode*/) { return qfalse; }
 qboolean WP_SaberStyleValidForSaber    (gentity_t */*ent*/, int /*style*/) { return qfalse; }
 qboolean WP_UseFirstValidSaberStyle    (gentity_t */*ent*/, int */*saberAnimLevel*/) { return qfalse; }

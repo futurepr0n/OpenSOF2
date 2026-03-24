@@ -1850,15 +1850,6 @@ extern void WP_RemoveSaber( gentity_t *ent, int saberNum );
 void G_ChangePlayerModel( gentity_t *ent, const char *newModel );
 void G_SetSabersFromCVars( gentity_t *ent )
 {
-	// WP_SaberParseParms initialises moveSpeedScale to 1.0f, but it is only
-	// called when a saber config cvar is set.  In SOF2 (no saber data files),
-	// the cvar is empty so the field stays at its zero-initialised default and
-	// ClientAlterSpeed multiplies player speed by 0 every frame, preventing
-	// W-key movement.  Ensure the default here regardless of whether a saber
-	// config is loaded.
-	ent->client->ps.saber[0].moveSpeedScale = 1.0f;
-	ent->client->ps.saber[1].moveSpeedScale = 1.0f;
-
 	if ( g_saber->string
 		&& g_saber->string[0]
 		&& Q_stricmp( "none", g_saber->string )
@@ -2265,6 +2256,10 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 		VectorCopy (playerMaxs, ent->maxs);
 		client->crouchheight = CROUCH_MAXS_2;
 		client->standheight = DEFAULT_MAXS_2;
+		// Set viewheight immediately so the first snapshot has the correct eye position.
+		// ps is memset to 0 above; PM_SetBounds only runs inside Pmove which happens
+		// after the first snapshot is sent, leaving the camera at origin height otherwise.
+		client->ps.viewheight = client->standheight + STANDARD_VIEWHEIGHT_OFFSET;
 
 		client->ps.clientNum = index;
 
@@ -2355,12 +2350,15 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 			if ( !floorTr.startsolid && !floorTr.allsolid && floorTr.fraction < 1.0f )
 			{
 				spawn_origin[2]  = floorTr.endpos[2];
-				spawn_origin[2] += 1.0f;  // 1-unit clearance against fp precision at contact
+				spawn_origin[2] += 0.125f; // 0.125-unit clearance; PM_GroundTrace sweeps 0.25 units so this lands within detection range
 			}
 		}
 
 		VectorCopy( spawn_origin, client->ps.origin );
 		VectorCopy( spawn_origin, ent->currentOrigin );
+		Com_Printf( "[SPAWN] Final origin: %.3f %.3f %.3f viewheight=%d pm_type=%d\n",
+		            client->ps.origin[0], client->ps.origin[1], client->ps.origin[2],
+		            client->ps.viewheight, client->ps.pm_type );
 
 		// the respawned flag will be cleared after the attack and jump keys come up
 		client->ps.pm_flags |= PMF_RESPAWNED;
