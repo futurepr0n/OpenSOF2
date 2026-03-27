@@ -627,6 +627,10 @@ void SetMoverState( gentity_t *ent, moverState_t moverState, int time ) {
 	vec3_t			delta;
 	float			f;
 
+	gi.Printf( "[MOVER] ent=%d '%s' state %d->%d at t=%d\n",
+		ent->s.number,
+		ent->targetname ? ent->targetname : "<noname>",
+		ent->moverState, moverState, time );
 	ent->moverState = moverState;
 
 	ent->s.pos.trTime = time;
@@ -2521,6 +2525,12 @@ WALL
 //static -slc
 void use_wall( gentity_t *ent, gentity_t *other, gentity_t *activator )
 {
+	gi.Printf( "[WALL] ent=%d '%s' count=%d->%d spawnflags=0x%x activator=%d\n",
+		ent->s.number,
+		ent->targetname ? ent->targetname : "<noname>",
+		ent->count, ent->count ? 0 : 1,
+		ent->spawnflags,
+		activator ? activator->s.number : -1 );
 	G_ActivateBehavior(ent,BSET_USE);
 
 	// Not there so make it there

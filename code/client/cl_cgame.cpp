@@ -723,6 +723,247 @@ static void CG_DebugAddCharacterProbe( const refdef_t *refdef ) {
 	}
 }
 
+// ============================================================
+// Static GLM prop rendering — engine-side G2 for SOF2 static props
+// The native SOF2 cgame cannot render GLM models without a pre-built G2 instance
+// in centity.ghoul2. For static props spawned by SOF2_SpawnStaticGlm (taxi, truck,
+// trashcan, etc.) the game DLL never creates a G2 instance, so the native cgame
+// silently skips them. We create engine-side G2 instances and inject them into
+// the scene via re.AddRefEntityToScene, bypassing the native cgame renderer.
+// ============================================================
+
+#define SOF2_STATIC_GLM_MAX 128
+
+struct sof2_static_glm_t {
+	qboolean    valid;
+	int         entityNum;
+	vec3_t      origin;
+	float       angles[3];
+	qhandle_t   model;
+	int         modelIndex;   // cached model index — detects model changes
+	int         framesAbsent; // consecutive frames entity not in snapshot; invalidate after threshold
+};
+
+static sof2_static_glm_t s_staticGlmProps[SOF2_STATIC_GLM_MAX];
+static CGhoul2Info_v     s_staticGlmG2[SOF2_STATIC_GLM_MAX];
+static int               s_staticGlmCount = 0;
+static char              s_staticGlmMap[64];
+
+// SOF2 native cgame reads model i from configstring slot 34+i (SOF2_CS_MODELS = 34)
+static const char *CG_StaticGlm_GetModelPath( int modelIndex ) {
+	const int csIndex = 34 + modelIndex;
+	if ( modelIndex <= 0 || csIndex >= MAX_CONFIGSTRINGS ) return NULL;
+	if ( cl.gameState.stringOffsets[csIndex] <= 0 ) return NULL;
+	return cl.gameState.stringData + cl.gameState.stringOffsets[csIndex];
+}
+
+static qboolean CG_StaticGlm_IsGlm( const char *path ) {
+	if ( !path || !path[0] ) return qfalse;
+	const int len = (int)strlen( path );
+	if ( len < 4 ) return qfalse;
+	return Q_stricmp( path + len - 4, ".glm" ) == 0 ? qtrue : qfalse;
+}
+
+static void CG_StaticGlm_CheckMapChange( void ) {
+	char mapName[64];
+	CG_DebugGetCurrentMapName( mapName, sizeof( mapName ) );
+	if ( !mapName[0] || Q_stricmp( mapName, s_staticGlmMap ) == 0 ) return;
+
+	// Map changed: free all G2 instances and reset
+	for ( int i = 0; i < s_staticGlmCount; ++i ) {
+		if ( s_staticGlmG2[i].size() > 0 ) {
+			re.G2API_CleanGhoul2Models( s_staticGlmG2[i] );
+		}
+	}
+	memset( s_staticGlmProps, 0, sizeof( s_staticGlmProps ) );
+	s_staticGlmCount = 0;
+	Q_strncpyz( s_staticGlmMap, mapName, sizeof( s_staticGlmMap ) );
+	Com_Printf( "[STATIC_GLM] map changed to '%s', cleared %d props\n", mapName, s_staticGlmCount );
+}
+
+// Invalidate a slot: clean G2 instance and zero the struct so the slot can be reused.
+// s_staticGlmCount is NOT decremented (high-water mark semantics).
+static void CG_StaticGlm_Invalidate( int idx ) {
+	if ( idx < 0 || idx >= s_staticGlmCount ) return;
+	if ( s_staticGlmG2[idx].size() > 0 ) {
+		re.G2API_CleanGhoul2Models( s_staticGlmG2[idx] );
+	}
+	memset( &s_staticGlmProps[idx], 0, sizeof(sof2_static_glm_t) );
+}
+
+static void CG_StaticGlm_Register( int entityNum, const float *origin, const float *angles, int modelIndex ) {
+	static int regLogCount = 0;
+
+	// Search for existing entry; track first free (invalid) slot for potential reuse.
+	int freeSlot = -1;
+	for ( int i = 0; i < s_staticGlmCount; ++i ) {
+		if ( !s_staticGlmProps[i].valid ) {
+			if ( freeSlot < 0 ) freeSlot = i;
+			continue;
+		}
+		if ( s_staticGlmProps[i].entityNum == entityNum ) {
+			if ( s_staticGlmProps[i].modelIndex == modelIndex ) {
+				// Already registered — update position (entity may have moved since registration)
+				VectorCopy( origin, s_staticGlmProps[i].origin );
+				VectorCopy( angles, s_staticGlmProps[i].angles );
+				return;
+			}
+			// Model changed (e.g. breakable destroyed): invalidate old and re-register.
+			if ( regLogCount < 16 ) {
+				Com_Printf( "[STATIC_GLM] ent=%d model changed %d->%d, re-registering\n",
+					entityNum, s_staticGlmProps[i].modelIndex, modelIndex );
+				++regLogCount;
+			}
+			CG_StaticGlm_Invalidate( i );
+			if ( freeSlot < 0 ) freeSlot = i;  // reuse this slot
+			break;
+		}
+	}
+
+	// Use first free slot, or extend the high-water mark.
+	if ( freeSlot < 0 ) {
+		if ( s_staticGlmCount >= SOF2_STATIC_GLM_MAX ) return;
+		freeSlot = s_staticGlmCount++;
+	}
+
+	const char *modelPath = CG_StaticGlm_GetModelPath( modelIndex );
+	if ( !CG_StaticGlm_IsGlm( modelPath ) ) return;
+
+	sof2_static_glm_t *prop = &s_staticGlmProps[freeSlot];
+	memset( prop, 0, sizeof( *prop ) );
+
+	prop->entityNum  = entityNum;
+	prop->modelIndex = modelIndex;
+	VectorCopy( origin, prop->origin );
+	prop->angles[0] = angles[0];
+	prop->angles[1] = angles[1];
+	prop->angles[2] = angles[2];
+
+	prop->model = re.RegisterModel( modelPath );
+	if ( !prop->model ) {
+		if ( regLogCount < 16 ) {
+			Com_Printf( "[STATIC_GLM] RegisterModel failed: '%s'\n", modelPath );
+			++regLogCount;
+		}
+		return;
+	}
+
+	// s_staticGlmG2[freeSlot] is either a fresh empty vector or was cleaned by Invalidate.
+	const int g2Result = re.G2API_InitGhoul2Model(
+		s_staticGlmG2[freeSlot],
+		modelPath,
+		prop->model,
+		0, 0, 0, 0 );
+	if ( g2Result < 0 || s_staticGlmG2[freeSlot].size() <= 0 ) {
+		if ( regLogCount < 16 ) {
+			Com_Printf( "[STATIC_GLM] InitGhoul2Model failed: '%s' result=%d\n", modelPath, g2Result );
+			++regLogCount;
+		}
+		return;
+	}
+
+	prop->valid = qtrue;
+
+	Com_Printf( "[STATIC_GLM] #%d registered ent=%d model='%s' org=(%.1f,%.1f,%.1f) ang=(%.1f,%.1f,%.1f)\n",
+		freeSlot + 1, entityNum, modelPath,
+		origin[0], origin[1], origin[2],
+		angles[0], angles[1], angles[2] );
+}
+
+static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
+	static int submitLogCount = 0;
+
+	if ( !refdef || cls.state != CA_ACTIVE ) return;
+	if ( refdef->rdflags & RDF_NOWORLDMODEL ) return;
+
+	CG_StaticGlm_CheckMapChange();
+
+	// Scan current snapshot entities: register new GLM props; invalidate any that
+	// changed type or model away from GLM (e.g. breakable entity destroyed/changed).
+	for ( int i = 0; i < cl.frame.numEntities; ++i ) {
+		const entityState_t *es = &cl.parseEntities[
+			( cl.frame.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 ) ];
+
+		// Check if entity was registered as a GLM prop but no longer qualifies
+		if ( (es->eFlags & EF_NODRAW) || es->eType != ET_GENERAL || es->modelindex <= 0 ||
+		     !CG_StaticGlm_IsGlm( CG_StaticGlm_GetModelPath( es->modelindex ) ) ) {
+			for ( int j = 0; j < s_staticGlmCount; ++j ) {
+				if ( s_staticGlmProps[j].valid && s_staticGlmProps[j].entityNum == es->number ) {
+					CG_StaticGlm_Invalidate( j );  // entity no longer a GLM prop
+					break;
+				}
+			}
+			continue;
+		}
+
+		CG_StaticGlm_Register( es->number, es->pos.trBase, es->angles, es->modelindex );
+	}
+
+	// Invalidate registered props whose entity has disappeared from snapshot
+	// (destroyed/freed entities that no longer appear in any snapshot frame).
+	for ( int j = 0; j < s_staticGlmCount; ++j ) {
+		sof2_static_glm_t *prop = &s_staticGlmProps[j];
+		if ( !prop->valid ) continue;
+		qboolean seenThisFrame = qfalse;
+		for ( int i = 0; i < cl.frame.numEntities; ++i ) {
+			const entityState_t *es = &cl.parseEntities[
+				( cl.frame.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 ) ];
+			if ( es->number == prop->entityNum ) { seenThisFrame = qtrue; break; }
+		}
+		if ( seenThisFrame ) {
+			prop->framesAbsent = 0;
+		} else if ( ++prop->framesAbsent > 5 ) {
+			CG_StaticGlm_Invalidate( j );
+		}
+	}
+
+	// Submit registered instances to the scene.
+	// Only render entities that are NOT currently in the snapshot (framesAbsent > 0).
+	// Entities present in the snapshot are rendered by native SOF2 cgame (CG_General/CG_Mover)
+	// using its own Ghoul2 state with correct animation.  Rendering them here too causes
+	// double-render: our bind-pose (frame 0) overlaps with the cgame's animated state,
+	// producing visible "start and end animation sequence" ghosting.
+	// For absent entities (recently destroyed/freed/PVS-exited) we render their last-known
+	// position as a brief persistence effect before framesAbsent > 5 triggers invalidation.
+	for ( int i = 0; i < s_staticGlmCount; ++i ) {
+		sof2_static_glm_t *prop = &s_staticGlmProps[i];
+		if ( !prop->valid || s_staticGlmG2[i].size() <= 0 ) continue;
+		// Skip entities currently in snapshot — native cgame renders them
+		if ( prop->framesAbsent == 0 ) continue;
+
+		// Entity left snapshot — render at last known position (updated by scan loop via Register)
+		vec3_t renderOrg;
+		float  renderAng[3];
+		VectorCopy( prop->origin, renderOrg );
+		VectorCopy( prop->angles, renderAng );
+
+		refEntity_t ent;
+		memset( &ent, 0, sizeof( ent ) );
+		ent.reType       = RT_MODEL;
+		ent.hModel       = prop->model;
+		ent.ghoul2       = &s_staticGlmG2[i];
+		ent.renderfx     = RF_NOSHADOW;
+		VectorCopy( renderOrg, ent.origin );
+		VectorCopy( renderOrg, ent.oldorigin );
+		VectorCopy( renderOrg, ent.lightingOrigin );
+		AnglesToAxis( renderAng, ent.axis );
+		VectorCopy( renderAng, ent.angles );
+		ent.modelScale[0] = 1.0f;
+		ent.modelScale[1] = 1.0f;
+		ent.modelScale[2] = 1.0f;
+
+		re.AddRefEntityToScene( &ent );
+
+		if ( submitLogCount < 24 ) {
+			Com_Printf( "[STATIC_GLM] submit ent=%d model=%d org=(%.1f,%.1f,%.1f)%s\n",
+				prop->entityNum, (int)prop->model,
+				renderOrg[0], renderOrg[1], renderOrg[2],
+				" [cached]" );
+			++submitLogCount;
+		}
+	}
+}
+
 static void CL_LogPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, const char *source ) {
 	if ( cls.state != CA_ACTIVE || !verts || numVerts <= 0 ) {
 		return;
@@ -1750,7 +1991,7 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 		}
 	}
 
-	if ( ghoul2SubmitLogCount < 64 && ( submitEnt->ghoul2 != NULL || sof2Ghoul2 != NULL || ent->ghoul2 != NULL ) ) {
+	if ( ghoul2SubmitLogCount < 16 && ( submitEnt->ghoul2 != NULL || sof2Ghoul2 != NULL || remappedGhoul2Handle > 0 ) ) {
 		Com_Printf(
 			"[CG scene] ghoul2 submit mode=%s raw=%p rawField=%p submit=%p resolved=%p handle=%d hModel=%d rawHModel=%d reType=%d rawType=%d org=(%.1f,%.1f,%.1f)\n",
 			useSOF2Layout ? "sof2" : "openjk",
@@ -1765,27 +2006,6 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 			*(const int *)( raw + 0x00 ),
 			submitEnt->origin[0], submitEnt->origin[1], submitEnt->origin[2] );
 		++ghoul2SubmitLogCount;
-	}
-	if ( useSOF2Layout && ghoul2SubmitLogCount <= 16 ) {
-		const int rawBC = *(const int *)( raw + 0xBC );
-		const int rawC0 = *(const int *)( raw + 0xC0 );
-		const int rawC4 = *(const int *)( raw + 0xC4 );
-		const int rawC8 = *(const int *)( raw + 0xC8 );
-		const int rawCC = *(const int *)( raw + 0xCC );
-		const int rawD0 = *(const int *)( raw + 0xD0 );
-		const int rawD4 = *(const int *)( raw + 0xD4 );
-		const int rawD8 = *(const int *)( raw + 0xD8 );
-		Com_Printf(
-			"[CG scene] ghoul2 rawfields mode=sof2 @BC=%08X @C0=%08X @C4=%08X @C8=%08X @CC=%08X @D0=%08X @D4=%08X @D8=%08X valid{BC=%d,C0=%d,C4=%d,C8=%d,CC=%d,D0=%d,D4=%d,D8=%d}\n",
-			rawBC, rawC0, rawC4, rawC8, rawCC, rawD0, rawD4, rawD8,
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawBC ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC0 ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC4 ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawC8 ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawCC ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD0 ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD4 ),
-			(int)CG_SOF2_Ghoul2LooksLikeHandle( (uintptr_t)(unsigned int)rawD8 ) );
 	}
 
 	if ( submitEnt->reType < RT_MODEL || submitEnt->reType >= RT_MAX_REF_ENTITY_TYPE ) {
@@ -1943,6 +2163,7 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 	}
 
 	CG_DebugAddCharacterProbe( localRefdef );
+	CG_AddStaticGlmProps( localRefdef );
 
 	__try {
 		if ( !s_firstSubmittedRefdefValid ) {
@@ -5732,6 +5953,49 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 			Com_Printf( "[CG] Clearing cg_numEmplacedWeapons (was %d) to prevent cg_visEntities overflow\n", *pCount );
 			*pCount = 0;
 			s_emplacedWeaponsCleared = true;
+		}
+	}
+
+	// Register missing server models in cgs.gameModels array.
+	// CG_RegisterGraphics was unable to populate models from configstrings during CG_Init,
+	// likely because the cgame's configstring lookup couldn't reach server configstrings.
+	// Manually register all models from engine configstrings (slots 34+N for SOF2) and
+	// write handles to cgs.gameModels[N] @ 0x301accb4 + N*4.
+	{
+		static bool s_modelsRegistered = false;
+		if ( !s_modelsRegistered ) {
+			s_modelsRegistered = true;
+			int registeredCount = 0;
+			volatile unsigned int *pGameModels = reinterpret_cast<volatile unsigned int *>( 0x301accb4 );
+
+			for ( int i = 1; i < 256; i++ ) {
+				// Check if this model was already registered
+				if ( pGameModels[i] != 0 ) {
+					continue;
+				}
+
+				// Read from SOF2 configstring slot (34+N)
+				const char *modelPath = cl.gameState.stringData + cl.gameState.stringOffsets[ 34 + i ];
+				if ( !modelPath || !modelPath[0] ) {
+					continue;
+				}
+
+				// Register the model and store handle
+				unsigned int modelHandle = (unsigned int)re.RegisterModel( modelPath );
+				if ( modelHandle == 0 ) {
+					Com_Printf( "[CG] RegisterMissingModels: re.RegisterModel('%s') returned 0\n", modelPath );
+					continue;
+				}
+
+				pGameModels[i] = modelHandle;
+				if ( registeredCount < 16 ) {
+					Com_Printf( "[CG] RegisterMissingModels[%d]: '%s' -> handle=0x%x\n", i, modelPath, modelHandle );
+					registeredCount++;
+				}
+			}
+			if ( registeredCount > 0 ) {
+				Com_Printf( "[CG] RegisterMissingModels: registered %d models\n", registeredCount );
+			}
 		}
 	}
 

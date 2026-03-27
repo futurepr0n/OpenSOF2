@@ -392,10 +392,16 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 	clientpvs = CM_ClusterPVS (clientcluster);
 
 	// SOF2: no Force powers — sightOn stays qfalse
-	static int s_debugDoorSnapshotLogCount = 0;
+	// Per-entity snapshot log count — gate logging for ent=2, ent=46, ent=49 (door entities)
+	static int s_entSnapLog[MAX_GENTITIES];  // zero-initialised at first call
+	static bool s_entSnapLogInited = false;
+	if ( !s_entSnapLogInited ) { memset(s_entSnapLog, 0, sizeof(s_entSnapLog)); s_entSnapLogInited = true; }
 
 	for ( e = 0 ; e < MAX_GENTITIES ; e++ ) {
 		ent = SV_GentityNum(e);
+
+		// Per-entity debug logging for entity 2 (original debug target) and known door entities 46/49
+		const qboolean logThis = (qboolean)((e == 2 || e == 46 || e == 49) && s_entSnapLog[e] < 8);
 
 		if (!ent) {
 			continue;	// SOF2: empty pointer table slot
@@ -403,14 +409,14 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 
 		if (SOF2_ENT_EFLAGS(ent) & EF_PERMANENT)
 		{	// he's permanent, so don't send him down!
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=permanent flags=0x%x model=%d solid=0x%x linked=%d\n",
-					SOF2_ENT_EFLAGS( ent ),
+					"[SV snapshot] ent=%d skip=permanent flags=0x%x model=%d solid=0x%x linked=%d\n",
+					e, SOF2_ENT_EFLAGS( ent ),
 					SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ),
 					(int)SOF2_ENT_LINKED( ent ) );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
@@ -422,52 +428,52 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 
 		// never send entities that aren't linked in
 		if ( !SOF2_ENT_LINKED(ent) ) {
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=unlinked flags=0x%x model=%d solid=0x%x\n",
-					SOF2_ENT_EFLAGS( ent ),
+					"[SV snapshot] ent=%d skip=unlinked flags=0x%x model=%d solid=0x%x\n",
+					e, SOF2_ENT_EFLAGS( ent ),
 					SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ) );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
 
 		// entities can be flagged to explicitly not be sent to the client
 		if ( SOF2_ENT_SVFLAGS(ent) & SVF_NOCLIENT ) {
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=noclient svf=0x%x model=%d solid=0x%x\n",
-					SOF2_ENT_SVFLAGS( ent ),
+					"[SV snapshot] ent=%d skip=noclient svf=0x%x model=%d solid=0x%x\n",
+					e, SOF2_ENT_SVFLAGS( ent ),
 					SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ) );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
 
 		svEnt = SV_SvEntityForGentity( ent );
 		if ( !svEnt ) {
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=no-svent model=%d solid=0x%x linked=%d\n",
-					SOF2_ENT_MODELINDEX( ent ),
+					"[SV snapshot] ent=%d skip=no-svent model=%d solid=0x%x linked=%d\n",
+					e, SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ),
 					(int)SOF2_ENT_LINKED( ent ) );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
 
 		// don't double add an entity through portals
 		if ( svEnt->snapshotCounter == sv.snapshotCounter ) {
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=already-added model=%d solid=0x%x snapshotCounter=%d\n",
-					SOF2_ENT_MODELINDEX( ent ),
+					"[SV snapshot] ent=%d skip=already-added model=%d solid=0x%x snapshotCounter=%d\n",
+					e, SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ),
 					svEnt->snapshotCounter );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
@@ -498,42 +504,42 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 				// doors can legally straddle two areas, so
 				// we may need to check another one
 				if ( !CM_AreasConnected( clientarea, svEnt->areanum2 ) ) {
-					if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+					if ( logThis ) {
 						Com_Printf(
-							"[SV snapshot] ent=2 skip=area clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
-							clientarea,
+							"[SV snapshot] ent=%d skip=area clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
+							e, clientarea,
 							svEnt->areanum,
 							svEnt->areanum2,
 							SOF2_ENT_MODELINDEX( ent ),
 							SOF2_ENT_SOLID( ent ) );
-						++s_debugDoorSnapshotLogCount;
+						++s_entSnapLog[e];
 					}
 					continue;		// blocked by a door
 				}
 			}
-		} else if ( e == 2 && s_debugDoorSnapshotLogCount < 16 ) {
+		} else if ( logThis ) {
 			Com_Printf(
-				"[SV snapshot] ent=2 allow area-skip clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
-				clientarea,
+				"[SV snapshot] ent=%d allow area-skip clientArea=%d area1=%d area2=%d model=%d solid=0x%x\n",
+				e, clientarea,
 				svEnt->areanum,
 				svEnt->areanum2,
 				SOF2_ENT_MODELINDEX( ent ),
 				SOF2_ENT_SOLID( ent ) );
-			++s_debugDoorSnapshotLogCount;
+			++s_entSnapLog[e];
 		}
 
 		bitvector = clientpvs;
 
 		// check individual leafs
 		if ( !svEnt->numClusters ) {
-			if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+			if ( logThis ) {
 				Com_Printf(
-					"[SV snapshot] ent=2 skip=no-clusters area1=%d area2=%d model=%d solid=0x%x\n",
-					svEnt->areanum,
+					"[SV snapshot] ent=%d skip=no-clusters area1=%d area2=%d model=%d solid=0x%x\n",
+					e, svEnt->areanum,
 					svEnt->areanum2,
 					SOF2_ENT_MODELINDEX( ent ),
 					SOF2_ENT_SOLID( ent ) );
-				++s_debugDoorSnapshotLogCount;
+				++s_entSnapLog[e];
 			}
 			continue;
 		}
@@ -556,42 +562,45 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 					}
 				}
 				if ( l == svEnt->lastCluster ) {
-					if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+					if ( logThis ) {
 						Com_Printf(
-							"[SV snapshot] ent=2 skip=pvs cluster=%d lastCluster=%d numClusters=%d model=%d solid=0x%x\n",
+							"[SV snapshot] ent=%d skip=pvs cluster=%d lastCluster=%d numClusters=%d model=%d solid=0x%x\n",
+							e,
 							clientcluster,
 							svEnt->lastCluster,
 							svEnt->numClusters,
 							SOF2_ENT_MODELINDEX( ent ),
 							SOF2_ENT_SOLID( ent ) );
-						++s_debugDoorSnapshotLogCount;
+						++s_entSnapLog[e];
 					}
 					continue;		// not visible
 				}
 			} else {
-				if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+				if ( logThis ) {
 					Com_Printf(
-						"[SV snapshot] ent=2 skip=pvs-nooverflow cluster=%d numClusters=%d model=%d solid=0x%x\n",
+						"[SV snapshot] ent=%d skip=pvs-nooverflow cluster=%d numClusters=%d model=%d solid=0x%x\n",
+						e,
 						clientcluster,
 						svEnt->numClusters,
 						SOF2_ENT_MODELINDEX( ent ),
 						SOF2_ENT_SOLID( ent ) );
-					++s_debugDoorSnapshotLogCount;
+					++s_entSnapLog[e];
 				}
 				continue;
 			}
 		}
 
 		// add it
-		if ( e == 2 && s_debugDoorSnapshotLogCount < 64 ) {
+		if ( logThis ) {
 			Com_Printf(
-				"[SV snapshot] ent=2 add area1=%d area2=%d numClusters=%d model=%d solid=0x%x\n",
+				"[SV snapshot] ent=%d add area1=%d area2=%d numClusters=%d model=%d solid=0x%x\n",
+				e,
 				svEnt->areanum,
 				svEnt->areanum2,
 				svEnt->numClusters,
 				SOF2_ENT_MODELINDEX( ent ),
 				SOF2_ENT_SOLID( ent ) );
-			++s_debugDoorSnapshotLogCount;
+			++s_entSnapLog[e];
 		}
 		SV_AddEntToSnapshot( svEnt, ent, eNums );
 
@@ -822,9 +831,45 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		//   ET_MISSILE(3) → CG_Mover, wrong path for projectiles
 		// With remapping:
 		//   JK2 ET_MISSILE(3) → SOF2 eType 2 → CG_Missile  (cgs_gameModels[modelindex])
-		//   JK2 ET_MOVER(4)   → SOF2 eType 3 → CG_Mover    (cgs_inlineDrawModel + SOLID_BMODEL)
-		if      ( state->eType == 3 ) state->eType = 2;
-		else if ( state->eType == 4 ) state->eType = 3;
+		//   JK2 ET_MOVER(4) BSP model → SOF2 eType 3 → CG_Mover (cgs_inlineDrawModel + SOLID_BMODEL)
+		//   JK2 ET_MOVER(4) GLM model → SOF2 eType 0 → CG_General (engine-side static GLM system)
+		if ( state->eType == 4 ) {
+			// Decide whether this ET_MOVER is a BSP brush mover or a model-asset mover.
+			//
+			// Model-asset movers (vehicle/prop GLM or MD3, misc_model_breakable, etc.)
+			// need remapping to ET_GENERAL so CG_General or the engine static-GLM system
+			// can render them from the registered file model.
+			//
+			// Pure BSP brush movers (func_wall, func_door, etc.) stay as SOF2 ET_MOVER(3)
+			// so native CG_Mover can look up the BSP inline model.
+			//
+			// Discriminator: SOF2 configstring slot 34+N (CG_ConfigString(N+0x22) in native
+			// cgame).  Only written by SOF2_SpawnStaticGlm / SP_model_static / SOF2_SpawnPickup
+			// - entities that explicitly register for SOF2 rendering.  Pure BSP movers never
+			// touch this slot, so there are no false positives regardless of solid value.
+			static int modelMoverLogCount = 0;
+			qboolean isModelAsset = qfalse;
+			const int svFlags = (int)SOF2_ENT_SVFLAGS(ent);
+			if ( state->modelindex > 0 && state->modelindex < 256 ) {
+				const int sof2CsIdx = 34 + state->modelindex; // SOF2 cgame slot
+				if ( sof2CsIdx < MAX_CONFIGSTRINGS && sv.configstrings[sof2CsIdx] ) {
+					const char *mpath = sv.configstrings[sof2CsIdx];
+					const int mlen = (int)strlen( mpath );
+					if ( mlen >= 4 &&
+						( Q_stricmp( mpath + mlen - 4, ".glm" ) == 0 ||
+						  Q_stricmp( mpath + mlen - 4, ".md3" ) == 0 ) )
+					    isModelAsset = qtrue;
+					if ( isModelAsset && modelMoverLogCount < 16 ) {
+						Com_Printf( "[SNAP] ET_MOVER ent=%d solid=0x%x svf=0x%x model='%s' -> ET_GENERAL\n\n",
+							state->number, state->solid, svFlags, mpath );
+						++modelMoverLogCount;
+					}
+				}
+			}
+			state->eType = isModelAsset ? 0 : 3;
+		} else if ( state->eType == 3 ) {
+			state->eType = 2;
+		}
 		// ET_BEAM (eType=5): JK2 target_laser entities.  Native SOF2 CG_Beam renders them
 		// as thick blue lines with wrong material pointing toward world origin.
 		// Suppress from snapshots — entity still functions server-side (trace, damage).
@@ -844,6 +889,20 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 			Com_Printf( "[SNAP] ent=%d et=%d ef=0x%x mdl=%d solid=0x%x pos.tr=%d apos.tr=%d\n",
 				state->number, state->eType, state->eFlags, state->modelindex, state->solid,
 				(int)state->pos.trType, (int)state->apos.trType );
+		}
+		// Extra door-entity detail log (entities 46 & 49) — first 16 appearances each
+		{
+			static int s_doorLog46 = 0, s_doorLog49 = 0;
+			int *pDoorLog = ( state->number == 46 ) ? &s_doorLog46
+			              : ( state->number == 49 ) ? &s_doorLog49 : NULL;
+			if ( pDoorLog && *pDoorLog < 16 ) {
+				Com_Printf( "[DOOR] ent=%d eType=%d ef=0x%x pos.tr=%d trBase=(%.0f,%.0f,%.0f) trDelta=(%.0f,%.0f,%.0f) trTime=%d trDur=%d\n",
+					state->number, state->eType, state->eFlags, (int)state->pos.trType,
+					state->pos.trBase[0], state->pos.trBase[1], state->pos.trBase[2],
+					state->pos.trDelta[0], state->pos.trDelta[1], state->pos.trDelta[2],
+					state->pos.trTime, state->pos.trDuration );
+				++(*pDoorLog);
+			}
 		}
 		svs.nextSnapshotEntities++;
 		frame->num_entities++;

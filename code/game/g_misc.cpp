@@ -3197,11 +3197,14 @@ void SP_model_static( gentity_t *ent )
 	int modelIndex = G_ModelIndex( ent->model );
 	ent->s.modelindex = modelIndex;
 
-	// Register at SOF2 cgame's configstring slot (34+i) in addition to OpenJK's (10+i)
+	// Register at SOF2 cgame's configstring slot (34+i) in addition to OpenJK's (10+i).
+	// Native cgame reads model i from slot 34+i — must be set for ALL model types, not just GLM.
+	if ( modelIndex > 0 ) {
+		gi.SetConfigstring( 34 + modelIndex, ent->model );
+	}
 	int len = strlen( ent->model );
 	if ( len >= 4 && Q_stricmp( ent->model + len - 4, ".glm" ) == 0 )
 	{
-		gi.SetConfigstring( 34 + modelIndex, ent->model );
 		ent->s.radius = 100;
 	}
 

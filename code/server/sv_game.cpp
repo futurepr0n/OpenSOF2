@@ -3351,6 +3351,14 @@ qboolean SV_IsEntityArrayMode( int *outEntitySize ) {
 	return sv_GEntitiesIsArray;
 }
 
+// Returns qtrue if entity entNum has a BSP inline brush model (model = *N).
+// Used by sv_snapshot.cpp to distinguish brush movers from model-asset movers when
+// both can have eType=ET_MOVER and the same s.modelindex value space overlaps.
+qboolean SV_IsEntityBrushModel( int entNum ) {
+	if ( entNum < 0 || entNum >= MAX_GENTITIES ) return qfalse;
+	return sv_sof2BrushModel[entNum] ? qtrue : qfalse;
+}
+
 // Accessible from cl_cgame.cpp — cgame DLL needs the same CWraithStub
 void *SV_GetWraithStubPtr( void ) {
 	if ( !g_wraithStub ) {
