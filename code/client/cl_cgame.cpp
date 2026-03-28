@@ -740,13 +740,15 @@ struct sof2_static_glm_t {
 	vec3_t      origin;
 	float       angles[3];
 	qhandle_t   model;
-	int         modelIndex;   // cached model index — detects model changes
-	int         framesAbsent; // consecutive frames entity not in snapshot; invalidate after threshold
+	int         modelIndex;    // cached model index — detects model changes
+	int         framesAbsent;  // consecutive frames entity not in snapshot; invalidate after threshold
+	int         lastSubmitFrame; // visual frame number of last submission (prevent double-render)
 };
 
 static sof2_static_glm_t s_staticGlmProps[SOF2_STATIC_GLM_MAX];
 static CGhoul2Info_v     s_staticGlmG2[SOF2_STATIC_GLM_MAX];
 static int               s_staticGlmCount = 0;
+static int               s_staticGlmFrame = 0; // increments each new visual frame (refdef->time changes)
 static char              s_staticGlmMap[64];
 
 // SOF2 native cgame reads model i from configstring slot 34+i (SOF2_CS_MODELS = 34)
@@ -872,9 +874,44 @@ static void CG_StaticGlm_Register( int entityNum, const float *origin, const flo
 
 static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 	static int submitLogCount = 0;
+	static int s_lastRefdefTime = -1;
 
 	if ( !refdef || cls.state != CA_ACTIVE ) return;
 	if ( refdef->rdflags & RDF_NOWORLDMODEL ) return;
+
+	// Skip RS2 of dup-submit frames: static GLM entities were captured into
+	// s_cgFrameRefEntities in RS1 and will be replayed by the entity-replay path.
+	// This mirrors how native-cgame-rendered items (health packs, armor) work,
+	// making static GLM just as stable.
+	// RS1 (s_renderSceneSubmitted=false, s_cgFrameRefEntityCount>0): capture + submit.
+	// RS2 (s_renderSceneSubmitted=true): skip — entity replay handles these entities.
+	// Fallback single RS (s_renderSceneSubmitted=false, s_cgFrameRefEntityCount==0): submit directly.
+	if ( s_renderSceneSubmitted ) {
+		static int skipLogCount = 0;
+		if ( skipLogCount < 4 ) {
+			Com_Printf( "[STATIC_GLM] skip RS2 submission (entity replay handles it)\n" );
+			++skipLogCount;
+		}
+		return;
+	}
+
+	// SOF2 native cgame calls trap_R_RenderScene multiple times per visual frame
+	// (e.g. main world pass + scope/effect pass).  Detect a new visual frame by
+	// checking if refdef->time advanced.  Increment our frame counter only then.
+	static int frameLogCount = 0;
+	if ( refdef->time != s_lastRefdefTime ) {
+		s_lastRefdefTime = refdef->time;
+		s_staticGlmFrame++;
+		if ( frameLogCount < 8 ) {
+			Com_Printf( "[STATIC_GLM] new frame #%d time=%d\n", s_staticGlmFrame, refdef->time );
+			++frameLogCount;
+		}
+	} else {
+		if ( frameLogCount < 8 ) {
+			Com_Printf( "[STATIC_GLM] SAME frame #%d time=%d (duplicate RenderScene call)\n", s_staticGlmFrame, refdef->time );
+			++frameLogCount;
+		}
+	}
 
 	CG_StaticGlm_CheckMapChange();
 
@@ -885,11 +922,13 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 			( cl.frame.parseEntitiesNum + i ) & ( MAX_PARSE_ENTITIES - 1 ) ];
 
 		// Check if entity was registered as a GLM prop but no longer qualifies
-		if ( (es->eFlags & EF_NODRAW) || es->eType != ET_GENERAL || es->modelindex <= 0 ||
+		// Note: eFlags are already translated from JK2→SOF2 in sv_snapshot.cpp.
+		// SOF2 EF_NODRAW = 0x40, not JK2's 0x80.  Check both bits for safety.
+		if ( (es->eFlags & (0x40 | EF_NODRAW)) || es->eType != ET_GENERAL || es->modelindex <= 0 ||
 		     !CG_StaticGlm_IsGlm( CG_StaticGlm_GetModelPath( es->modelindex ) ) ) {
 			for ( int j = 0; j < s_staticGlmCount; ++j ) {
 				if ( s_staticGlmProps[j].valid && s_staticGlmProps[j].entityNum == es->number ) {
-					CG_StaticGlm_Invalidate( j );  // entity no longer a GLM prop
+						CG_StaticGlm_Invalidate( j );  // entity no longer a GLM prop
 					break;
 				}
 			}
@@ -918,20 +957,17 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 	}
 
 	// Submit registered instances to the scene.
-	// Only render entities that are NOT currently in the snapshot (framesAbsent > 0).
-	// Entities present in the snapshot are rendered by native SOF2 cgame (CG_General/CG_Mover)
-	// using its own Ghoul2 state with correct animation.  Rendering them here too causes
-	// double-render: our bind-pose (frame 0) overlaps with the cgame's animated state,
-	// producing visible "start and end animation sequence" ghosting.
-	// For absent entities (recently destroyed/freed/PVS-exited) we render their last-known
-	// position as a brief persistence effect before framesAbsent > 5 triggers invalidation.
+	// Always render GLM entities from the static system — native SOF2 cgame's CG_General
+	// cannot render GLM models because centity_t.ghoul2 is never populated for these entities
+	// (the game DLL doesn't create G2 instances for SOF2 static props).  Previous logic
+	// skipped framesAbsent==0 entities assuming native cgame would render them, but this
+	// caused flashing: invisible when in snapshot, visible when out → alternating each frame.
+	// framesAbsent is still tracked for invalidation (>5 frames absent = remove).
 	for ( int i = 0; i < s_staticGlmCount; ++i ) {
 		sof2_static_glm_t *prop = &s_staticGlmProps[i];
 		if ( !prop->valid || s_staticGlmG2[i].size() <= 0 ) continue;
-		// Skip entities currently in snapshot — native cgame renders them
-		if ( prop->framesAbsent == 0 ) continue;
 
-		// Entity left snapshot — render at last known position (updated by scan loop via Register)
+		// Render at current position (updated each frame by snapshot scan via Register)
 		vec3_t renderOrg;
 		float  renderAng[3];
 		VectorCopy( prop->origin, renderOrg );
@@ -953,6 +989,19 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 		ent.modelScale[2] = 1.0f;
 
 		re.AddRefEntityToScene( &ent );
+
+		// For RS1 of a dup-submit frame, also capture this entity into s_cgFrameRefEntities
+		// so the entity-replay path (RS2 dup-submit) includes it without a separate
+		// CG_AddStaticGlmProps call.  This makes static GLM entities follow the same
+		// path as native-cgame-rendered items (health packs, armor) which are stable.
+		// The ghoul2 pointer (&s_staticGlmG2[i]) is a permanent static-array address
+		// so it remains valid for the prop's lifetime — no handle wrapping needed.
+		if ( !s_renderSceneSubmitted && s_cgFrameRefEntityCount > 0 &&
+		     s_cgFrameRefEntityCount < MAX_REFENTITIES ) {
+			s_cgFrameRefEntities[s_cgFrameRefEntityCount] = ent;
+			s_cgFrameGhoul2HandleValid[s_cgFrameRefEntityCount] = qfalse;  // raw pointer, no re-wrap
+			s_cgFrameRefEntityCount++;
+		}
 
 		if ( submitLogCount < 24 ) {
 			Com_Printf( "[STATIC_GLM] submit ent=%d model=%d org=(%.1f,%.1f,%.1f)%s\n",
@@ -2134,6 +2183,22 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 				s_sceneSubmitsThisFrame + 1 );
 			duplicateSubmitLogCount++;
 		}
+		// The previous RenderScene consumed all entities (r_firstSceneEntity advanced).
+		// Re-inject the current frame's native cgame entities (doors, vehicles, NPCs, etc.)
+		// so they appear in this final render.  s_cgFrameRefEntityCount was reset to 0 after
+		// the first RS; s_cgLastRefEntities holds the entities saved from that first pass.
+		// GLM entities are added by CG_AddStaticGlmProps below.
+		if ( s_cgLastRefEntityCount > 0 ) {
+			static int replayDupCount = 0;
+			for ( int i = 0; i < s_cgLastRefEntityCount; ++i ) {
+				re.AddRefEntityToScene( &s_cgLastRefEntities[i] );
+			}
+			if ( replayDupCount < 4 ) {
+				Com_Printf( "[SOF2 RS] dup-submit replayed %d entities serial=%d\n",
+					s_cgLastRefEntityCount, s_cgRenderSerial );
+				++replayDupCount;
+			}
+		}
 	}
 
 	// Only replay cached entities into a scene if no good scene has been submitted yet
@@ -2180,6 +2245,7 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 			s_cgLastRefEntityCount = s_cgFrameRefEntityCount;
 			memcpy( s_cgLastRefEntities, s_cgFrameRefEntities,
 				sizeof( refEntity_t ) * s_cgFrameRefEntityCount );
+			// Resolve G2 handles to real CGhoul2Info_v* for the replay cache.
 			memset( s_cgLastGhoul2HandleValid, 0, sizeof( s_cgLastGhoul2HandleValid ) );
 			for ( int i = 0; i < s_cgFrameRefEntityCount; ++i ) {
 				if ( s_cgFrameGhoul2HandleValid[i] ) {
@@ -2910,7 +2976,34 @@ static void CL_GetGameState_wrapper( gameState_t *gs ) {
 }
 
 static qboolean CL_GetSnapshot_wrapper( int snapshotNumber, snapshot_t *snapshot ) {
-	return CL_GetSnapshot( snapshotNumber, snapshot );
+	qboolean result = CL_GetSnapshot( snapshotNumber, snapshot );
+	if ( !result || !snapshot ) return result;
+
+	// Suppress GLM model rendering by native cgame.
+	// CG_General uses cgs.gameModels[modelindex] → hModel; if hModel != 0 it calls
+	// R_AddRefEntityToScene even with ghoul2=NULL, producing a default-model render at
+	// the cgame-interpolated position.  Our static GLM system renders the same entity at
+	// pos.trBase via proper G2 instances.  The two renders are at slightly different
+	// positions (cgame interpolates, we use trBase directly) → Z-fighting → flashing.
+	// Fix: zero modelindex in the COPY that native cgame receives.  cl.parseEntities[]
+	// (source of truth for static GLM) is untouched.  CG_General sees modelindex=0 →
+	// condition (modelindex != 0 || HaveG2) is false → no render.
+	static int glmSupressLogCount = 0;
+	for ( int i = 0; i < snapshot->numEntities; ++i ) {
+		entityState_t *es = &snapshot->entities[i];
+		if ( es->modelindex <= 0 || es->eType != ET_GENERAL ) continue;
+		const char *path = CG_StaticGlm_GetModelPath( es->modelindex );
+		if ( CG_StaticGlm_IsGlm( path ) ) {
+			if ( glmSupressLogCount < 16 ) {
+				Com_Printf( "[SNAP_WRAP] ent=%d zeroing modelindex=%d (glm='%s')\n",
+					es->number, es->modelindex, path );
+				++glmSupressLogCount;
+			}
+			es->modelindex = 0;
+		}
+	}
+
+	return result;
 }
 
 // slot 57: Com_WriteCam — slot is variadic; engine function takes pre-formatted string only
@@ -5969,14 +6062,28 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 			volatile unsigned int *pGameModels = reinterpret_cast<volatile unsigned int *>( 0x301accb4 );
 
 			for ( int i = 1; i < 256; i++ ) {
-				// Check if this model was already registered
-				if ( pGameModels[i] != 0 ) {
-					continue;
-				}
-
 				// Read from SOF2 configstring slot (34+N)
 				const char *modelPath = cl.gameState.stringData + cl.gameState.stringOffsets[ 34 + i ];
 				if ( !modelPath || !modelPath[0] ) {
+					continue;
+				}
+
+				// GLM models must NOT be in cgs.gameModels[] — the static GLM system renders
+				// them engine-side with proper G2 instances.  CG_General gets hModel from
+				// cgs.gameModels[modelindex]: if non-zero it renders at an interpolated position
+				// (different from static GLM's pos.trBase) → double-render → flashing.
+				// Native cgame may have pre-registered GLM handles during CG_RegisterGraphics,
+				// so explicitly ZERO those slots here in addition to skipping new registration.
+				if ( CG_StaticGlm_IsGlm( modelPath ) ) {
+					if ( pGameModels[i] != 0 ) {
+						Com_Printf( "[CG] RegisterMissingModels: clearing pre-registered GLM slot %d ('%s')\n", i, modelPath );
+						pGameModels[i] = 0;
+					}
+					continue;
+				}
+
+				// Non-GLM: skip if already registered
+				if ( pGameModels[i] != 0 ) {
 					continue;
 				}
 
