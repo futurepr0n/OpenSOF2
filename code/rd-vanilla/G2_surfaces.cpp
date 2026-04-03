@@ -20,6 +20,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 ===========================================================================
 */
 
+#include "g2_assert_suppress.h"
 #include "../server/exe_headers.h"
 
 #ifndef __Q_SHARED_H

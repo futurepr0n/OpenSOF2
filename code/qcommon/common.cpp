@@ -1413,7 +1413,33 @@ void G2Time_ResetTimers(void);
 void G2Time_ReportTimers(void);
 #endif
 
-void Com_Frame( void ) {
+static int Com_Frame_SEHFilter( EXCEPTION_POINTERS *ep ) {
+	if ( ep && ep->ExceptionRecord && ep->ContextRecord ) {
+		EXCEPTION_RECORD *rec = ep->ExceptionRecord;
+		CONTEXT *ctx = ep->ContextRecord;
+		void *fault = ( rec->NumberParameters >= 2 ) ? (void *)rec->ExceptionInformation[1] : NULL;
+		Com_Printf( "^1[CRASH] Com_Frame exception 0x%08lX at EIP=%08lX fault=%p EAX=%08lX ECX=%08lX EDX=%08lX\n",
+			(unsigned long)rec->ExceptionCode,
+			(unsigned long)ctx->Eip,
+			fault,
+			(unsigned long)ctx->Eax,
+			(unsigned long)ctx->Ecx,
+			(unsigned long)ctx->Edx );
+		// Try to identify module
+		HMODULE mod = NULL;
+		GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)ctx->Eip, &mod );
+		if ( mod ) {
+			char modName[MAX_PATH];
+			GetModuleFileNameA( mod, modName, sizeof(modName) );
+			Com_Printf( "^1[CRASH]   module=%s base=%p offset=0x%08lX\n",
+				modName, (void *)mod, (unsigned long)(ctx->Eip - (unsigned long)(uintptr_t)mod) );
+		}
+	}
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void Com_Frame_Inner( void ) {
 	try
 	{
 		int		timeBeforeFirstEvents = 0, timeBeforeServer = 0, timeBeforeEvents = 0, timeBeforeClient = 0, timeAfter = 0;
@@ -1614,6 +1640,14 @@ void Com_Frame( void ) {
 
 	re.G2Time_ResetTimers();
 #endif
+}
+
+void Com_Frame( void ) {
+	__try {
+		Com_Frame_Inner();
+	} __except ( Com_Frame_SEHFilter( GetExceptionInformation() ) ) {
+		Com_Printf( "^1[CRASH] Recovered from access violation in Com_Frame, continuing...\n" );
+	}
 }
 
 /*

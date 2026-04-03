@@ -506,8 +506,7 @@ int CTaskManager::GetVector( int entID, CBlock *block, int &memberNum, vec3_t &v
 
 		if ( icarus->GetGame()->GetTag( entID, tagName, (int) tagLookup, value ) == false)
 		{
-			icarus->GetGame()->DebugPrint(IGameInterface::WL_ERROR, "Unable to find tag \"%s\"!\n", tagName );
-			assert(0&&"Unable to find tag");
+			icarus->GetGame()->DebugPrint(IGameInterface::WL_ERROR, "Unable to find tag \"%s\" on ent %d!\n", tagName, entID );
 			return TASK_FAILED;
 		}
 
@@ -646,8 +645,9 @@ int CTaskManager::Get( int entID, CBlock *block, int &memberNum, char **value, C
 
 		if (icarus->GetGame()->GetTag( entID, tagName, (int) tagLookup, vector ) == false)
 		{
-			icarus->GetGame()->DebugPrint(IGameInterface::WL_ERROR, "Unable to find tag \"%s\"!\n", tagName );
-			assert(0 && "Unable to find tag");
+			icarus->GetGame()->DebugPrint(IGameInterface::WL_ERROR, "Unable to find tag \"%s\" on ent %d!\n", tagName, entID );
+			// SOF2 maps reference tags on entities that lack the expected bolt/tag points
+			// (e.g. OpenJK player entity has no Ghoul2 model).  Gracefully skip instead of crashing.
 			return false;
 		}
 

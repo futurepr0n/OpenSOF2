@@ -1770,20 +1770,26 @@ void G_SetG2PlayerModel( gentity_t * const ent, const char *modelName, const cha
 	}
 	else
 	{
+		// SOF2 models live at models/characters/<name>/<name>.glm, not models/players/<name>/model.glm.
+		// Try the SOF2 path first; fall back to JK2 path if it fails.
+		const char *sof2ModelPath = va("models/characters/%s/%s.glm", modelName, modelName);
 		//NOTE: it still loads the default skin's tga's because they're referenced in the .glm.
-		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, va("models/players/%s/model.glm", modelName), G_ModelIndex( va("models/players/%s/model.glm", modelName) ), G_SkinIndex( skinName ), NULL_HANDLE, 0, 0 );
+		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, sof2ModelPath, G_ModelIndex( sof2ModelPath ), G_SkinIndex( skinName ), NULL_HANDLE, 0, 0 );
+		if ( ent->playerModel == -1 )
+		{// SOF2 path failed — try JK2 path
+			const char *jk2ModelPath = va("models/players/%s/model.glm", modelName);
+			ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, jk2ModelPath, G_ModelIndex( jk2ModelPath ), G_SkinIndex( skinName ), NULL_HANDLE, 0, 0 );
+		}
 	}
 	if (ent->playerModel == -1)
-	{//try the stormtrooper as a default
-		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: cannot load model %s\n", modelName );
-		modelName = "stormtrooper";
-		Com_sprintf( skinName, sizeof( skinName ), "models/players/%s/model_default.skin", modelName );
-		skin = gi.RE_RegisterSkin( skinName );
-		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, va("models/players/%s/model.glm", modelName), G_ModelIndex( va("models/players/%s/model.glm", modelName) ), NULL_HANDLE, NULL_HANDLE, 0, 0 );
+	{//try average_sleeves (SOF2 base body) as first fallback, then stormtrooper
+		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: cannot load model '%s', trying average_sleeves\n", modelName );
+		const char *fallbackPath = "models/characters/average_sleeves/average_sleeves.glm";
+		ent->playerModel = gi.G2API_InitGhoul2Model( ent->ghoul2, fallbackPath, G_ModelIndex( fallbackPath ), NULL_HANDLE, NULL_HANDLE, 0, 0 );
 	}
 	if (ent->playerModel == -1)
-	{//no JK2 models available in SOF2 data — player will be invisible, but don't crash
-		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: no player model available (SOF2 has no JK2 models), continuing without model\n" );
+	{//no SOF2/JK2 models available — player will be invisible, but don't crash
+		gi.Printf( S_COLOR_RED"G_SetG2PlayerModel: no player model available, continuing without model\n" );
 		return;
 	}
 
@@ -2314,7 +2320,7 @@ qboolean ClientSpawn(gentity_t *ent, SavedGameJustLoaded_e eSavedGameJustLoaded 
 		}
 		//
 
-		ent->health = client->ps.stats[STAT_HEALTH] = client->ps.stats[STAT_MAX_HEALTH];
+		ent->health = client->ps.stats[STAT_ARMOR] = client->ps.stats[STAT_HEALTH] = client->ps.stats[STAT_MAX_HEALTH];
 		ent->client->dismemberProbHead = 0;
 		ent->client->dismemberProbArms = 5;
 		ent->client->dismemberProbHands = 20;

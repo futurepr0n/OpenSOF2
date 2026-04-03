@@ -528,6 +528,15 @@ static void SV_AddEntitiesVisibleFromPoint( vec3_t origin, clientSnapshot_t *fra
 			++s_entSnapLog[e];
 		}
 
+		// BSP brush entities (solid=0xffffff) that passed the area connectivity
+		// check are always sent — skip the PVS leaf test for them.  Their clusters
+		// can be hidden behind closed BSP portals even when the entity is physically
+		// reachable, causing false PVS culls (e.g. func_wall doors 46, 49 in pra2).
+		if ( SOF2_ENT_SOLID( ent ) == 0xffffff ) {
+			SV_AddEntToSnapshot( svEnt, ent, eNums );
+			continue;
+		}
+
 		bitvector = clientpvs;
 
 		// check individual leafs
@@ -823,67 +832,108 @@ static clientSnapshot_t *SV_BuildClientSnapshot( client_t *client ) {
 		// causing movers and breakable walls to flash between start and end positions.
 		if ( (int)state->pos.trType  >= 4 ) state->pos.trType  = (trType_t)((int)state->pos.trType  - 1);
 		if ( (int)state->apos.trType >= 4 ) state->apos.trType = (trType_t)((int)state->apos.trType - 1);
-		// SOF2 entity-type translation: JK2 and native SOF2 cgame disagree on the
-		// eType numbering.  JK2: ET_MISSILE=3, ET_MOVER=4.
-		// Native SOF2 CG_AddEntity dispatch: case 3=CG_Mover, case 4=CG_General.
-		// Without remapping:
-		//   ET_MOVER(4) → CG_General, which cannot render BSP inline models → invisible doors
-		//   ET_MISSILE(3) → CG_Mover, wrong path for projectiles
-		// With remapping:
-		//   JK2 ET_MISSILE(3) → SOF2 eType 2 → CG_Missile  (cgs_gameModels[modelindex])
-		//   JK2 ET_MOVER(4) BSP model → SOF2 eType 3 → CG_Mover (cgs_inlineDrawModel + SOLID_BMODEL)
-		//   JK2 ET_MOVER(4) GLM model → SOF2 eType 0 → CG_General (engine-side static GLM system)
+		// ---- SOF2 eType translation ----
+		// JK2/OpenJK has ET_ITEM=2 between ET_PLAYER(1) and ET_MISSILE(3).
+		// Native SOF2 cgame has NO ET_ITEM — its enum skips straight from
+		// ET_PLAYER(1) to ET_MISSILE(2).  This means ALL JK2 types >= 2
+		// are shifted +1 compared to SOF2.
+		//
+		// JK2 enum:        SOF2 enum:
+		// 0 ET_GENERAL     0 ET_GENERAL
+		// 1 ET_PLAYER      1 ET_PLAYER
+		// 2 ET_ITEM        (no equivalent — remap to 0)
+		// 3 ET_MISSILE     2 ET_MISSILE
+		// 4 ET_MOVER       3 ET_MOVER
+		// 5 ET_BEAM        4 ET_BEAM       (filtered — blue beams)
+		// 6 ET_PORTAL      5 ET_PORTAL
+		// 7 ET_SPEAKER     6 ET_SPEAKER
+		// 8 ET_PUSH_TRIGGER 7 ET_PUSH_TRIGGER
+		// 9 ET_TELEPORT    8 ET_TELEPORT_TRIGGER
+		// 10 ET_INVISIBLE  9 ET_INVISIBLE
+		// 14 ET_EVENTS     13 ET_EVENTS
+		//
+		// Without full translation, types 6-10 arrive with wrong values
+		// in native cgame → wrong dispatch → crash (e.g. ET_INVISIBLE(10)
+		// has no handler, ET_SPEAKER(7) dispatches as ET_PUSH_TRIGGER).
+
+		// Filter entities that should never reach native cgame.
+		// Always log eType=5 (ET_BEAM) and eType=6 (ET_PORTAL) for beam investigation.
+		if ( state->eType == 5 || state->eType == 6 ) {
+			static int s_beamLog = 0;
+			if ( s_beamLog < 64 ) {
+				Com_Printf( "[BEAM] ent=%d jk2eType=%d org=(%.0f,%.0f,%.0f) org2=(%.0f,%.0f,%.0f) model=%d\n",
+					state->number, state->eType,
+					state->origin[0], state->origin[1], state->origin[2],
+					state->origin2[0], state->origin2[1], state->origin2[2],
+					state->modelindex );
+				++s_beamLog;
+			}
+		}
+		if ( state->eType == 5 ) {
+			continue;  // ET_BEAM: blue beams — SOF2 cgame case 5 is CG_Beam but
+			           // these laser entities cause visual artifacts
+		}
+		if ( state->eType == 6 ) {
+			continue;  // ET_PORTAL: translates to SOF2 eType=5 → CG_Beam → blue beam
+		}
+		if ( state->eType == 10 ) {
+			continue;  // ET_INVISIBLE: translates to SOF2 type 9, which has no
+			           // handler in CG_AddEntity switch → cgi_Error crash
+		}
+		if ( state->eType >= 11 ) {
+			continue;  // ET_THINKER(11), ET_CLOUD(12), ET_TERRAIN(13): JK2-only
+			           // ET_EVENTS(14)+N: temp event entities, no visual geometry
+		}
+
+		// ---- SOF2 eFlags translation ----
+		// JK2/OpenJK EF_NODRAW = 0x80 (bit 7), SOF2 EF_NODRAW = 0x40 (bit 6).
+		// Without translation, entities with JK2 EF_NODRAW would still render in
+		// native cgame (which checks 0x40), and entities with JK2 EF_MISSILE_STICK
+		// (0x40) would be wrongly hidden.
+		{
+			int ef = state->eFlags;
+			int translated = ef & ~(0x40 | 0x80);  // clear both bits
+			if ( ef & 0x80 ) translated |= 0x40;   // JK2 NODRAW → SOF2 NODRAW
+			if ( ef & 0x40 ) translated |= 0x80;   // JK2 MISSILE_STICK → SOF2 bit 7
+			state->eFlags = translated;
+		}
+
+		// Special handling for ET_MOVER (needs BSP vs model-asset discrimination)
 		if ( state->eType == 4 ) {
-			// Decide whether this ET_MOVER is a BSP brush mover or a model-asset mover.
-			//
-			// Model-asset movers (vehicle/prop GLM or MD3, misc_model_breakable, etc.)
-			// need remapping to ET_GENERAL so CG_General or the engine static-GLM system
-			// can render them from the registered file model.
-			//
-			// Pure BSP brush movers (func_wall, func_door, etc.) stay as SOF2 ET_MOVER(3)
-			// so native CG_Mover can look up the BSP inline model.
-			//
-			// Discriminator: SOF2 configstring slot 34+N (CG_ConfigString(N+0x22) in native
-			// cgame).  Only written by SOF2_SpawnStaticGlm / SP_model_static / SOF2_SpawnPickup
-			// - entities that explicitly register for SOF2 rendering.  Pure BSP movers never
-			// touch this slot, so there are no false positives regardless of solid value.
+			// solid=0xffffff always means a BSP brush model (func_door, func_wall, etc.)
+			// regardless of what coincidentally occupies the same configstring slot index.
+			// Model-asset movers have a model path at CS_MODELS (10+N) or SOF2
+			// configstring (34+N) AND do NOT have solid=0xffffff.
 			static int modelMoverLogCount = 0;
+			qboolean isBspBrush = ( SOF2_ENT_SOLID( SV_GentityNum( state->number ) ) == 0xffffff ) ? qtrue : qfalse;
 			qboolean isModelAsset = qfalse;
-			const int svFlags = (int)SOF2_ENT_SVFLAGS(ent);
-			if ( state->modelindex > 0 && state->modelindex < 256 ) {
-				const int sof2CsIdx = 34 + state->modelindex; // SOF2 cgame slot
-				if ( sof2CsIdx < MAX_CONFIGSTRINGS && sv.configstrings[sof2CsIdx] ) {
-					const char *mpath = sv.configstrings[sof2CsIdx];
-					const int mlen = (int)strlen( mpath );
-					if ( mlen >= 4 &&
-						( Q_stricmp( mpath + mlen - 4, ".glm" ) == 0 ||
-						  Q_stricmp( mpath + mlen - 4, ".md3" ) == 0 ) )
-					    isModelAsset = qtrue;
-					if ( isModelAsset && modelMoverLogCount < 16 ) {
-						Com_Printf( "[SNAP] ET_MOVER ent=%d solid=0x%x svf=0x%x model='%s' -> ET_GENERAL\n\n",
-							state->number, state->solid, svFlags, mpath );
-						++modelMoverLogCount;
-					}
+			if ( !isBspBrush && state->modelindex > 0 && state->modelindex < 256 ) {
+				const int cs10Idx = 10 + state->modelindex;
+				const int cs34Idx = 34 + state->modelindex;
+				const char *cs10 = ( cs10Idx < MAX_CONFIGSTRINGS && sv.configstrings[cs10Idx] )
+					? sv.configstrings[cs10Idx] : "";
+				const char *cs34 = ( cs34Idx < MAX_CONFIGSTRINGS && sv.configstrings[cs34Idx] )
+					? sv.configstrings[cs34Idx] : "";
+				if ( cs10[0] || cs34[0] ) {
+					isModelAsset = qtrue;
 				}
 			}
-			state->eType = isModelAsset ? 0 : 3;
-		} else if ( state->eType == 3 ) {
-			state->eType = 2;
+			if ( modelMoverLogCount < 32 ) {
+				Com_Printf( "[SNAP] ET_MOVER ent=%d model=%d solid=0x%x -> %s\n",
+					state->number, state->modelindex,
+					SOF2_ENT_SOLID( SV_GentityNum( state->number ) ),
+					isBspBrush ? "ET_MOVER(BSP)" : ( isModelAsset ? "ET_GENERAL" : "ET_MOVER(BSP)" ) );
+				++modelMoverLogCount;
+			}
+			state->eType = ( isBspBrush || !isModelAsset ) ? 3 : 0;
 		}
-		// ET_BEAM (eType=5): JK2 target_laser entities.  Native SOF2 CG_Beam renders them
-		// as thick blue lines with wrong material pointing toward world origin.
-		// Suppress from snapshots — entity still functions server-side (trace, damage).
-		if ( state->eType == 5 ) {
-			continue;
-		}
-		// Native SOF2 CG_AddEntity switch has no case for eType=9 (ET_TELEPORT_TRIGGER)
-		// or eType>=15 (G_TempEntity event entities: ET_EVENTS+N, N>=1).
-		// Both hit the default: cgi_Error(0,"Bad entity type: %i") → ERR_DROP client crash.
-		// Event temp entities are created by G_TempEntity for sounds, effects, muzzle flashes,
-		// footsteps, etc. — they carry no visual geometry and can be safely suppressed.
-		// ET_TELEPORT_TRIGGER(9) entities are invisible triggers that don't need rendering.
-		if ( state->eType == 9 || state->eType >= 15 ) {
-			continue;  // discard: would crash native SOF2 cgame
+		// General translation: subtract 1 for all types >= 3 to remove
+		// the ET_ITEM gap.  ET_MOVER(4) was already handled above.
+		// ET_ITEM(2) → ET_GENERAL(0) explicitly; ET_MISSILE(3) → 2; etc.
+		else if ( state->eType == 2 ) {
+			state->eType = 0;  // ET_ITEM → ET_GENERAL (SOF2 has no ET_ITEM)
+		} else if ( state->eType >= 3 ) {
+			state->eType -= 1;
 		}
 		if ( s_snapLogInSnap ) {
 			Com_Printf( "[SNAP] ent=%d et=%d ef=0x%x mdl=%d solid=0x%x pos.tr=%d apos.tr=%d\n",

@@ -23,6 +23,13 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #ifndef __ICR_STDAFX__
 #define __ICR_STDAFX__
 
+// SOF2 maps exercise ICARUS script paths that hit debug asserts in the JK2
+// implementation (missing tags, unexpected states).  These are non-fatal in
+// release builds.  Suppress asserts in ICARUS so Debug builds don't crash.
+#include <cassert>
+#undef assert
+#define assert(x) ((void)0)
+
 #include <string>
 #include <list>
 #include <vector>

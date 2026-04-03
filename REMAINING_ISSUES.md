@@ -1,176 +1,160 @@
 # OpenSOF2 Remaining Issues
 
-**Last Updated:** 2026-03-27
-**Session:** Fixed invisible ET_GENERAL models via deferred configstring registration
-**Status:** Game stable 35s+ in interactive testing; core rendering now functional
+**Last Updated:** 2026-04-03
+**Session:** HUD health/armor bars, STAT_ARMOR index fix, player body animations
 
 ---
 
-## Issue 1: Model Animation Flashing
+## ✅ RESOLVED — Issue 1: Model/Door Animation Flashing
 
-**Symptom**: Some in-game models (doors, breakable walls, vehicles) animate between two states every frame instead of smoothly transitioning or staying in one state.
+**Fix Applied 2026-03-24** (`code/server/sv_snapshot.cpp`): TR_NONLINEAR_STOP(4) → TR_LINEAR_STOP(3)
+trType translation prevents doors oscillating sinusoidally in SOF2 cgame.
 
-**Example**: Door appears open and closed alternately each frame; gas tank explodes and un-explodes each frame.
+**Fix Applied 2026-04-03** (`code/client/cl_cgame.cpp`): Player body now plays idle/walk/run
+animation via `CG_PlayerBody_SetAnim()` called from `CG_AddPlayerBodyToScene()`.
+- Idle: speed < 15 u/s (frames 25920–25960 @ 10fps)
+- Walk: speed 15–180 u/s — Shift+W (frames 10827–10850 @ 20fps)
+- Run: speed > 180 u/s — W key default (frames 10805–10816 @ 20fps)
+- Bone "model_root" confirmed in cgamex86.dll via Ghidra
 
-**Root Cause**: Static GLM render system submitting models out-of-PVS WHILE native cgame also renders them in-snapshot simultaneously.
-- Expected: Static GLM submits ONLY when `framesAbsent > 0` (entity not in snapshot)
-- Actual: Both systems rendering same entity = flashing between two animation frames
-
-**Fix Applied**: Added `framesAbsent==0` skip in CL_CGameRendering → CG_AddStaticGlmProps (code/client/cl_cgame.cpp)
-- Should prevent submission when entity currently visible in snapshot
-
-**Status**: Fix applied but not yet verified in interactive test
-
-**Next Steps**:
-1. Run interactive test and observe if door/gas tank still flash
-2. If still flashing: Add logging to CG_AddStaticGlmProps to confirm `framesAbsent==0` condition is working
-3. Check if entity is actually IN the snapshot (compare entity numbers in snapshot vs static GLM list)
-4. Verify snapshot building correctly sets entity positions (baseline at START of animation, not END)
-
-**Files**:
-- code/client/cl_cgame.cpp (CG_AddStaticGlmProps, CG_StaticGlm_Register, framesAbsent counter)
+**Status: RESOLVED** ✅
 
 ---
 
 ## Issue 2: Interactive Models Positioned at End-State
 
-**Symptom**: Animated entities (vehicles, movers) that should start at origin/closed position instead appear at their final animated position.
+**Symptom**: Animated entities (table flip, personnel truck) appear at their final animated
+position instead of their starting position when the map first loads.
 
-**Example**: Table flip animation trigger — table appears at final flipped position instead of original flat position; personnel truck at endpoint instead of spawn location.
-
-**Root Cause** (Hypothesis): One or more of:
-1. **Baseline position wrong**: Baseline snapshot sets position to end-state instead of start-state
-2. **ROFF animation state**: Entity's pos.trBase or animation frame initialized to final value
-3. **Smooth animation disabled**: ICARUS/ROFF script not running from frame 0
+**Root Cause** (Hypothesis): ICARUS scripts start running at entity spawn time. By the time
+the player loads and receives the first snapshot, the animation has already completed.
+In native SOF2, these animations are likely triggered by player proximity / cutscene triggers.
 
 **Investigation Needed**:
-1. Check baseline snapshot for entity position vs expected spawn origin
-2. Verify pos.trBase and pos.trDelta values in snapshot (should interpolate FROM trBase TO trBase+trDelta)
-3. Check ICARUS script execution order (does entity run ROFF animation from map load?)
-4. Compare with native SOF2 - does it start animations immediately or wait for first frame?
-
-**Related Code**:
-- sv_snapshot.cpp: Entity position encoding (trBase, trDelta, trTime, trDuration)
-- g_client.cpp: SelectSpawnPoint, spawn position validation
-- ICARUS script system: Animation triggering
+1. Identify which ICARUS script drives the truck (pra2/truck entity #190 script)
+2. Check if the script runs immediately or waits for a trigger entity
+3. Compare entity position at first snapshot vs expected spawn origin
+4. If script runs immediately: find the trigger entity and ensure it only fires after player spawns
 
 **Files**:
-- code/server/sv_snapshot.cpp (SV_BuildSnapshotForClient entity position encoding)
-- code/game/g_client.cpp (ClientSpawn, SelectSpawnPoint)
+- `code/server/sv_snapshot.cpp` (entity position encoding at snapshot build time)
+- `code/icarus/` (ICARUS script execution, trigger conditions)
+- `E:/SOF2/Soldier of Fortune 2/base/scripts/pra2/` (map scripts)
 
 ---
 
 ## Issue 3: Blue Beams
 
-**Symptom**: Thick blue lines visible in-game, stretching from entity origins toward world origin or other locations.
+**Symptom**: Thick blue lines visible in-game stretching from entity origins.
 
-**Root Cause**: `target_laser` entities (SOF2-specific) set eType=ET_BEAM(5). Native SOF2 cgame's CG_Beam renders them incorrectly (wrong material, wrong endpoint).
+**Fix Applied 2026-03-24**: Filter eType=5 entities from snapshots in `sv_snapshot.cpp` line 876.
+Entities still function server-side; client-side rendering suppressed.
 
-**Fix Applied**: Filter eType=5 entities from snapshots in sv_snapshot.cpp line 876-877
-- Entities still function server-side (trace, damage)
-- Client-side rendering suppressed
+**Status**: Filter applied. Source may persist via other rendering paths (SOF2 cgame FX system,
+NPC bolt rendering). Needs visual verification in interactive test.
 
-**Status**: Filtered from snapshots; unknown if still visible via other rendering path
-
-**Investigation Needed**:
-1. Verify filter is catching all target_laser entities in log output
-2. Check if CG_Beam is called from anywhere else (CG_AddEntities, CG_DrawInformation)
-3. Confirm blue beams don't appear in next interactive test
+**Investigation Needed** (if still visible):
+1. Check if any eType=5 entities are passing the filter (add log on filter hit)
+2. Check CG_Beam call paths in cgamex86.dll (are they called from CG_AddEntities or elsewhere?)
 
 **Files**:
-- code/server/sv_snapshot.cpp (line 876-877, eType==5 filter)
+- `code/server/sv_snapshot.cpp` (line 876, eType==5 filter)
 
 ---
 
-## Issue 4: Player Model Not Loading
+## Issue 4: HUD Visual Fidelity
 
-**Symptom**: No visible first-person weapon or body model; player appears as floating viewpoint.
+**Symptom**: Health and armor bars show as solid-color rectangles. Native SOF2 uses the METIS
+UI framework with texture-based widget images, ammo counter, weapon icon, etc.
 
-**Root Cause**: OpenJK game DLL references JK2 humanoid player models (jedi_tf.glm, stormtrooper.glm, etc.) which don't exist in SOF2 data directory.
+**Current State (2026-04-03)**:
+- Health bar: red rectangle, centered bottom, full-width
+- Armor bar: gunmetal rectangle, same width, directly above health bar
+- Both bars stable (no flashing), correct values, update live with damage/heal
 
-**Status**: Not critical for gameplay; deprioritized
+**METIS HUD Architecture** (for future reference):
+- All METIS widget updates flow through slot 26 (`cgi_UI_SetActiveMenu`)
+- HUD element names: hud_health, hud_armor, hud_weapon, hud_ammo, hud_ammo_clip, hud_fps
+- hud_health/hud_armor use 0–10 float slider scale
+- Replicating the full METIS HUD would require reverse-engineering the SOF2 texture atlas
+  and widget positioning data — significant effort, deprioritized
 
-**Potential Solutions**:
-1. Use native SOF2 player models (if available in data dir)
-2. Create minimal placeholder model to avoid crashes
-3. Accept floating viewpoint as known limitation
-
-**Files**:
-- code/game/g_client.cpp (G_SetG2PlayerModel fallback logic)
-- Requires asset data inspection
+**Status**: Functional placeholder. Deprioritized unless texture fidelity becomes a priority.
 
 ---
 
-## Issue 5: NPC Model Skins - Missing Attachments
+## Issue 5: NPC Model Skins — Missing Attachments
 
-**Symptom**: NPC characters missing hats, hoods, gear bolt-on attachments (only base body visible).
+**Symptom**: NPC characters missing hats, hoods, and gear bolt-on attachments.
 
-**Root Cause**: SOF2 used bolt-on attachment system (attach hat.glm to head bolt, etc.). OpenJK Ghoul2 system doesn't implement this.
+**Root Cause**: SOF2 used a bolt-on attachment system (attach hat.glm to head bolt, etc.).
+OpenJK Ghoul2 system does not implement this.
 
-**Status**: Non-critical visual issue; deprioritized
-
-**Architectural Complexity**: Would require implementing bolt-on system in Ghoul2 integration code (code/client/cl_cgame.cpp Ghoul2 wrappers).
+**Status**: Non-critical visual issue. Deprioritized.
 
 ---
 
 ## Issue 6: Animation Error Spam (Non-Fatal)
 
-**Symptom**: Console log shows `PM_SetAnimFinal: Invalid Anim File Index (0)!` repeatedly.
+**Symptom**: Console shows `PM_SetAnimFinal: Invalid Anim File Index (0)!` repeatedly.
 
-**Root Cause**: PM_SetAnimFinal calls ValidAnimFileIndex which stubs to qfalse (no JK2 animation data), returns early safely.
+**Root Cause**: ValidAnimFileIndex stubs to qfalse; PM_SetAnimFinal returns early safely.
 
-**Status**: Non-fatal; already has guard. Can ignore.
+**Status**: Non-fatal, has guard. Ignore.
 
 ---
 
 ## Issue 7: SOF2-Specific Entities Silently Skipped
 
-**Symptom**: Map entities like `pickup_ammo`, `fx_play_effect`, `model_static` not found, spawn fails silently.
+**Symptom**: `pickup_ammo`, `fx_play_effect`, `model_static` spawn fails silently for
+entity types not in OpenJK spawn table.
 
-**Root Cause**: OpenJK spawn table doesn't have these entity types. Game DLL spawn functions in g_misc.cpp define them but G_CallSpawn can't find them in OpenJK's spawn_t table.
-
-**Status**: Expected; entities are implemented via workaround functions in g_misc.cpp (SP_pickup_*, SOF2_SpawnPickup, SP_model_static, etc.)
+**Status**: Expected limitation. Workaround functions in g_misc.cpp handle the common cases.
 
 ---
 
-## Critical Path for Next Session
+## Issue 8: Some Pickups Not Solid
 
-1. **Interactive Test** (Required): Run +devmap pra2 with W key movement, observe:
-   - [ ] Models render correctly (no invisibility)
-   - [ ] Door/gas tank animations (flashing or smooth?)
-   - [ ] Table position (start or end state?)
-   - [ ] Blue beams present?
-   - [ ] Game stability (crash time if any)
+**Symptom**: Some pickup items are visible but cannot be collected (solid=0x0).
 
-2. **If Still Flashing**: Add diagnostic logging to CG_AddStaticGlmProps (check framesAbsent condition)
+**Root Cause**: `spawnflags=8` is interpreted as `ITMSF_NOTSOLID` in the SOF2 pickup logic.
+Items with this flag are rendered but have no collision box.
 
-3. **If Still End-State**: Check baseline snapshot positions in qconsole.log vs expected spawn origins
+**Investigation Needed**:
+1. Find which spawnflags value in SOF2 maps corresponds to ITMSF_NOTSOLID
+2. Check if the spawnflags bits are being remapped correctly between SOF2 and JK2 item spawn
 
-4. **Blue Beams**: Verify absence in interactive test; check log for eType=5 filter hits
+**Files**:
+- `code/game/g_misc.cpp` (SOF2_SpawnPickup, ITMSF_NOTSOLID check)
+- `code/game/items.h` (ITMSF_* flag definitions)
 
 ---
 
 ## Build & Test Commands
 
-```bash
-# Build engine
-cd E:/SOF2/OpenSOF2/build_test/code
-MSYS_NO_PATHCONV=1 "/c/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/MSBuild.exe" \
-    openjk_sp.x86.vcxproj /p:Configuration=Debug /p:Platform=Win32 /t:Build /v:minimal
+```powershell
+# Build game DLL
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' `
+  'E:\SOF2\OpenSOF2\build_test\code\game\jagamex86.vcxproj' `
+  /p:Configuration=Debug /p:Platform=Win32 /t:Build /nologo /v:minimal
 
-# Run interactive test (35s timeout)
-cd E:/SOF2/OpenSOF2/build_test/Debug
-timeout 35 ./openjk_sp.x86.exe +set fs_game "" +devmap pra2
+# Build engine
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe' `
+  'E:\SOF2\OpenSOF2\build_test\code\openjk_sp.x86.vcxproj' `
+  /p:Configuration=Debug /p:Platform=Win32 /t:Build /nologo /v:minimal
+
+# Run interactive test
+Start-Process 'E:\SOF2\OpenSOF2\build_test\Debug\openjk_sp.x86.exe' `
+  -ArgumentList '+devmap pra2' -WorkingDirectory 'E:\SOF2\OpenSOF2\build_test\Debug'
 
 # Check output logs
-tail -300 "C:\Users\Mark\Documents\My Games\OpenSOF2\base\qconsole.log"
-grep -i "ET_GENERAL\|RegisterMissingModels\|flashing\|STATIC_GLM" run_model_fix_out.log
+Get-Content 'C:\Users\Mark\Documents\My Games\OpenSOF2\base\qconsole.log' -Tail 100
 ```
 
 ---
 
 ## Memory Files & Documentation
 
-- **Memory**: C:\Users\Mark\.claude\projects\E--SOF2\memory\project_openjk_devmap_fixes.md (detailed fixes log)
-- **Build Info**: E:\SOF2\OpenSOF2\build_test\Debug\SESSION_REPORT.md (earlier session notes)
-
+- **Fixes log**: `C:\Users\Mark\.claude\projects\E--SOF2\memory\project_openjk_devmap_fixes.md`
+- **Architecture notes**: `C:\Users\Mark\.claude\projects\E--SOF2\memory\MEMORY.md`
+- **Session reports**: `E:\SOF2\OpenSOF2\build_test\Debug\SESSION_REPORT*.md`

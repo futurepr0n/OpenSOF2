@@ -30,11 +30,15 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 
 // player_state->stats[] indexes
+// IMPORTANT: indices 0 and 1 must match what the native SOF2 cgame reads.
+// SOF2 cgamex86.dll reads ps.stats[0] for health (offset 0xD0) and
+// ps.stats[1] for armor (offset 0xD4). Confirmed via Ghidra: CG_DrawWeaponHUD
+// uses fild [playerState+0xD0] and fild [playerState+0xD4] as health/armor.
 typedef enum {
-	STAT_HEALTH,
-	STAT_ITEMS,
-	STAT_WEAPONS,					// 16 bit fields
-	STAT_ARMOR,
+	STAT_HEALTH,					// [0] offset 0xD0 — SOF2 cgame reads this for health
+	STAT_ARMOR,						// [1] offset 0xD4 — SOF2 cgame reads this for armor (was STAT_ITEMS)
+	STAT_WEAPONS,					// [2] 16 bit fields
+	STAT_ITEMS,						// [3] holdable items (was [1], moved; SOF2 cgame ignores this slot)
 	STAT_DEAD_YAW,					// look this direction when dead (FIXME: get rid of?)
 	STAT_CLIENTS_READY,				// bit mask of clients wishing to exit the intermission (FIXME: configstring?)
 	STAT_MAX_HEALTH					// health / armor limit, changable by handicap

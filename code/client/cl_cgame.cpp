@@ -312,6 +312,11 @@ static int         s_sceneSubmitsThisFrame = 0;
 static cvar_t     *s_sof2DebugCharacterProbe = NULL;
 static cvar_t     *s_sof2DebugCharacterProbeFocus = NULL;
 static cvar_t     *s_sof2DebugCharacterProbeNoCull = NULL;
+// Third-person camera: when non-zero, offset camera behind player by this distance
+// and render the player body model.  0 = first-person (default).
+static cvar_t     *cg_thirdPerson = NULL;
+static cvar_t     *cg_thirdPersonRange = NULL;  // camera distance behind player
+static cvar_t     *cg_thirdPersonHeight = NULL; // camera height above player origin
 static qboolean    s_sof2DebugCharacterProbeInit = qfalse;
 #define SOF2_DEBUG_NPC_PROBE_MAX 16
 typedef struct cg_debug_npc_probe_s {
@@ -1011,6 +1016,161 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 			++submitLogCount;
 		}
 	}
+}
+
+// ============================================================
+// Player body rendering (engine-side, independent of native cgame)
+//
+// The native SOF2 cgame renders the player in first-person only.
+// CG_Player() in the native DLL is nearly empty — it does not submit
+// a 3D body for the player entity.  We add it here so the model is
+// present in the scene for shadow-casting, death, and third-person use.
+//
+// SOF2 animation frame ranges from skeletons/average_sleeves.frames:
+//   Idle  : startframe=25920, duration=41,  fps=10
+//   Walk  : startframe=10827, duration=24,  fps=20
+//   Run   : startframe=10805, duration=12,  fps=20
+// ============================================================
+#define SOF2_PLAYER_BODY_MODEL "models/characters/average_sleeves/average_sleeves.glm"
+
+// Bone animation frame ranges (from average_sleeves.frames)
+#define SOF2_ANIM_IDLE_START  25920
+#define SOF2_ANIM_IDLE_END    25960  // start+duration-1
+#define SOF2_ANIM_IDLE_FPS    10
+#define SOF2_ANIM_WALK_START  10827
+#define SOF2_ANIM_WALK_END    10850  // start+duration-1
+#define SOF2_ANIM_WALK_FPS    20
+#define SOF2_ANIM_RUN_START   10805
+#define SOF2_ANIM_RUN_END     10816  // start+duration-1
+#define SOF2_ANIM_RUN_FPS     20
+
+// Speed thresholds (units/second) for animation selection
+#define SOF2_SPEED_WALK  30.0f
+#define SOF2_SPEED_RUN  200.0f
+
+static CGhoul2Info_v s_playerBodyG2;
+static qhandle_t     s_playerBodyModel = 0;
+static int           s_playerBodyLastAnim = -1;  // -1=uninit, 0=idle, 1=walk, 2=run
+
+static qhandle_t s_playerBodySkin = 0;
+
+static void CG_PlayerBody_Init( void ) {
+	if ( s_playerBodyModel ) return;  // already loaded
+
+	s_playerBodyModel = re.RegisterModel( SOF2_PLAYER_BODY_MODEL );
+	if ( !s_playerBodyModel ) {
+		Com_Printf( "[PLAYER_BODY] RegisterModel failed: '%s'\n", SOF2_PLAYER_BODY_MODEL );
+		return;
+	}
+
+	const int g2Result = re.G2API_InitGhoul2Model(
+		s_playerBodyG2,
+		SOF2_PLAYER_BODY_MODEL,
+		s_playerBodyModel,
+		0, 0, 0, 0 );
+
+	if ( g2Result < 0 || s_playerBodyG2.size() <= 0 ) {
+		Com_Printf( "[PLAYER_BODY] InitGhoul2Model failed (result=%d)\n", g2Result );
+		s_playerBodyModel = 0;
+		return;
+	}
+
+	// RE_RegisterSkin routes *.g2skin files to RE_RegisterIndividualG2Skin which
+	// parses the Raven material/group/texture1 syntax and registers each surface
+	// shader.  The handle is then passed via ent.customSkin in CG_AddPlayerBodyToScene
+	// so R_AddGhoulSurfaces picks it up directly — NOT via G2API_SetSkin, which only
+	// writes mCustomSkin and never promotes it to mSkin (that step needs
+	// G2API_SetGhoul2ModelIndexes, which the native cgame calls for its own entities
+	// but never for our engine-side G2 instance).
+	s_playerBodySkin = re.RegisterSkin( "models/characters/skins/mullins_jungle.g2skin" );
+	if ( s_playerBodySkin ) {
+		Com_Printf( "[PLAYER_BODY] Skin registered handle=%d\n", s_playerBodySkin );
+	} else {
+		Com_Printf( "[PLAYER_BODY] Skin registration failed — model will render untextured\n" );
+	}
+
+	s_playerBodyLastAnim = -1;
+	Com_Printf( "[PLAYER_BODY] Loaded '%s'\n", SOF2_PLAYER_BODY_MODEL );
+}
+
+static void CG_PlayerBody_SetAnim( int animId, int serverTime ) {
+	if ( s_playerBodyLastAnim == animId ) return;
+	if ( s_playerBodyG2.size() <= 0 ) return;
+
+	int startFrame, endFrame, fps;
+	switch ( animId ) {
+		case 1:  startFrame = SOF2_ANIM_WALK_START; endFrame = SOF2_ANIM_WALK_END; fps = SOF2_ANIM_WALK_FPS; break;
+		case 2:  startFrame = SOF2_ANIM_RUN_START;  endFrame = SOF2_ANIM_RUN_END;  fps = SOF2_ANIM_RUN_FPS;  break;
+		default: startFrame = SOF2_ANIM_IDLE_START; endFrame = SOF2_ANIM_IDLE_END; fps = SOF2_ANIM_IDLE_FPS; break;
+	}
+
+	// Animate with loop flag on the root bone.
+	// s_playerBodyG2[0] is the first (only) model in the set.
+	re.G2API_SetBoneAnim( &s_playerBodyG2[0], "model_root",
+		startFrame, endFrame,
+		BONE_ANIM_OVERRIDE_LOOP,
+		1.0f, serverTime, -1, 150 );
+
+	s_playerBodyLastAnim = animId;
+}
+
+static void CG_AddPlayerBodyToScene( const refdef_t *refdef ) {
+	if ( !refdef || cls.state != CA_ACTIVE ) return;
+	if ( refdef->rdflags & RDF_NOWORLDMODEL ) return;
+	// The player body is NOT captured into s_cgLastRefEntities (see capture guard below),
+	// so the entity-replay path does NOT include it in RS2.  We must add it here on every
+	// RenderScene call — both RS1 (single-RS frames) and RS2 (duplicate-RS frames) — so
+	// the body is always present in whichever scene is the final display output.
+	// Omitting it in RS2 caused flashing: RS2 cleared + re-rendered without the body,
+	// overwriting RS1's player-body pixels on every double-RS frame.
+
+	// Initialise on first use
+	if ( !s_playerBodyModel ) {
+		CG_PlayerBody_Init();
+		if ( !s_playerBodyModel ) return;
+	}
+
+	// Player position and orientation from latest snapshot playerState
+	const playerState_t *ps = &cl.frame.ps;
+	if ( !cl.frame.valid ) return;
+
+	// Build angles: use only the yaw from viewangles so the body doesn't pitch/roll
+	vec3_t bodyAngles = { 0.0f, ps->viewangles[YAW], 0.0f };
+
+	refEntity_t ent;
+	memset( &ent, 0, sizeof( ent ) );
+	ent.reType           = RT_MODEL;
+	ent.hModel           = s_playerBodyModel;
+	ent.ghoul2           = &s_playerBodyG2;
+	ent.customSkin       = s_playerBodySkin;   // skin handle → R_AddGhoulSurfaces reads ent.customSkin first
+	ent.renderfx         = RF_NOSHADOW;
+	VectorCopy( ps->origin, ent.origin );
+	VectorCopy( ps->origin, ent.oldorigin );
+	VectorCopy( ps->origin, ent.lightingOrigin );
+	AnglesToAxis( bodyAngles, ent.axis );
+	VectorCopy( bodyAngles, ent.angles );
+	ent.modelScale[0] = 1.0f;
+	ent.modelScale[1] = 1.0f;
+	ent.modelScale[2] = 1.0f;
+
+	// Drive the body animation from horizontal speed.
+	// model_root is confirmed present in SOF2 cgame (used by CWpnInst_DispatchAnimation etc.)
+	{
+		float vx = ps->velocity[0], vy = ps->velocity[1];
+		float speed2 = vx*vx + vy*vy;
+		int animId;
+		if      ( speed2 > 180.0f * 180.0f ) animId = 2;  // run
+		else if ( speed2 >  15.0f *  15.0f ) animId = 1;  // walk
+		else                                 animId = 0;  // idle
+		CG_PlayerBody_SetAnim( animId, refdef->time );
+	}
+
+	re.AddRefEntityToScene( &ent );
+	// Do NOT capture into s_cgFrameRefEntities.  If we did, s_cgLastRefEntities would carry
+	// the body at this frame's position; then next frame's RS1 entity-replay path would
+	// re-add it at the old position while CG_AddPlayerBodyToScene adds it again at the new
+	// position — producing a double image whenever the player moves.  The player body is a
+	// world-scene-only entity (no need to appear in RS2's weapon overlay pass).
 }
 
 static void CL_LogPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, const char *source ) {
@@ -2073,6 +2233,23 @@ static void CG_R_AddRefEntityToScene_Wrapper( const refEntity_t *ent ) {
 		return;
 	}
 
+	// Log non-RT_MODEL entities (beams, sprites, FX lines) to find blue beam source.
+	// RT_MODEL=0, RT_BEAM=4, RT_ELECTRICITY=5 — any non-zero type is interesting.
+	if ( submitEnt->reType != RT_MODEL ) {
+		static int beamEntityLogCount = 0;
+		if ( beamEntityLogCount < 64 ) {
+			Com_Printf( "[CG scene] non-model reType=%d mode=%s rawType=%d hModel=%d org=(%.1f,%.1f,%.1f) oldOrg=(%.1f,%.1f,%.1f) customShader=%d\n",
+				(int)submitEnt->reType,
+				useSOF2Layout ? "sof2" : "openjk",
+				*(const int *)( raw + 0x00 ),
+				(int)submitEnt->hModel,
+				submitEnt->origin[0], submitEnt->origin[1], submitEnt->origin[2],
+				submitEnt->oldorigin[0], submitEnt->oldorigin[1], submitEnt->oldorigin[2],
+				(int)submitEnt->customShader );
+			++beamEntityLogCount;
+		}
+	}
+
 	if ( s_cgFrameRefEntityCount < MAX_REFENTITIES ) {
 		s_cgFrameRefEntities[s_cgFrameRefEntityCount++] = *submitEnt;
 	}
@@ -2153,6 +2330,31 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		AnglesToAxis( forcedAngles, localRefdef->viewaxis );
 		// Renderer treats 1 bits as hidden areas. Zero means "all areas visible".
 		memset( localRefdef->areamask, 0x00, sizeof( localRefdef->areamask ) );
+
+		// Third-person camera: pull back along horizontal forward, rise up, orient toward character
+		if ( cg_thirdPerson && cg_thirdPerson->integer ) {
+			float range  = ( cg_thirdPersonRange  && cg_thirdPersonRange->value  > 0 ) ? cg_thirdPersonRange->value  : 120.0f;
+			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 48.0f;
+
+			// Use horizontal-only forward for position (ignore pitch so height is clean)
+			vec3_t hFwd = { localRefdef->viewaxis[0][0], localRefdef->viewaxis[0][1], 0.0f };
+			VectorNormalize( hFwd );
+			localRefdef->vieworg[0] -= hFwd[0] * range;
+			localRefdef->vieworg[1] -= hFwd[1] * range;
+			localRefdef->vieworg[2] += height;
+
+			// Aim camera at character's waist so they stay centered in view
+			vec3_t charWaist;
+			VectorCopy( cl.frame.ps.origin, charWaist );
+			charWaist[2] += 40.0f;
+			vec3_t toChar;
+			VectorSubtract( charWaist, localRefdef->vieworg, toChar );
+			if ( VectorNormalize( toChar ) > 1.0f ) {
+				vec3_t camAngles;
+				vectoangles( toChar, camAngles );
+				AnglesToAxis( camAngles, localRefdef->viewaxis );
+			}
+		}
 	}
 
 	// In active play SOF2 can issue multiple RenderScene calls in one draw pass.
@@ -2229,6 +2431,7 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 
 	CG_DebugAddCharacterProbe( localRefdef );
 	CG_AddStaticGlmProps( localRefdef );
+	CG_AddPlayerBodyToScene( localRefdef );
 
 	__try {
 		if ( !s_firstSubmittedRefdefValid ) {
@@ -2343,8 +2546,10 @@ static void CG_R_RenderScene_SOF2Main( int viewEntityNum, const vec3_t vieworg,
 
 // ----- Slot 141: R_FillRect -----
 static void CG_R_FillRect( float x, float y, float w, float h, const float *color ) {
+	static qhandle_t sh = 0;
+	if ( !sh ) sh = re.RegisterShaderNoMip( "*white" );
 	re.SetColor( color );
-	re.DrawStretchPic( x, y, w, h, 0, 0, 0, 0, cls.whiteShader );
+	re.DrawStretchPic( x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, sh );
 	re.SetColor( NULL );
 }
 
@@ -2485,6 +2690,35 @@ static void CG_R_WorldEffectCommand_Filtered( const char *command ) {
 	}
 
 	re.WorldEffectCommand( command );
+}
+
+// ----- METIS HUD state (updated each frame by cgi_UI_SetActiveMenu) -----
+// hud_health / hud_armor use a 0-10 float slider scale from the cgame.
+static float   s_hudHealth     = 0.0f;
+static float   s_hudArmor      = 0.0f;
+static char    s_hudWeapon[64] = "";
+static char    s_hudAmmo[16]   = "";
+static char    s_hudAmmoClip[16] = "";
+static char    s_hudFps[16]    = "";
+static qboolean s_hudActive    = qfalse;
+
+// ----- Slot 26: cgi_UI_SetActiveMenu(elemName, value[, flags]) -----
+// Root call for ALL METIS HUD rendering. Called from CG_HudElem_SetIntPair,
+// CG_HudElem_SetFloatPair, CG_DrawFPS, CG_DrawTimerHUD, CG_Init, etc.
+// elemName: METIS widget name e.g. "hud_health", "hud_armor", "hud_ammo", "hud_fps"
+// value:    formatted string (float value, shader path, or text)
+// flags:    0 normally; callers passing 2 args are cdecl so flags will be garbage—ignore.
+static void CG_UI_SetActiveMenu( const char *elemName, const char *value, int /*flags*/ ) {
+	if ( !elemName ) return;
+	const char *v = value ? value : "";
+	s_hudActive = qtrue;
+
+	if      ( !Q_stricmp(elemName, "hud_health")    ) { s_hudHealth = (float)atof(v); }
+	else if ( !Q_stricmp(elemName, "hud_armor")     ) { s_hudArmor  = (float)atof(v); }
+	else if ( !Q_stricmp(elemName, "hud_weapon")    ) { Q_strncpyz(s_hudWeapon,   v, sizeof(s_hudWeapon));   }
+	else if ( !Q_stricmp(elemName, "hud_ammo")      ) { Q_strncpyz(s_hudAmmo,     v, sizeof(s_hudAmmo));     }
+	else if ( !Q_stricmp(elemName, "hud_ammo_clip") ) { Q_strncpyz(s_hudAmmoClip, v, sizeof(s_hudAmmoClip)); }
+	else if ( !Q_stricmp(elemName, "hud_fps")       ) { Q_strncpyz(s_hudFps,      v, sizeof(s_hudFps));      }
 }
 
 // ----- Slot 59: UI_LoadMenuData(menuData, category) -----
@@ -2710,24 +2944,26 @@ static void CG_FlushReliableEvents( void ) {
 	}
 }
 
+// Draw a filled rectangle using the solid *white shader.
+// pct in [0,1]; bar is bw pixels wide at (bx, by) with height bh.
+static void CG_DrawHUDBar( qhandle_t sh, int bx, int by, int bw, int bh,
+                            float pct, const float *fillColor, const float *bgColor ) {
+	re.SetColor( bgColor );
+	re.DrawStretchPic( (float)bx, (float)by, (float)bw, (float)bh,
+	                   0.0f, 0.0f, 1.0f, 1.0f, sh );
+	if ( pct > 0.0f ) {
+		re.SetColor( fillColor );
+		re.DrawStretchPic( (float)bx, (float)by, (float)bw * pct, (float)bh,
+		                   0.0f, 0.0f, 1.0f, 1.0f, sh );
+	}
+}
+
 static void CG_UI_HudRefresh( void ) {
-	static qboolean logged = qfalse;
-
-	if ( uie && uie->UI_Refresh ) {
-		if ( !logged ) {
-			Com_Printf( "[CG] slot 58 -> UI_Refresh\n" );
-			logged = qtrue;
-		}
-		uie->UI_Refresh();
-		return;
-	}
-
-	if ( !logged ) {
-		Com_Printf( "[CG] slot 58 fallback -> Menu_PaintAll\n" );
-		logged = qtrue;
-	}
-
-	Menu_PaintAll();
+	// No-op: bar drawing moved to CL_DrawSOF2Hud() which is called at the
+	// end of CL_CGameRendering(), after cge->DrawInformation() returns.
+	// Drawing here (inside the cgame's CG_DrawActive) caused flashing because
+	// CG_DrawActive returns early during snapshot transitions (cg_snap == NULL,
+	// levelshot flag, pm_type == 4), so bars disappeared on those frames.
 }
 
 // ----- Slot 53: R_SetupFrustum -----
@@ -3746,9 +3982,13 @@ qboolean CL_InitSOF2CGame( void ) {
 		// CG_Entity_EmitFireParticle (×2). Called every frame.
 		slots[65] = (void *)CM_PointContents;                // [65] CM_PointContents ← verified CRITICAL FIX
 
-		// --- METIS UI stubs 59, 61, 62 ---
-		// These are SOF2-specific UI helper imports for menu/loading screen management.
-		// Verified via Ghidra xref decompilation of CG_LoadInventoryMenus, CG_SetLoadingLevelshot.
+		// --- METIS UI stubs 26, 58, 59, 61, 62 ---
+		// Slot 26 = cgi_UI_SetActiveMenu: root call for ALL HUD element rendering.
+		// All METIS widget updates (health, armor, ammo, weapon, fps, timer) flow here.
+		// Verified via Ghidra xrefs: CG_HudElem_SetIntPair, CG_HudElem_SetFloatPair,
+		// CG_DrawFPS, CG_DrawTimerHUD, CG_DrawFlashlight, CG_Init, etc.
+		slots[26] = (void *)CG_UI_SetActiveMenu;             // [26] cgi_UI_SetActiveMenu ← VERIFIED root HUD call
+		// Slots 58-62 verified via Ghidra xref decompilation of CG_LoadInventoryMenus, CG_SetLoadingLevelshot.
 		slots[58] = (void *)CG_UI_HudRefresh;                // [58] HUD/UI per-frame refresh
 		slots[59] = (void *)CG_UI_LoadMenuData;              // [59] UI_LoadMenuData ← verified
 		slots[61] = (void *)CG_UI_MenuReset;                 // [61] UI_MenuReset ← verified
@@ -6018,6 +6258,66 @@ qboolean CL_GameCommand( void ) {
 
 /*
 =====================
+CL_DrawSOF2Hud
+==============
+Draw the SOF2 health/armor HUD bars after the cgame has finished rendering.
+Called from CL_CGameRendering() so it runs unconditionally regardless of cgame
+snapshot state.  Reads directly from cl.frame.ps.stats to avoid the METIS
+slider animation delay (slider starts at 0 on each cgame DLL load).
+*/
+static void CL_DrawSOF2Hud( void ) {
+	if ( cls.state != CA_ACTIVE ) return;
+
+	// stats[0]=STAT_HEALTH, stats[1]=STAT_ARMOR, stats[6]=STAT_MAX_HEALTH
+	int maxHp = cl.frame.ps.stats[6];
+	if ( maxHp <= 0 ) {
+		if ( cl.frame.ps.stats[0] == 0 ) return;  // no valid snapshot yet
+		maxHp = 100;
+	}
+
+	float hpFrac = (float)cl.frame.ps.stats[0] / (float)maxHp;
+	float arFrac = (float)cl.frame.ps.stats[1] / (float)maxHp;
+
+	// Debug: log raw stat values once per map load so we can verify the values are correct.
+	static int s_hudDebugSpawn = -1;
+	int curSpawn = cl.frame.ps.persistant[PERS_SPAWN_COUNT];
+	if ( s_hudDebugSpawn != curSpawn ) {
+		s_hudDebugSpawn = curSpawn;
+		Com_Printf( "[HUD] stats[0]=%d stats[1]=%d stats[6]=%d  hpFrac=%.3f arFrac=%.3f\n",
+			cl.frame.ps.stats[0], cl.frame.ps.stats[1], cl.frame.ps.stats[6],
+			hpFrac, arFrac );
+	}
+
+	if ( hpFrac < 0.0f ) hpFrac = 0.0f;
+	if ( hpFrac > 1.0f ) hpFrac = 1.0f;
+	if ( arFrac < 0.0f ) arFrac = 0.0f;
+	if ( arFrac > 1.0f ) arFrac = 1.0f;
+
+	static qhandle_t sh = 0;
+	if ( !sh ) sh = re.RegisterShaderNoMip( "*white" );
+	if ( !sh ) return;
+
+	int sw = cls.glconfig.vidWidth  > 0 ? cls.glconfig.vidWidth  : 640;
+	int svh = cls.glconfig.vidHeight > 0 ? cls.glconfig.vidHeight : 480;
+
+	int barW  = sw / 3;
+	int barH  = sw >= 1280 ? 20 : 14;
+	int barBx = (sw - barW) / 2;
+	int hpY   = svh - barH - 8;
+	int arW   = barW;          // same width as health bar (user preference)
+	int arY   = hpY - barH - 4;
+
+	static const float bgColor[4] = { 0.06f, 0.05f, 0.04f, 0.85f };
+	static const float hpColor[4] = { 0.82f, 0.10f, 0.05f, 1.00f };
+	static const float arColor[4] = { 0.52f, 0.55f, 0.52f, 1.00f };
+
+	CG_DrawHUDBar( sh, barBx, hpY, barW, barH, hpFrac, hpColor, bgColor );
+	CG_DrawHUDBar( sh, barBx, arY, arW,  barH, arFrac, arColor, bgColor );
+	re.SetColor( NULL );
+}
+
+/*
+=====================
 CL_CGameRendering
 =====================
 */
@@ -6106,6 +6406,36 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		}
 	}
 
+	// Populate cgs_inlineDrawModel[N] for BSP brush movers (doors, lifts, etc.).
+	// CG_RegisterGraphics tries "*0" first; OpenJK R_RegisterModel("*0") returns 0,
+	// breaking the loop before any brush models are registered.
+	// cgs_inlineDrawModel base: 0x301ad93c (confirmed via Ghidra disasm of CG_Mover).
+	// We start at N=1 to skip the world BSP (index 0), matching the OpenJK cgame pattern.
+	{
+		static bool s_inlineModelsRegistered = false;
+		if ( !s_inlineModelsRegistered ) {
+			s_inlineModelsRegistered = true;
+			int numInline = CM_NumInlineModels();
+			volatile unsigned int *pInlineDrawModel = reinterpret_cast<volatile unsigned int *>( 0x301ad93c );
+			int registeredCount = 0;
+			for ( int n = 1; n < numInline; n++ ) {
+				char modelName[16];
+				Com_sprintf( modelName, sizeof(modelName), "*%d", n );
+				unsigned int handle = (unsigned int)re.RegisterModel( modelName );
+				if ( handle == 0 ) {
+					Com_Printf( "[CG] InlineModels[%d]: '%s' returned 0\n", n, modelName );
+					continue;
+				}
+				pInlineDrawModel[n] = handle;
+				if ( registeredCount < 20 ) {
+					Com_Printf( "[CG] InlineModels[%d]: handle=0x%x\n", n, handle );
+				}
+				registeredCount++;
+			}
+			Com_Printf( "[CG] InlineModels: registered %d/%d brush models\n", registeredCount, numInline - 1 );
+		}
+	}
+
 	// Footstep sound cleanup: stop ch=6/7 after FOOTSTEP_STOP_MS of no footstep events.
 	// Handles looping WAVs that don't self-terminate when the player halts.
 	{
@@ -6138,6 +6468,13 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 			(int)stereo );
 		renderLogCount++;
 	}
+	// Register third-person cvars once
+	if ( !cg_thirdPerson ) {
+		cg_thirdPerson      = Cvar_Get( "cg_thirdPerson",      "0",   CVAR_ARCHIVE );
+		cg_thirdPersonRange  = Cvar_Get( "cg_thirdPersonRange",  "80",  CVAR_ARCHIVE );
+		cg_thirdPersonHeight = Cvar_Get( "cg_thirdPersonHeight", "16",  CVAR_ARCHIVE );
+	}
+
 	s_cgRenderDepth++;
 	s_renderSceneSubmitted = qfalse;
 	s_firstSubmittedRefdefValid = qfalse;
@@ -6170,6 +6507,28 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		s_lastGoodRefdef.vieworg[2] += forcedViewHeight;
 		AnglesToAxis( fallbackAngles, s_lastGoodRefdef.viewaxis );
 		memset( s_lastGoodRefdef.areamask, 0x00, sizeof( s_lastGoodRefdef.areamask ) );
+
+		// Apply the same third-person camera as the main submit path
+		if ( cg_thirdPerson && cg_thirdPerson->integer ) {
+			float range  = ( cg_thirdPersonRange  && cg_thirdPersonRange->value  > 0 ) ? cg_thirdPersonRange->value  : 120.0f;
+			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 48.0f;
+			vec3_t hFwd = { s_lastGoodRefdef.viewaxis[0][0], s_lastGoodRefdef.viewaxis[0][1], 0.0f };
+			VectorNormalize( hFwd );
+			s_lastGoodRefdef.vieworg[0] -= hFwd[0] * range;
+			s_lastGoodRefdef.vieworg[1] -= hFwd[1] * range;
+			s_lastGoodRefdef.vieworg[2] += height;
+			vec3_t charWaist;
+			VectorCopy( cl.frame.ps.origin, charWaist );
+			charWaist[2] += 40.0f;
+			vec3_t toChar;
+			VectorSubtract( charWaist, s_lastGoodRefdef.vieworg, toChar );
+			if ( VectorNormalize( toChar ) > 1.0f ) {
+				vec3_t camAngles;
+				vectoangles( toChar, camAngles );
+				AnglesToAxis( camAngles, s_lastGoodRefdef.viewaxis );
+			}
+		}
+
 		if ( s_cgLastRefEntityCount > 0 ) {
 			static int fallbackReplayLogCount = 0;
 			for ( int i = 0; i < s_cgLastRefEntityCount; ++i ) {
@@ -6185,8 +6544,14 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 			}
 		}
 		CG_DebugAddCharacterProbe( &s_lastGoodRefdef );
+		CG_AddPlayerBodyToScene( &s_lastGoodRefdef );
 		re.RenderScene( &s_lastGoodRefdef );
 	}
+
+	// Draw SOF2 health/armor bars unconditionally after all 3D rendering is done.
+	// Must be outside cge->DrawInformation() so it runs even when CG_DrawActive
+	// returns early (cg_snap == NULL, levelshot flag, pm_type == 4).
+	CL_DrawSOF2Hud();
 }
 
 

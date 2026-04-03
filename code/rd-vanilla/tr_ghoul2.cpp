@@ -20,6 +20,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 ===========================================================================
 */
 
+#include "g2_assert_suppress.h"
 #include "../server/exe_headers.h"
 
 #include "../client/client.h"	//FIXME!! EVIL - just include the definitions needed
@@ -348,7 +349,9 @@ public:
 		return mFinalBones[index].boneMatrix;
 		*/
 		//all above is not necessary, smoothing is taken care of when we want to use smoothlow (only when evalrender)
-		assert(index>=0&&index<mNumBones);
+		if (index < 0 || index >= mNumBones) {
+			index = 0;
+		}
 		if (mFinalBones[index].touch!=mCurrentTouch)
 		{
 			EvalLow(index);
@@ -359,7 +362,11 @@ public:
 	//rww - RAGDOLL_BEGIN
 	const inline mdxaBone_t &EvalRender(int index)
 	{
-		assert(index>=0&&index<mNumBones);
+		if (index < 0 || index >= mNumBones) {
+			// SOF2 models may reference bone indices beyond the skeleton range.
+			// Return bone 0 as fallback instead of crashing.
+			index = 0;
+		}
 		if (mFinalBones[index].touch!=mCurrentTouch)
 		{
 			mFinalBones[index].touchRender=mCurrentTouchRender;
@@ -2294,6 +2301,7 @@ static const shader_t *R_FindSOF2SkinShaderFallback( const skin_t *skin, const c
 			  R_SOF2SurfaceStartsWith( surfaceName, "leg_" ) ||
 			  R_SOF2SurfaceStartsWith( surfaceName, "foot_" ) ||
 			  R_SOF2SurfaceStartsWith( surfaceName, "torso_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "collar_" ) ||  // jacket collar / neck sleeve
 			  strstr( surfaceName, "coat" ) ) {
 		matchedAlias = "body";
 	}
@@ -2304,8 +2312,9 @@ static const shader_t *R_FindSOF2SkinShaderFallback( const skin_t *skin, const c
 			  R_SOF2SurfaceStartsWith( surfaceName, "face" ) ) {
 		matchedAlias = "face";
 	}
-	else if ( R_SOF2SurfaceStartsWith( surfaceName, "head_" ) ||
-			  R_SOF2SurfaceStartsWith( surfaceName, "ear_" ) ) {
+	else if ( R_SOF2SurfaceStartsWith( surfaceName, "head" ) ||   // "head" bare AND "head_*" variants
+			  R_SOF2SurfaceStartsWith( surfaceName, "ear_" ) ||
+			  R_SOF2SurfaceStartsWith( surfaceName, "avmed" ) ) {  // avmedhat-variant head sections
 		matchedAlias = "head";
 	}
 

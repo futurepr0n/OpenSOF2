@@ -1017,8 +1017,7 @@ public:
 	int			mParticleCount;
 
 	bool		mWaterParticles;
-
-
+	CVec3		mBaseVelocity;		// SOF2 "rain fall ( x y )" — initial drift velocity on respawn
 
 
 public:
@@ -1097,6 +1096,8 @@ public:
 		mSpawnRange.mMaxs	=  (mSpawnPlaneDistance*1.25f);
 
 		mGravity			= 300.0f;	// Units Per Second
+
+		mBaseVelocity.Clear();
 
 		mColor				= 1.0f;
 
@@ -1329,7 +1330,7 @@ public:
 			//-----------------
 			if (!partInRange && !partRendering)
 			{
-				part->mVelocity.Clear();
+				part->mVelocity = mBaseVelocity;	// SOF2 "rain fall" drift
 
 				// Reselect A Position On The Spawn Plane
 				//----------------------------------------
@@ -1926,8 +1927,9 @@ void R_WorldEffectCommand(const char *command)
 	}
 
 	// Create A Rain Storm
-	// SOF2 sends "rain init <count>" to initialize, plus "rain fog/height/alpha/..." as modifiers.
-	// Only create a cloud for "rain init"; silently ignore other rain subcommands.
+	// SOF2 sends "rain init <count>" to initialize, then modifier subcommands.
+	// Handle: init (create cloud), alpha (opacity), fall (drift velocity), height (streak height).
+	// Silently ignore: fog, spread, angle, and other unrecognized subcommands.
 	//---------------------
 	else if (Q_stricmp(token, "rain") == 0)
 	{
@@ -1955,7 +1957,36 @@ void R_WorldEffectCommand(const char *command)
 				Com_DPrintf("WE: rain init %d — cloud created (%d total)\n", count, (int)mParticleClouds.size());
 			}
 		}
-		// else: "rain fog", "rain height", "rain alpha", etc. — modifier subcommands, ignore silently
+		else if (Q_stricmp(token, "alpha") == 0)
+		{
+			// "rain alpha <float>" -- set max opacity for the active rain cloud
+			token = COM_ParseExt(&command, qfalse);
+			if (token[0] && !mParticleClouds.empty())
+			{
+				mParticleClouds[mParticleClouds.size()-1].mColor[3] = (float)atof(token);
+			}
+		}
+		else if (Q_stricmp(token, "fall") == 0)
+		{
+			// "rain fall ( dx dy )" -- SOF2 lateral drift in world X/Y (units/s)
+			float fall[2];
+			if (WE_ParseVector(&command, 2, fall) && !mParticleClouds.empty())
+			{
+				mParticleClouds[mParticleClouds.size()-1].mBaseVelocity[0] = fall[0];
+				mParticleClouds[mParticleClouds.size()-1].mBaseVelocity[1] = fall[1];
+				mParticleClouds[mParticleClouds.size()-1].mBaseVelocity[2] = 0.0f;
+			}
+		}
+		else if (Q_stricmp(token, "height") == 0)
+		{
+			// "rain height <float>" -- particle streak height in world units
+			token = COM_ParseExt(&command, qfalse);
+			if (token[0] && !mParticleClouds.empty())
+			{
+				mParticleClouds[mParticleClouds.size()-1].mHeight = (float)atof(token);
+			}
+		}
+		// else: "rain fog", "rain spread", "rain angle", etc. -- ignore silently
 	}
 
 	// Create A Rain Storm
