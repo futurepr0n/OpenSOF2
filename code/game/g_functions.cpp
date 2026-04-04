@@ -180,6 +180,7 @@ void GEntity_ReachedFunc(gentity_t *self)
 	REACHEDCASE( Reached_Train )
 	REACHEDCASE( moverCallback )
 	REACHEDCASE( moveAndRotateCallback )
+	REACHEDCASE( Reached_DoorRotating )
 
 	default:
 		Com_Error(ERR_DROP, "GEntity_ReachedFunc: case %d not handled!\n",self->e_ReachedFunc);
@@ -259,6 +260,7 @@ void GEntity_UseFunc(gentity_t *self, gentity_t *other, gentity_t *activator)
 	USECASE( Use_Shooter )
 	USECASE( GoExplodeDeath )
 	USECASE( Use_BinaryMover )
+	USECASE( Use_DoorRotating )
 	USECASE( use_wall )
 	USECASE( Use_Target_Give )
 	USECASE( Use_Target_Delay )

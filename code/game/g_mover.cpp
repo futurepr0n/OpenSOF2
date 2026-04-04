@@ -553,6 +553,14 @@ void G_MoverTeam( gentity_t *ent ) {
 				GEntity_ReachedFunc( part );
 			}
 		}
+		// Also check angular completion for door_rotating entities
+		if ( part->s.apos.trType == TR_LINEAR_STOP )
+		{
+			if ( level.time >= part->s.apos.trTime + part->s.apos.trDuration )
+			{
+				GEntity_ReachedFunc( part );
+			}
+		}
 	}
 }
 
@@ -2356,6 +2364,97 @@ void SP_func_rotating (gentity_t *ent) {
 		ent->e_TouchFunc = touchF_func_rotating_touch;
 		G_SoundIndex( "sound/effects/energy_crackle.wav" );
 	}
+
+	gi.linkentity( ent );
+}
+
+
+/*
+===============================================================================
+
+DOOR_ROTATING — triggered rotating door that stops at pos2
+
+===============================================================================
+*/
+
+void Reached_DoorRotating( gentity_t *ent )
+{
+	ent->s.loopSound = 0;
+	VectorCopy( ent->pos2, ent->s.apos.trBase );
+	VectorClear( ent->s.apos.trDelta );
+	ent->s.apos.trType = TR_STATIONARY;
+	VectorCopy( ent->pos2, ent->currentAngles );
+	ent->moverState = MOVER_POS2;
+	ent->e_ThinkFunc = thinkF_NULL;
+	ent->nextthink = -1;
+	gi.linkentity( ent );
+}
+
+void Use_DoorRotating( gentity_t *self, gentity_t *other, gentity_t *activator )
+{
+	if ( self->moverState != MOVER_POS1 )
+		return; // already moving or already open
+
+	vec3_t delta;
+	VectorSubtract( self->pos2, self->pos1, delta );
+	float distance = fabs( delta[0] ) + fabs( delta[1] ) + fabs( delta[2] );
+	if ( !self->speed )
+		self->speed = 100.0f;
+	int duration = (int)( distance / self->speed * 1000.0f );
+	if ( duration < 1 )
+		duration = 1;
+
+	VectorCopy( self->pos1, self->s.apos.trBase );
+	float f = 1000.0f / (float)duration;
+	VectorScale( delta, f, self->s.apos.trDelta );
+	self->s.apos.trDuration = duration;
+	self->s.apos.trTime = level.time;
+	self->s.apos.trType = TR_LINEAR_STOP;
+	self->moverState = MOVER_1TO2;
+	self->e_ReachedFunc = reachedF_Reached_DoorRotating;
+	gi.linkentity( self );
+}
+
+void SP_door_rotating( gentity_t *ent )
+{
+	gi.SetBrushModel( ent, ent->model );
+
+	if ( !ent->speed )
+		ent->speed = 100.0f;
+
+	// pos1 = starting angles, pos2 = open angles
+	VectorCopy( ent->s.angles, ent->pos1 );
+	VectorCopy( ent->pos1, ent->pos2 );
+
+	float distance;
+	G_SpawnFloat( "distance", "90", &distance );
+	if ( !distance )
+		distance = 90.0f;
+
+	// Default rotation axis is yaw (Z). Spawnflag 8=pitch, 4=roll (matching func_rotating convention)
+	if ( ent->spawnflags & 8 )
+		ent->pos2[PITCH] += distance;
+	else if ( ent->spawnflags & 4 )
+		ent->pos2[ROLL] += distance;
+	else
+		ent->pos2[YAW] += distance;
+
+	ent->s.eType = ET_MOVER;
+	ent->svFlags = SVF_USE_CURRENT_ORIGIN;
+	ent->moverState = MOVER_POS1;
+
+	ent->s.apos.trType = TR_STATIONARY;
+	VectorCopy( ent->pos1, ent->s.apos.trBase );
+	VectorClear( ent->s.apos.trDelta );
+	VectorCopy( ent->pos1, ent->currentAngles );
+
+	ent->s.pos.trType = TR_STATIONARY;
+	VectorCopy( ent->s.origin, ent->s.pos.trBase );
+	VectorCopy( ent->s.origin, ent->currentOrigin );
+
+	ent->e_UseFunc = useF_Use_DoorRotating;
+	ent->e_ReachedFunc = reachedF_Reached_DoorRotating;
+	ent->e_ThinkFunc = thinkF_NULL;
 
 	gi.linkentity( ent );
 }

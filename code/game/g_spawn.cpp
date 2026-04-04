@@ -388,6 +388,7 @@ void SP_info_thirdplace(gentity_t *ent);
 void SP_func_plat (gentity_t *ent);
 void SP_func_static (gentity_t *ent);
 void SP_func_rotating (gentity_t *ent);
+void SP_door_rotating (gentity_t *ent);
 void SP_func_bobbing (gentity_t *ent);
 void SP_func_breakable (gentity_t *self);
 void SP_func_glass( gentity_t *self );
@@ -871,7 +872,7 @@ spawn_t	spawns[] = {
 	// SOF2 entity classname aliases — map SOF2 entity types to nearest OpenJK equivalents
 	{"func_breakable_brush",            SP_func_breakable},
 	{"script_runner",                   SP_target_scriptrunner},
-	{"door_rotating",                   SP_func_rotating},
+	{"door_rotating",                   SP_door_rotating},
 	{"trigger_body_check",              SP_trigger_multiple},
 	{"NPC_Czech_Lookout",               SP_NPC_Stormtrooper},
 	{"NPC_Czech_Rain_Commando",         SP_NPC_StormtrooperOfficer},

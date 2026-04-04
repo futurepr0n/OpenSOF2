@@ -2331,24 +2331,25 @@ static void CG_SubmitSOF2Refdef( refdef_t *localRefdef ) {
 		// Renderer treats 1 bits as hidden areas. Zero means "all areas visible".
 		memset( localRefdef->areamask, 0x00, sizeof( localRefdef->areamask ) );
 
-		// Third-person camera: pull back along horizontal forward, rise up, orient toward character
+		// Third-person camera: orbit around player using full 3-axis view direction.
+		// Pulling back along viewaxis[0] (which includes pitch) means mouse-up/down
+		// moves the camera vertically as expected.
 		if ( cg_thirdPerson && cg_thirdPerson->integer ) {
 			float range  = ( cg_thirdPersonRange  && cg_thirdPersonRange->value  > 0 ) ? cg_thirdPersonRange->value  : 120.0f;
-			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 48.0f;
+			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 20.0f;
 
-			// Use horizontal-only forward for position (ignore pitch so height is clean)
-			vec3_t hFwd = { localRefdef->viewaxis[0][0], localRefdef->viewaxis[0][1], 0.0f };
-			VectorNormalize( hFwd );
-			localRefdef->vieworg[0] -= hFwd[0] * range;
-			localRefdef->vieworg[1] -= hFwd[1] * range;
+			// Pull camera back along full view forward (includes pitch for vertical orbit)
+			localRefdef->vieworg[0] -= localRefdef->viewaxis[0][0] * range;
+			localRefdef->vieworg[1] -= localRefdef->viewaxis[0][1] * range;
+			localRefdef->vieworg[2] -= localRefdef->viewaxis[0][2] * range;
 			localRefdef->vieworg[2] += height;
 
-			// Aim camera at character's waist so they stay centered in view
-			vec3_t charWaist;
-			VectorCopy( cl.frame.ps.origin, charWaist );
-			charWaist[2] += 40.0f;
+			// Aim camera at character eye so they stay centred
+			vec3_t charEye;
+			VectorCopy( cl.frame.ps.origin, charEye );
+			charEye[2] += forcedViewHeight;
 			vec3_t toChar;
-			VectorSubtract( charWaist, localRefdef->vieworg, toChar );
+			VectorSubtract( charEye, localRefdef->vieworg, toChar );
 			if ( VectorNormalize( toChar ) > 1.0f ) {
 				vec3_t camAngles;
 				vectoangles( toChar, camAngles );
@@ -3215,6 +3216,13 @@ static qboolean CL_GetSnapshot_wrapper( int snapshotNumber, snapshot_t *snapshot
 	qboolean result = CL_GetSnapshot( snapshotNumber, snapshot );
 	if ( !result || !snapshot ) return result;
 
+	// Clear SNAPFLAG_NOT_ACTIVE (bit 1 = 0x02) from snapFlags.
+	// OpenJK server sets this bit via (droppedCommands << 1) when client commands are dropped.
+	// Native SOF2 CG_DrawInformation checks (*cg_snap & 2) and skips the ENTIRE frame
+	// (no RenderScene, no CG_DrawActive) when it is set — causing intermittent HUD flicker.
+	// During active gameplay a dropped-command snapshot is still valid and should render normally.
+	snapshot->snapFlags &= ~2;
+
 	// Suppress GLM model rendering by native cgame.
 	// CG_General uses cgs.gameModels[modelindex] → hModel; if hModel != 0 it calls
 	// R_AddRefEntityToScene even with ghoul2=NULL, producing a default-model render at
@@ -3651,6 +3659,16 @@ qboolean CL_InitSOF2CGame( void ) {
 		// Re-enable weather effects while keeping only lightweight crash isolation.
 		// CL_PatchDllRet( hCgame, 0x00AC50, "CG_DrawRaindrops" );
 		CL_PatchDllRet( hCgame, 0x00B180, "CG_DrawFPS" );
+
+		// CG_DrawInformation early-return #2 (RVA 0x3174b): JNZ 0x30031adf fires when
+		// (*cg_snap & 2) != 0. The native SOF2 snapshot struct has serverTime at offset 0
+		// (not snapFlags), so bit 1 of *cg_snap is the low bit of serverTime's second bit —
+		// set ~50% of frames. This causes CG_DrawActive (crosshair, HUD etc.) to be skipped
+		// on those frames, producing the observed flickering. NOP the 6-byte near JNZ so
+		// CG_DrawInformation always proceeds past this gate regardless of serverTime.
+		static const unsigned char nop6[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+		CL_PatchDllBytes( hCgame, 0x3174b, nop6, sizeof( nop6 ), "CG_DrawInformation_snapCheck" );
+
 		// HUD/sprite paths are now live for parity with retail presentation:
 		// CG_DrawTimerHUD, CG_DrawCrosshairHitMarker, CG_DrawScopeOverlay,
 		// CG_DrawCorpseMarkers, CG_Draw2DSprites, CG_DrawVehicleDirection.
@@ -6511,17 +6529,16 @@ void CL_CGameRendering( stereoFrame_t stereo ) {
 		// Apply the same third-person camera as the main submit path
 		if ( cg_thirdPerson && cg_thirdPerson->integer ) {
 			float range  = ( cg_thirdPersonRange  && cg_thirdPersonRange->value  > 0 ) ? cg_thirdPersonRange->value  : 120.0f;
-			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 48.0f;
-			vec3_t hFwd = { s_lastGoodRefdef.viewaxis[0][0], s_lastGoodRefdef.viewaxis[0][1], 0.0f };
-			VectorNormalize( hFwd );
-			s_lastGoodRefdef.vieworg[0] -= hFwd[0] * range;
-			s_lastGoodRefdef.vieworg[1] -= hFwd[1] * range;
+			float height = ( cg_thirdPersonHeight && cg_thirdPersonHeight->value > 0 ) ? cg_thirdPersonHeight->value : 20.0f;
+			s_lastGoodRefdef.vieworg[0] -= s_lastGoodRefdef.viewaxis[0][0] * range;
+			s_lastGoodRefdef.vieworg[1] -= s_lastGoodRefdef.viewaxis[0][1] * range;
+			s_lastGoodRefdef.vieworg[2] -= s_lastGoodRefdef.viewaxis[0][2] * range;
 			s_lastGoodRefdef.vieworg[2] += height;
-			vec3_t charWaist;
-			VectorCopy( cl.frame.ps.origin, charWaist );
-			charWaist[2] += 40.0f;
+			vec3_t charEye;
+			VectorCopy( cl.frame.ps.origin, charEye );
+			charEye[2] += forcedViewHeight;
 			vec3_t toChar;
-			VectorSubtract( charWaist, s_lastGoodRefdef.vieworg, toChar );
+			VectorSubtract( charEye, s_lastGoodRefdef.vieworg, toChar );
 			if ( VectorNormalize( toChar ) > 1.0f ) {
 				vec3_t camAngles;
 				vectoangles( toChar, camAngles );

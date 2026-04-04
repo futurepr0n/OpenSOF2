@@ -275,7 +275,8 @@ typedef enum
 	reachedF_Reached_BinaryMover,
 	reachedF_Reached_Train,
 	reachedF_moverCallback,
-	reachedF_moveAndRotateCallback
+	reachedF_moveAndRotateCallback,
+	reachedF_Reached_DoorRotating
 
 } reachedFunc_t;
 
@@ -285,6 +286,7 @@ extern void Reached_BinaryMover	( gentity_t *ent );
 extern void Reached_Train		( gentity_t *ent );
 extern void moverCallback		( gentity_t *ent );
 extern void moveAndRotateCallback( gentity_t *ent );
+extern void Reached_DoorRotating( gentity_t *ent );
 
 
 //	void		(*blocked)(gentity_t *self, gentity_t *other);
@@ -362,6 +364,7 @@ typedef enum
 	useF_Use_Shooter,
 	useF_GoExplodeDeath,
 	useF_Use_BinaryMover,
+	useF_Use_DoorRotating,
 	useF_use_wall,
 	useF_Use_Target_Give,
 	useF_Use_Target_Delay,
@@ -444,6 +447,7 @@ extern void Use_Item				( gentity_t *self, gentity_t *other, gentity_t *activato
 extern void Use_Shooter				( gentity_t *self, gentity_t *other, gentity_t *activator);
 extern void GoExplodeDeath			( gentity_t *self, gentity_t *other, gentity_t *activator);
 extern void Use_BinaryMover			( gentity_t *self, gentity_t *other, gentity_t *activator);
+extern void Use_DoorRotating		( gentity_t *self, gentity_t *other, gentity_t *activator);
 extern void use_wall				( gentity_t *self, gentity_t *other, gentity_t *activator);
 extern void Use_Target_Give			( gentity_t *self, gentity_t *other, gentity_t *activator);
 extern void Use_Target_Delay		( gentity_t *self, gentity_t *other, gentity_t *activator);
