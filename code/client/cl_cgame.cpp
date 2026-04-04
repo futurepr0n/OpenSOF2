@@ -1034,15 +1034,27 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 #define SOF2_PLAYER_BODY_MODEL "models/characters/average_sleeves/average_sleeves.glm"
 
 // Bone animation frame ranges (from average_sleeves.frames)
-#define SOF2_ANIM_IDLE_START  25920
-#define SOF2_ANIM_IDLE_END    25960  // start+duration-1
-#define SOF2_ANIM_IDLE_FPS    10
-#define SOF2_ANIM_WALK_START  10827
-#define SOF2_ANIM_WALK_END    10850  // start+duration-1
-#define SOF2_ANIM_WALK_FPS    20
-#define SOF2_ANIM_RUN_START   10805
-#define SOF2_ANIM_RUN_END     10816  // start+duration-1
-#define SOF2_ANIM_RUN_FPS     20
+#define SOF2_ANIM_IDLE_START         25920
+#define SOF2_ANIM_IDLE_END           25960  // start+duration(41)-1
+#define SOF2_ANIM_IDLE_FPS           10
+#define SOF2_ANIM_WALK_START         10827
+#define SOF2_ANIM_WALK_END           10850  // start+duration(24)-1
+#define SOF2_ANIM_WALK_FPS           20
+#define SOF2_ANIM_RUN_START          10805
+#define SOF2_ANIM_RUN_END            10816  // start+duration(12)-1
+#define SOF2_ANIM_RUN_FPS            20
+// jumprunacross01: the in-air animation (play-once, holds last frame while airborne)
+#define SOF2_ANIM_JUMP_START         3468
+#define SOF2_ANIM_JUMP_END           3490   // start+duration(23)-1
+#define SOF2_ANIM_JUMP_FPS           20
+// sof2_male01_normalcrouch_breathe01: crouch idle (looped)
+#define SOF2_ANIM_CROUCH_IDLE_START  25086
+#define SOF2_ANIM_CROUCH_IDLE_END    25125  // start+duration(40)-1
+#define SOF2_ANIM_CROUCH_IDLE_FPS    10
+// 000crouchwalk01: crouch walk (looped)
+#define SOF2_ANIM_CROUCH_WALK_START  10945
+#define SOF2_ANIM_CROUCH_WALK_END    10969  // start+duration(25)-1
+#define SOF2_ANIM_CROUCH_WALK_FPS    20
 
 // Speed thresholds (units/second) for animation selection
 #define SOF2_SPEED_WALK  30.0f
@@ -1050,7 +1062,7 @@ static void CG_AddStaticGlmProps( const refdef_t *refdef ) {
 
 static CGhoul2Info_v s_playerBodyG2;
 static qhandle_t     s_playerBodyModel = 0;
-static int           s_playerBodyLastAnim = -1;  // -1=uninit, 0=idle, 1=walk, 2=run
+static int           s_playerBodyLastAnim = -1;  // -1=uninit, 0=idle, 1=walk, 2=run, 3=jump, 4=crouch-idle, 5=crouch-walk
 
 static qhandle_t s_playerBodySkin = 0;
 
@@ -1098,17 +1110,20 @@ static void CG_PlayerBody_SetAnim( int animId, int serverTime ) {
 	if ( s_playerBodyG2.size() <= 0 ) return;
 
 	int startFrame, endFrame, fps;
+	int animFlags = BONE_ANIM_OVERRIDE_LOOP;  // default: looping
 	switch ( animId ) {
-		case 1:  startFrame = SOF2_ANIM_WALK_START; endFrame = SOF2_ANIM_WALK_END; fps = SOF2_ANIM_WALK_FPS; break;
-		case 2:  startFrame = SOF2_ANIM_RUN_START;  endFrame = SOF2_ANIM_RUN_END;  fps = SOF2_ANIM_RUN_FPS;  break;
-		default: startFrame = SOF2_ANIM_IDLE_START; endFrame = SOF2_ANIM_IDLE_END; fps = SOF2_ANIM_IDLE_FPS; break;
+		case 1:  startFrame = SOF2_ANIM_WALK_START;        endFrame = SOF2_ANIM_WALK_END;        fps = SOF2_ANIM_WALK_FPS;        break;
+		case 2:  startFrame = SOF2_ANIM_RUN_START;         endFrame = SOF2_ANIM_RUN_END;          fps = SOF2_ANIM_RUN_FPS;         break;
+		case 3:  startFrame = SOF2_ANIM_JUMP_START;        endFrame = SOF2_ANIM_JUMP_END;         fps = SOF2_ANIM_JUMP_FPS;
+		         animFlags  = BONE_ANIM_OVERRIDE;           break;  // play once, hold last frame
+		case 4:  startFrame = SOF2_ANIM_CROUCH_IDLE_START; endFrame = SOF2_ANIM_CROUCH_IDLE_END;  fps = SOF2_ANIM_CROUCH_IDLE_FPS; break;
+		case 5:  startFrame = SOF2_ANIM_CROUCH_WALK_START; endFrame = SOF2_ANIM_CROUCH_WALK_END;  fps = SOF2_ANIM_CROUCH_WALK_FPS; break;
+		default: startFrame = SOF2_ANIM_IDLE_START;        endFrame = SOF2_ANIM_IDLE_END;         fps = SOF2_ANIM_IDLE_FPS;        break;
 	}
 
-	// Animate with loop flag on the root bone.
-	// s_playerBodyG2[0] is the first (only) model in the set.
 	re.G2API_SetBoneAnim( &s_playerBodyG2[0], "model_root",
 		startFrame, endFrame,
-		BONE_ANIM_OVERRIDE_LOOP,
+		animFlags,
 		1.0f, serverTime, -1, 150 );
 
 	s_playerBodyLastAnim = animId;
@@ -1153,15 +1168,24 @@ static void CG_AddPlayerBodyToScene( const refdef_t *refdef ) {
 	ent.modelScale[1] = 1.0f;
 	ent.modelScale[2] = 1.0f;
 
-	// Drive the body animation from horizontal speed.
-	// model_root is confirmed present in SOF2 cgame (used by CWpnInst_DispatchAnimation etc.)
+	// Drive the body animation from movement state.
+	// Priority: airborne > crouching > speed-based standing.
 	{
+		bool isAirborne = ( ps->groundEntityNum == ENTITYNUM_NONE );
+		bool isDucked   = ( ps->pm_flags & PMF_DUCKED ) != 0;
 		float vx = ps->velocity[0], vy = ps->velocity[1];
 		float speed2 = vx*vx + vy*vy;
+
 		int animId;
-		if      ( speed2 > 180.0f * 180.0f ) animId = 2;  // run
-		else if ( speed2 >  15.0f *  15.0f ) animId = 1;  // walk
-		else                                 animId = 0;  // idle
+		if ( isAirborne ) {
+			animId = 3;  // jump (plays once, holds last frame until landing)
+		} else if ( isDucked ) {
+			animId = ( speed2 > 5.0f * 5.0f ) ? 5 : 4;  // crouch-walk or crouch-idle
+		} else {
+			if      ( speed2 > 180.0f * 180.0f ) animId = 2;  // run
+			else if ( speed2 >  15.0f *  15.0f ) animId = 1;  // walk
+			else                                 animId = 0;  // idle
+		}
 		CG_PlayerBody_SetAnim( animId, refdef->time );
 	}
 
